@@ -1,5 +1,6 @@
 # Builds the Windows installer on GitHub's Windows machines.
 #  - every push to main: installer is attached to the run (Actions tab -> run -> Artifacts)
+#  - every pull request: tests and build run on Windows before merging
 #  - pushing a tag like v1.0.1: installer is also published on the Releases page
 # (build.bat does the same steps on a local Windows PC.)
 name: Build Windows installer
@@ -7,6 +8,8 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
