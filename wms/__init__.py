@@ -2,4 +2,4 @@
 
 APP_NAME = "Store WMS"
 APP_ID = "StoreWMS"
-__version__ = "1.1.0"
+__version__ = "1.2.0"

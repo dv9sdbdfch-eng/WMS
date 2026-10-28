@@ -10,6 +10,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 import pytest
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QDialog, QInputDialog, QMessageBox
 
 from wms.ui.app import App
@@ -63,7 +64,7 @@ def test_every_page_opens(ui, sample):
     app, win, msgs, _ = ui
     sample.receive(sample.mdf, 40)
     keys = list(win.factories)
-    assert len(keys) == 16
+    assert len(keys) == 17
     for key in keys:
         win.go(key)
         page = win.page(key)
@@ -276,3 +277,126 @@ def test_theme_ignores_windows_dark_mode(qapp):
     finally:
         qapp.setPalette(old_pal)
         qapp.setStyleSheet(old_qss)
+
+
+# --- Search screen ---------------------------------------------------------------------------
+
+def _search_page(win):
+    win.go("search")
+    return win.page("search")
+
+
+def test_search_screen_type_results_filter_open(ui, sample):
+    app, win, msgs, opened = ui
+    sample.receive(sample.mdf, 40)
+    page = _search_page(win)
+    page.search_for("mdf")
+    view = page.products_view
+    assert view.count.text() == "1 product" and view.table.items()[0].product.id == sample.mdf.id
+    assert page.tabs.tabText(0) == "Products (1)"
+    row = view.table.items()[0]
+    assert (row.location_text, row.bin_text) == ("MAIN / A / R03 / S02", "B04")
+    page.search_for("B04")
+    assert page.side.isVisible() and "Bin:  B04" in page.matches.item(0).text()
+    page._open_match(page.matches.item(0))
+    assert opened[-1] == "BinContentsDialog"
+    # Nothing found: an explicit message instead of an empty table
+    page.search_for("no-such-thing-zz")
+    assert view.stack.currentWidget() is view.empty and view.count.text() == "No matching records found"
+    assert "No matching records found" in view.empty.text()
+    assert "zz" in app.services.search.recent()[0]
+    assert not _errors(msgs), msgs
+
+
+def test_search_screen_filters_chips_and_clear_all(ui, sample):
+    app, win, msgs, _ = ui
+    sample.receive(sample.mdf, 40)
+    page = _search_page(win)
+    page.filters_btn.click()
+    assert page.panel.isVisible()
+    page.panel.supplier.set_value(sample.supplier.id)
+    page.panel.stock_status.setCurrentIndex(page.panel.stock_status.findData("IN_STOCK"))
+    assert page.criteria.supplier_id == sample.supplier.id and page.criteria.stock_status == "IN_STOCK"
+    chips = [page.chips.itemAt(i).widget().text() for i in range(page.chips.count())
+             if page.chips.itemAt(i).widget() is not None]
+    assert any(t.startswith("Supplier: Egger UK Ltd") for t in chips) and "Clear All Filters" in chips
+    assert page.products_view.count.text() == "1 product"
+    page.remove_filter("supplier_id")  # the x on one chip
+    assert page.criteria.supplier_id is None and page.panel.supplier.value() is None
+    assert page.criteria.stock_status == "IN_STOCK"
+    page.clear_filters()
+    assert not page.criteria.has_filters and not page.chips_w.isVisible()
+    assert page.products_view.count.text() == "3 products"
+    assert not _errors(msgs), msgs
+
+
+def test_search_screen_quick_filters_sorting_and_transactions(ui, sample):
+    app, win, msgs, _ = ui
+    sample.receive(sample.mdf, 4)  # below its minimum of 10
+    page = _search_page(win)
+    low = next(b for b in page.quick.buttons() if b.property("quick") == "LOW_STOCK")
+    low.click()
+    assert [r.product.internal_code for r in page.products_view.table.items()] == ["MDF-18"]
+    next(b for b in page.quick.buttons() if b.property("quick") == "ALL").click()
+    table = page.products_view.table
+    qty_col = next(i for i, c in enumerate(table.model_.columns) if c.sort == "qty")
+    table.horizontalHeader().sectionClicked.emit(qty_col)
+    assert page.sorts[page.PRODUCTS] == ("qty", True)
+    title = table.model_.headerData(qty_col, Qt.Orientation.Horizontal)
+    assert title.endswith("▼"), title  # biggest first, and the header says so
+    assert [r.product.internal_code for r in table.items()][0] == "MDF-18"
+    page.tabs.setCurrentWidget(page.movements_view)
+    assert page.movements_view.count.text() == "1 transaction"
+    assert not _errors(msgs), msgs
+
+
+def test_scan_into_search_then_goods_out_in_one_click(ui, sample):
+    app, win, msgs, _ = ui
+    app.services.products.save(sample.mdf.id, {"item_type": "RAW_MATERIAL", "internal_code": "MDF-18",
+                                               "name": "MDF 18mm 2440x1220", "unit_id": sample.mdf.unit_id,
+                                               "barcode": "5012345678900", "default_bin_id": sample.bin1.id,
+                                               "supplier_id": sample.supplier.id})
+    sample.receive(sample.mdf, 10)
+    win.search.setText("5012345678900")  # scanner into the top bar: code + Enter
+    win.global_search()
+    page = win.page("search")
+    assert win.stack.currentWidget() is page and page.box.text() == "5012345678900"
+    assert page.exact_w.isVisible() and "MDF-18" in page.exact_label.text()
+    page._act_exact("goods_out")
+    out = win.page("goods_out")
+    assert win.stack.currentWidget() is out
+    assert [v.product_id for v in out.lines.values(validate=False) if v.product_id] == [sample.mdf.id]
+    win.go("search")
+    page._act_exact("goods_in")
+    gin = win.page("goods_in")
+    assert [v.product_id for v in gin.lines.values(validate=False) if v.product_id] == [sample.mdf.id]
+    assert gin.supplier.value() == sample.supplier.id
+    assert not _errors(msgs), msgs
+
+
+def test_saved_search_reopens_with_one_click(ui, sample, monkeypatch):
+    app, win, msgs, _ = ui
+    page = _search_page(win)
+    page.filters_btn.click()
+    page.panel.supplier.set_value(sample.supplier.id)
+    monkeypatch.setattr(QInputDialog, "getText", lambda *a, **k: ("Egger stock", True))
+    page.save_search()
+    saved = app.services.search.saved_searches()
+    assert [s.name for s in saved] == ["Egger stock"]
+    page.clear_filters()
+    page.open_saved(saved[0])
+    assert page.criteria.supplier_id == sample.supplier.id and page.panel.supplier.value() == sample.supplier.id
+    assert not _errors(msgs), msgs
+
+
+def test_search_result_actions_open_the_right_screens(ui, sample):
+    app, win, msgs, opened = ui
+    sample.receive(sample.mdf, 10)
+    page = _search_page(win)
+    page.search_for("MDF-18")
+    for action in ("view", "history", "delivery_note", "transfer"):
+        page.product_action(action)
+    assert opened[-4:] == ["ProductDialog", "ProductDialog", "DeliveryNoteDialog", "TransferDialog"]
+    page.product_action("photo")  # no photo yet: a message, not an error
+    assert msgs[-1][0] == "info"
+    assert not _errors(msgs), msgs

@@ -21,6 +21,7 @@ class Product(IdMixin, TimestampMixin, ActiveMixin, VersionMixin, Base):
     barcode: Mapped[str | None] = mapped_column(String(80), index=True)
     name: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
     description: Mapped[str | None] = mapped_column(Text)
+    brand: Mapped[str | None] = mapped_column(String(100))
     category_id: Mapped[int | None] = fk("categories.id")
     unit_id: Mapped[int] = fk("units.id", nullable=False)
     supplier_id: Mapped[int | None] = fk("suppliers.id")

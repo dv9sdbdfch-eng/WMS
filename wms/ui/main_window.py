@@ -8,8 +8,8 @@ from datetime import datetime
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QDialog,
     QHBoxLayout,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
 
 from wms import APP_NAME, __version__
 from wms.core.permissions import P
-from wms.ui.widgets.common import Col, DataTable, SearchBox, button, label
+from wms.ui.widgets.common import button, label
 
 log = logging.getLogger(__name__)
 
@@ -39,6 +39,7 @@ def _nav():
         products,
         reports,
         returns,
+        search,
         settings,
         sites,
         stocktake,
@@ -46,6 +47,7 @@ def _nav():
     )
     return [
         ("", "dashboard", "Dashboard", None, dashboard.DashboardPage),
+        ("", "search", "Search", None, search.SearchPage),
         ("STOCK", "products", "Products", P.PRODUCTS_VIEW, products.ProductsPage),
         ("STOCK", "finished", "Finished Products", P.PRODUCTS_VIEW, finished.FinishedPage),
         ("STOCK", "locations", "Locations / Bins", P.LOCATIONS_VIEW, locations.LocationsPage),
@@ -62,41 +64,6 @@ def _nav():
         ("ADMIN", "audit", "Audit Trail", P.AUDIT_VIEW, users.AuditPage),
         ("ADMIN", "settings", "Settings", None, settings.SettingsPage),
     ]
-
-
-class SearchResultsDialog(QDialog):
-    def __init__(self, app, text: str, parent=None):
-        super().__init__(parent)
-        self.app = app
-        self.setWindowTitle(f"Search: {text}")
-        self.resize(900, 560)
-        lay = QVBoxLayout(self)
-        self.box = SearchBox("Search everything: code, name, supplier, delivery note, site, bin, reference...")
-        self.box.setText(text)
-        self.box.search.connect(self.do_search)
-        lay.addWidget(self.box)
-        self.summary = label("", "Muted")
-        lay.addWidget(self.summary)
-        self.table = DataTable([Col("Type", lambda h: h.kind, width=120), Col("Record", lambda h: h.title, width=360),
-                                Col("Details", lambda h: h.detail)])
-        self.table.activated_item.connect(self.open_hit)
-        lay.addWidget(self.table, 1)
-        lay.addWidget(label("Double-click or press Enter to open a result.", "Muted"))
-        self.do_search(text)
-
-    def do_search(self, text: str):
-        hits = self.app.services.search.search(text)
-        self.table.set_items(hits, keep_selection=False)
-        self.summary.setText(f"{len(hits)} result(s)" if text.strip() else "")
-        if hits:
-            self.table.selectRow(0)
-
-    def open_hit(self, hit):
-        if hit.entity_type == "MOVEMENT":
-            from wms.ui.pages.movements import MovementDetailDialog
-            MovementDetailDialog(self.app, self.app.services.stock.get_movement(hit.entity_id), self).exec()
-            return
-        self.app.open_entity(hit.entity_type, hit.entity_id, self)
 
 
 class MainWindow(QMainWindow):
@@ -158,7 +125,10 @@ class MainWindow(QMainWindow):
         top.setObjectName("TopBar")
         tl = QHBoxLayout(top)
         tl.setContentsMargins(24, 10, 24, 10)
-        self.search = SearchBox("Search everything (Ctrl+K): product, code, supplier, DN number, site, bin, ref...")
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Search everything (Ctrl+K): code, barcode, name, supplier, DN number, "
+                                       "project, bin, reference...")
+        self.search.setClearButtonEnabled(True)
         self.search.setObjectName("GlobalSearch")
         self.search.returnPressed.connect(self.global_search)
         tl.addWidget(self.search, 1)
@@ -174,7 +144,8 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(root)
 
         self.statusBar().showMessage("Ready")
-        QShortcut(QKeySequence("Ctrl+K"), self, lambda: (self.search.setFocus(), self.search.selectAll()))
+        QShortcut(QKeySequence("Ctrl+K"), self, self.focus_search)
+        QShortcut(QKeySequence("Ctrl+F"), self, self.focus_search)
         QShortcut(QKeySequence("F5"), self, self.refresh_current)
         app.data_changed.connect(self._data_changed)
         self.go("dashboard")
@@ -221,11 +192,21 @@ class MainWindow(QMainWindow):
             page.on_show()
 
     def global_search(self):
+        """Enter in the top search box (typed or scanned): open the Search screen with the results."""
         text = self.search.text().strip()
-        if len(text) < 2:
-            return
-        SearchResultsDialog(self.app, text, self).exec()
-        self._data_changed()
+        self.search.clear()
+        self.go("search")
+        page = self.page("search")
+        if page is not None:
+            page.search_for(text) if text else page.focus_box()
+
+    def focus_search(self):
+        page = self.page("search")
+        if page is not None and self.stack.currentWidget() is page:
+            page.focus_box()
+        else:
+            self.search.setFocus()
+            self.search.selectAll()
 
     def change_password(self):
         from wms.ui.login import ChangePasswordDialog

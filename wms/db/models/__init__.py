@@ -19,7 +19,7 @@ from wms.db.models.products import BomItem, FinishedProductInfo, Product
 from wms.db.models.reference import Category, Supplier, Unit
 from wms.db.models.sites import Site
 from wms.db.models.stock import StockLevel, StockMovement
-from wms.db.models.system import Attachment, AuditLog, NumberSequence, Setting
+from wms.db.models.system import Attachment, AuditLog, NumberSequence, RecentSearch, SavedSearch, Setting
 from wms.db.models.users import Role, RolePermission, User
 
 __all__ = [
@@ -38,9 +38,11 @@ __all__ = [
     "Product",
     "ProductionLine",
     "ProductionOrder",
+    "RecentSearch",
     "ReturnLine",
     "Role",
     "RolePermission",
+    "SavedSearch",
     "Setting",
     "Site",
     "StockAdjustment",
