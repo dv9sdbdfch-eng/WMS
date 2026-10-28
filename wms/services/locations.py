@@ -4,15 +4,30 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session
 
-from wms.core.enums import LocationKind
+from wms.core.enums import EntityType, LocationKind
 from wms.core.exceptions import DuplicateError, NotFoundError, ValidationError
 from wms.core.permissions import P
-from wms.db.models import Bin, Location, StockLevel
-from wms.services import audit
+from wms.db.models import (
+    Bin,
+    DeliveryNoteLine,
+    GoodsIssueLine,
+    Location,
+    Product,
+    ProductionLine,
+    ProductionOrder,
+    ReturnLine,
+    StockAdjustment,
+    StockCountLine,
+    StockLevel,
+    StockMovement,
+    StockTransfer,
+)
+from wms.services import audit, lifecycle
 from wms.services.base import BaseService, clean_code, clean_str, normalise_code, prefix_pattern
+from wms.services.lifecycle import RemovalPlan
 
 # Allowed parent kind for each kind (None = top level).
 PARENT_KIND = {
@@ -154,15 +169,28 @@ class LocationService(BaseService):
                 raise ValidationError("Select the location this bin belongs to.", "location_id")
             if not loc.is_active and data.get("is_active", True):
                 raise ValidationError(f"{loc.path} is archived - reactivate the location first.", "location_id")
-            dup = s.scalar(select(Bin.id).where(Bin.location_id == loc.id, Bin.code == code))
-            if dup and dup != bin_id:
+            dup = s.scalar(select(Bin).where(Bin.location_id == loc.id, Bin.code == code))
+            if dup is not None and dup.id != bin_id:
+                if not dup.is_active:
+                    raise DuplicateError(f"Bin '{code}' already exists in {loc.path} but has been removed from "
+                                         f"active use. Restore it instead of creating it again - its history "
+                                         f"stays with it.")
                 raise DuplicateError(f"Bin '{code}' already exists in {loc.path}.")
+            archiving = restoring = False
+            plan = None
             if bin_id:
                 b = s.get(Bin, bin_id)
                 if b is None:
                     raise NotFoundError("Bin not found.")
-                if not data.get("is_active", True) and b.is_active and self.bin_quantity_total(s, b.id):
-                    raise ValidationError("Cannot deactivate a bin that still holds stock. Transfer it first.")
+                archiving = b.is_active and not data.get("is_active", True)
+                restoring = not b.is_active and data.get("is_active", True)
+                if archiving:
+                    if self.bin_quantity_total(s, b.id):
+                        raise ValidationError("Cannot deactivate a bin that still holds stock. Transfer it first.")
+                    plan = self._bin_plan(s, b)
+                    plan.archive_only = True
+                    plan.check()
+                    self._clear_default_bin(s, b)
             else:
                 b = Bin()
                 s.add(b)
@@ -178,6 +206,96 @@ class LocationService(BaseService):
             o, n = audit.diff(old, {"full_code": b.full_code, "is_available": b.is_available, "is_active": b.is_active})
             if n:
                 audit.record(s, self.ctx, "BIN_SAVED", "BIN", b.id, b.full_code, old=o, new=n)
+            if archiving:
+                lifecycle.record_removal(s, self.ctx, plan, "BIN", None, b.full_code)
+            elif restoring:
+                lifecycle.record_restore(s, self.ctx, EntityType.BIN.value, b.id, b.full_code, "BIN", None)
+            saved_id = b.id
+        return self.reload(Bin, saved_id)
+
+    # -- removing bins from use / restoring them ----------------------------------
+    def bin_history_count(self, s: Session, bin_id: int) -> int:
+        return lifecycle.count(s, StockMovement.id,
+                               or_(StockMovement.from_bin_id == bin_id, StockMovement.to_bin_id == bin_id))
+
+    def _bin_plan(self, s: Session, b: Bin) -> RemovalPlan:
+        plan = RemovalPlan("Bin", EntityType.BIN.value, b.id, b.code, already_archived=not b.is_active)
+        plan.history = self.bin_history_count(s, b.id)
+        holding = self.bin_quantity_total(s, b.id)
+        if holding:
+            plan.blockers.append(f"It still holds stock ({holding} product{'' if holding == 1 else 's'}). "
+                                 f"Transfer, issue or adjust it to zero first.")
+        blocker = lifecycle.stocktake_blocker(lifecycle.unfinished_counts(s, StockCountLine.bin_id == b.id))
+        if blocker:
+            plan.blockers.append(blocker)
+        plan.references = sum(lifecycle.count(s, col, col == b.id) for col in (
+            StockLevel.bin_id, DeliveryNoteLine.bin_id, GoodsIssueLine.bin_id, ReturnLine.bin_id,
+            ProductionLine.bin_id, ProductionOrder.output_bin_id, StockAdjustment.bin_id,
+            StockTransfer.from_bin_id, StockTransfer.to_bin_id, StockCountLine.bin_id))
+        defaults = lifecycle.count(s, Product.id, Product.default_bin_id == b.id)
+        if defaults:
+            plan.notes.append(f"{defaults} product{' uses' if defaults == 1 else 's use'} it as the default bin - "
+                              f"that setting will be cleared.")
+        return plan
+
+    def _clear_default_bin(self, s: Session, b: Bin) -> None:
+        codes = list(s.scalars(select(Product.internal_code).where(Product.default_bin_id == b.id)))
+        if codes:
+            s.execute(update(Product).where(Product.default_bin_id == b.id).values(default_bin_id=None)
+                      .execution_options(synchronize_session=False))
+            audit.record(s, self.ctx, "DEFAULT_BIN_CLEARED", "BIN", b.id, b.full_code,
+                         f"Default bin cleared on {len(codes)} product(s) because the bin was removed.",
+                         new={"products": codes})
+
+    def bin_removal_plan(self, bin_id: int) -> RemovalPlan:
+        """What 'Delete bin' would do, for the confirmation message."""
+        with self.db.read_session() as s:
+            b = s.get(Bin, bin_id)
+            if b is None:
+                raise NotFoundError("Bin not found.")
+            return self._bin_plan(s, b)
+
+    def remove_bin(self, bin_id: int, reason: str | None = None) -> RemovalPlan:
+        """Delete a never-used bin permanently, or take a used one out of active use (history kept)."""
+        self.require(P.LOCATIONS_EDIT)
+        reason = lifecycle.reason_text(reason)
+        with self.db.session() as s:
+            b = s.get(Bin, bin_id)
+            if b is None:
+                raise NotFoundError("Bin not found.")
+            plan = self._bin_plan(s, b)
+            plan.check()
+            self._clear_default_bin(s, b)
+            lifecycle.record_removal(s, self.ctx, plan, "BIN", reason, b.full_code)
+            if plan.permanent:
+                s.delete(b)
+            else:
+                b.is_active = False
+        return plan
+
+    def restore_bin(self, bin_id: int, reason: str | None = None) -> Bin:
+        """Put an archived bin back into use. Its old transactions are untouched."""
+        self.require(P.LOCATIONS_EDIT)
+        reason = lifecycle.reason_text(reason)
+        with self.db.session() as s:
+            b = s.get(Bin, bin_id)
+            if b is None:
+                raise NotFoundError("Bin not found.")
+            if b.is_active:
+                raise ValidationError(f"Bin {b.code} is already in active use.")
+            if not b.location.is_active:
+                raise ValidationError(f"{b.location.path} has been archived - restore the location first, "
+                                      f"then the bin.")
+            clash = s.scalar(select(Bin).where(
+                Bin.id != b.id, Bin.is_active.is_(True),
+                or_(func.upper(Bin.full_code) == b.full_code.upper(),
+                    (Bin.location_id == b.location_id) & (func.upper(Bin.code) == b.code.upper()))))
+            if clash is not None:
+                raise DuplicateError(f"Bin {clash.full_code} is already in active use with the same code. "
+                                     f"Restoring {b.code} would make the two impossible to tell apart.")
+            b.is_active = True
+            s.flush()
+            lifecycle.record_restore(s, self.ctx, EntityType.BIN.value, b.id, b.full_code, "BIN", reason)
             saved_id = b.id
         return self.reload(Bin, saved_id)
 

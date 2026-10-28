@@ -71,6 +71,13 @@ class SiteStatus(LabelledEnum):
     ON_HOLD = "ON_HOLD"
     COMPLETED = "COMPLETED"
     CANCELLED = "CANCELLED"
+    ARCHIVED = "ARCHIVED"
+
+
+# Projects that can receive new Goods Out / production. Completed, cancelled and archived projects
+# keep their full history (and stay searchable and reportable) but are hidden from normal selection.
+OPEN_SITE_STATUSES = (SiteStatus.PLANNED.value, SiteStatus.ACTIVE.value, SiteStatus.ON_HOLD.value)
+CLOSED_SITE_STATUSES = (SiteStatus.COMPLETED.value, SiteStatus.CANCELLED.value, SiteStatus.ARCHIVED.value)
 
 
 class FinishedStatus(LabelledEnum):

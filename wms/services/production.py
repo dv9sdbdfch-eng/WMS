@@ -50,6 +50,8 @@ class ProductionService(BaseService):
             order = ProductionOrder(
                 order_number=next_number(s, "PRODUCTION"), finished_product_id=fp.id, quantity=qty,
                 output_bin_id=out_bin.id, site_id=site.id if site else None, production_date=pdate,
+                site_number_snapshot=site.project_number if site else None,
+                site_name_snapshot=site.name if site else None,
                 notes=clean_str(header.get("notes")), user_id=self.user.id, status=DocumentStatus.POSTED.value,
                 client_token=header.get("client_token") or None,
             )

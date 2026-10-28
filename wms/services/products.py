@@ -8,23 +8,27 @@ from decimal import Decimal
 from sqlalchemy import and_, exists, func, or_, select, true
 from sqlalchemy.orm import Session, aliased
 
-from wms.core.enums import FinishedStatus, ItemType, StockStatus
+from wms.core.enums import EntityType, FinishedStatus, ItemType, StockStatus
 from wms.core.exceptions import ConcurrencyError, DuplicateError, NotFoundError, ValidationError
 from wms.core.numbers import ZERO, to_money, to_qty
 from wms.core.permissions import P
 from wms.db.models import (
+    Attachment,
     Bin,
+    BomItem,
     Category,
     FinishedProductInfo,
     Location,
     Product,
+    StockCountLine,
     StockLevel,
     StockMovement,
     Supplier,
     Unit,
 )
-from wms.services import audit
+from wms.services import audit, lifecycle
 from wms.services.base import BaseService, clean_code, clean_str, like_pattern, prefix_pattern
+from wms.services.lifecycle import RemovalPlan
 from wms.services.stock_engine import product_totals_query
 
 PRODUCT_FIELDS = (
@@ -255,8 +259,12 @@ class ProductService(BaseService):
         except ValueError:
             raise ValidationError("Choose a valid item type.", "item_type") from None
         code = clean_code(data.get("internal_code"), "internal_code", "Internal product code", 50)
-        dup = s.scalar(select(Product.id).where(func.upper(Product.internal_code) == code))
-        if dup and dup != product_id:
+        dup = s.scalar(select(Product).where(func.upper(Product.internal_code) == code))
+        if dup is not None and dup.id != product_id:
+            if not dup.is_active:
+                raise DuplicateError(f"Product code '{code}' belongs to a product that has been removed from active "
+                                     f"use ({dup.name}). Restore it instead of creating it again, or choose "
+                                     f"another code.")
             raise DuplicateError(f"Product code '{code}' is already used.")
         v["internal_code"] = code
         v["name"] = clean_str(data.get("name"), "name", required=True, max_len=200)
@@ -334,6 +342,9 @@ class ProductService(BaseService):
                         raise ValidationError(
                             f"Cannot archive {p.internal_code}: {holding} bin(s) still show stock for it "
                             f"(positive or negative). Issue, transfer or adjust it to zero first.", "is_active")
+                    plan = self._plan(s, p)
+                    plan.archive_only = True
+                    plan.check()
                 old = audit.snapshot(p, PRODUCT_FIELDS)
                 old_fin = audit.snapshot(p.finished_info, FINISHED_FIELDS) if p.finished_info else {}
             else:
@@ -350,6 +361,12 @@ class ProductService(BaseService):
             if n:
                 audit.record(s, self.ctx, "PRODUCT_UPDATED" if product_id else "PRODUCT_CREATED", "PRODUCT", p.id,
                              f"{p.internal_code} {p.name}", old=o, new=n)
+            if product_id and "is_active" in n:
+                if p.is_active:
+                    lifecycle.record_restore(s, self.ctx, EntityType.PRODUCT.value, p.id,
+                                             f"{p.internal_code} {p.name}", "PRODUCT", None)
+                else:
+                    lifecycle.record_removal(s, self.ctx, plan, "PRODUCT", None)
             saved_id = p.id
         return self.get(saved_id)
 
@@ -376,3 +393,71 @@ class ProductService(BaseService):
             p.finished_info.status = FinishedStatus(status).value
             audit.record(s, self.ctx, "FINISHED_STATUS_CHANGED", "PRODUCT", p.id, p.internal_code,
                          old={"status": old}, new={"status": status})
+
+    # -- removing products from use / restoring them ---------------------------------
+    def _plan(self, s: Session, p: Product) -> RemovalPlan:
+        plan = RemovalPlan("Product", EntityType.PRODUCT.value, p.id, f"{p.internal_code} {p.name}",
+                           already_archived=not p.is_active)
+        plan.history = lifecycle.count(s, StockMovement.id, StockMovement.product_id == p.id)
+        holding = lifecycle.count(s, StockLevel.id, StockLevel.product_id == p.id, StockLevel.quantity != ZERO)
+        if holding:
+            plan.blockers.append(f"{holding} bin{' still shows' if holding == 1 else 's still show'} stock for it "
+                                 f"(positive or negative). Issue, transfer or adjust it to zero first.")
+        blocker = lifecycle.stocktake_blocker(lifecycle.unfinished_counts(s, StockCountLine.product_id == p.id))
+        if blocker:
+            plan.blockers.append(blocker)
+        plan.references = (
+            lifecycle.count(s, StockLevel.id, StockLevel.product_id == p.id)
+            + lifecycle.count(s, StockCountLine.id, StockCountLine.product_id == p.id)
+            + lifecycle.count(s, BomItem.id, or_(BomItem.parent_product_id == p.id,
+                                                  BomItem.component_product_id == p.id))
+            + lifecycle.count(s, Attachment.id, Attachment.entity_type == EntityType.PRODUCT.value,
+                              Attachment.entity_id == p.id, Attachment.is_deleted.is_(False)))
+        return plan
+
+    def removal_plan(self, product_id: int) -> RemovalPlan:
+        with self.db.read_session() as s:
+            p = s.get(Product, product_id)
+            if p is None:
+                raise NotFoundError("Product not found.")
+            return self._plan(s, p)
+
+    def remove(self, product_id: int, reason: str | None = None) -> RemovalPlan:
+        """Delete a never-used product permanently, or discontinue a used one (its history stays)."""
+        self.require(P.PRODUCTS_EDIT)
+        reason = lifecycle.reason_text(reason)
+        with self.db.session() as s:
+            p = s.get(Product, product_id)
+            if p is None:
+                raise NotFoundError("Product not found.")
+            plan = self._plan(s, p)
+            plan.check()
+            lifecycle.record_removal(s, self.ctx, plan, "PRODUCT", reason)
+            if plan.permanent:
+                s.delete(p)
+            else:
+                p.is_active = False
+        return plan
+
+    def restore(self, product_id: int, reason: str | None = None) -> Product:
+        self.require(P.PRODUCTS_EDIT)
+        reason = lifecycle.reason_text(reason)
+        with self.db.session() as s:
+            p = s.get(Product, product_id)
+            if p is None:
+                raise NotFoundError("Product not found.")
+            if p.is_active:
+                raise ValidationError(f"Product {p.internal_code} is already in active use.")
+            if p.barcode:
+                clash = s.scalar(select(Product.internal_code).where(
+                    Product.id != p.id, Product.is_active.is_(True),
+                    or_(func.upper(Product.barcode) == p.barcode.upper(),
+                        func.upper(Product.internal_code) == p.barcode.upper())))
+                if clash:
+                    raise DuplicateError(f"Barcode {p.barcode} is now used by product {clash}. Restoring "
+                                         f"{p.internal_code} would make a scan ambiguous - change one barcode first.")
+            p.is_active = True
+            s.flush()
+            lifecycle.record_restore(s, self.ctx, EntityType.PRODUCT.value, p.id, f"{p.internal_code} {p.name}",
+                                     "PRODUCT", reason)
+        return self.get(product_id)

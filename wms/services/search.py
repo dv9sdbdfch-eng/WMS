@@ -26,7 +26,7 @@ from decimal import Decimal
 from sqlalchemy import and_, case, delete, exists, func, or_, select, type_coerce
 from sqlalchemy.orm import selectinload
 
-from wms.core.enums import EntityType, ItemType, LocationKind, MovementType, SiteStatus
+from wms.core.enums import CLOSED_SITE_STATUSES, EntityType, ItemType, LocationKind, MovementType, SiteStatus
 from wms.core.exceptions import NotFoundError, ValidationError
 from wms.core.numbers import ZERO, fmt_date, fmt_qty, utcnow
 from wms.core.permissions import P
@@ -100,7 +100,6 @@ RECENT_DAYS = 7  # "Recently Received / Issued" = the last 7 days
 
 ARCHIVE_CHOICES = {"ACTIVE": "Active", "ARCHIVED": "Archived", "ALL": "Active and Archived"}
 PROJECT_STATUS_CHOICES = {"ACTIVE": "Active", "CLOSED": "Closed"}
-CLOSED_SITE_STATUSES = (SiteStatus.COMPLETED.value, SiteStatus.CANCELLED.value)
 ATTACHMENT_CHOICES = {"WITH": "Has Attachment", "WITHOUT": "Missing Attachment"}
 
 LOCATION_LEVELS = (("warehouse_id", LocationKind.WAREHOUSE), ("zone_id", LocationKind.ZONE),

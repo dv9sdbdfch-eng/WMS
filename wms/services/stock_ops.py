@@ -85,6 +85,9 @@ class StockOpsService(BaseService):
             ret = StockReturn(
                 return_number=next_number(s, seq), return_type=rtype.value, return_date=rdate,
                 site_id=site.id if site else None, supplier_id=supplier.id if supplier else None,
+                site_number_snapshot=site.project_number if site else None,
+                site_name_snapshot=site.name if site else None,
+                supplier_name_snapshot=supplier.name if supplier else None,
                 reference=clean_str(header.get("reference"), max_len=80), reason=clean_str(header.get("reason")),
                 notes=clean_str(header.get("notes")), user_id=self.user.id, status=DocumentStatus.POSTED.value,
                 client_token=header.get("client_token") or None,

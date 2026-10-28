@@ -104,6 +104,7 @@ class GoodsInService(BaseService):
                 dn_number=dn_number,
                 dn_number_norm=norm,
                 supplier_id=supplier.id,
+                supplier_name_snapshot=supplier.name,
                 delivery_date=delivery_date,
                 po_reference=clean_str(header.get("po_reference"), max_len=80),
                 notes=clean_str(header.get("notes")),

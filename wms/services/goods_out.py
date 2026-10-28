@@ -9,7 +9,7 @@ from decimal import Decimal
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
-from wms.core.enums import DocumentStatus, EntityType, MovementType, SiteStatus
+from wms.core.enums import CLOSED_SITE_STATUSES, DocumentStatus, EntityType, MovementType, SiteStatus
 from wms.core.exceptions import InsufficientStockError, NotFoundError, ValidationError
 from wms.core.numbers import ZERO, to_qty, utcnow
 from wms.core.permissions import P
@@ -20,7 +20,6 @@ from wms.services.goods_in import doc_datetime, validate_doc_date
 from wms.services.numbering import next_number
 from wms.services.stock_engine import StockEngine
 
-CLOSED_SITE_STATUSES = {SiteStatus.COMPLETED.value, SiteStatus.CANCELLED.value}
 
 
 @dataclass
@@ -91,6 +90,8 @@ class GoodsOutService(BaseService):
                 issue_number=next_number(s, "GOODS_ISSUE"),
                 issue_date=issue_date,
                 site_id=site.id,
+                site_number_snapshot=site.project_number,
+                site_name_snapshot=site.name,
                 requested_by=clean_str(header.get("requested_by"), max_len=120),
                 issued_by=issued_by,
                 reference=clean_str(header.get("reference"), max_len=80),
