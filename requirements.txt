@@ -1,0 +1,7 @@
+# Runtime
+PySide6==6.12.0
+SQLAlchemy==2.1.6
+alembic==1.20.1
+bcrypt==5.0.0
+openpyxl==3.1.5
+reportlab==5.1.0

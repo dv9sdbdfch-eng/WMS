@@ -1,0 +1,307 @@
+"""Products (materials, components, consumables, finished products)."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from decimal import Decimal
+
+from sqlalchemy import exists, func, or_, select
+from sqlalchemy.orm import Session, aliased
+
+from wms.core.enums import FinishedStatus, ItemType
+from wms.core.exceptions import ConcurrencyError, DuplicateError, NotFoundError, ValidationError
+from wms.core.numbers import ZERO, to_money, to_qty
+from wms.core.permissions import P
+from wms.db.models import (
+    Bin,
+    Category,
+    FinishedProductInfo,
+    Location,
+    Product,
+    StockLevel,
+    StockMovement,
+    Supplier,
+    Unit,
+)
+from wms.services import audit
+from wms.services.base import BaseService, clean_str, normalise_code
+from wms.services.stock_engine import product_totals_query
+
+PRODUCT_FIELDS = (
+    "item_type", "internal_code", "supplier_code", "barcode", "name", "description", "category_id", "unit_id",
+    "supplier_id", "default_bin_id", "min_stock", "reorder_qty", "unit_cost", "notes", "is_active",
+)
+FINISHED_FIELDS = ("production_date", "site_id", "customer", "status")
+
+
+@dataclass
+class ProductRow:
+    product: Product
+    on_hand: Decimal
+    available: Decimal
+
+    @property
+    def is_low(self) -> bool:
+        p = self.product
+        return p.min_stock is not None and p.min_stock > ZERO and self.on_hand <= p.min_stock
+
+    @property
+    def stock_value(self) -> Decimal:
+        return (self.on_hand * (self.product.unit_cost or ZERO)).quantize(Decimal("0.01"))
+
+    @property
+    def shortfall(self) -> Decimal:
+        """Suggested order: up to min + reorder qty (or min) - on hand."""
+        p = self.product
+        if not self.is_low:
+            return ZERO
+        target = (p.min_stock or ZERO) + (p.reorder_qty or ZERO)
+        return max(target - self.on_hand, ZERO)
+
+
+def text_filter(text: str):
+    """WHERE clause matching a product by any of its identifying fields, supplier, category or bin."""
+    like = f"%{text.strip()}%"
+    sup = aliased(Supplier)
+    cat = aliased(Category)
+    in_bin = exists().where(
+        StockLevel.product_id == Product.id,
+        StockLevel.quantity != ZERO,
+        StockLevel.bin_id == Bin.id,
+        Bin.full_code.ilike(like),
+    )
+    default_bin = exists().where(Bin.id == Product.default_bin_id, Bin.full_code.ilike(like))
+    return or_(
+        Product.internal_code.ilike(like),
+        Product.supplier_code.ilike(like),
+        Product.barcode.ilike(like),
+        Product.name.ilike(like),
+        Product.description.ilike(like),
+        exists().where(sup.id == Product.supplier_id, sup.name.ilike(like)),
+        exists().where(cat.id == Product.category_id, cat.name.ilike(like)),
+        in_bin,
+        default_bin,
+    )
+
+
+class ProductService(BaseService):
+    def list(
+        self,
+        text: str | None = None,
+        item_types: list[str] | None = None,
+        category_id: int | None = None,
+        supplier_id: int | None = None,
+        location_id: int | None = None,
+        low_only: bool = False,
+        include_inactive: bool = False,
+        limit: int | None = None,
+    ) -> list[ProductRow]:
+        totals = product_totals_query().subquery()
+        q = (
+            select(Product, func.coalesce(totals.c.on_hand, 0), func.coalesce(totals.c.available, 0))
+            .outerjoin(totals, totals.c.product_id == Product.id)
+            .order_by(Product.internal_code)
+        )
+        if not include_inactive:
+            q = q.where(Product.is_active.is_(True))
+        if item_types:
+            q = q.where(Product.item_type.in_(item_types))
+        if category_id:
+            sub = select(Category.id).where((Category.id == category_id) | (Category.parent_id == category_id))
+            q = q.where(Product.category_id.in_(sub))
+        if supplier_id:
+            q = q.where(Product.supplier_id == supplier_id)
+        if location_id:
+            with self.db.read_session() as s:
+                loc = s.get(Location, location_id)
+                path = loc.path if loc else ""
+            q = q.where(
+                exists().where(
+                    StockLevel.product_id == Product.id,
+                    StockLevel.quantity != ZERO,
+                    StockLevel.bin_id == Bin.id,
+                    Bin.full_code.like(f"{path} / %"),
+                )
+            )
+        if text and text.strip():
+            q = q.where(text_filter(text))
+        if limit:
+            q = q.limit(limit)
+        with self.db.read_session() as s:
+            rows = [ProductRow(p, Decimal(oh or 0), Decimal(av or 0)) for p, oh, av in s.execute(q).unique()]
+        if low_only:
+            rows = [r for r in rows if r.is_low]
+        return rows
+
+    def low_stock(self) -> list[ProductRow]:
+        return self.list(low_only=True)
+
+    def get(self, product_id: int) -> Product:
+        with self.db.read_session() as s:
+            p = s.get(Product, product_id)
+            if p is None:
+                raise NotFoundError("Product not found.")
+            return p
+
+    def find_by_code(self, code: str) -> Product | None:
+        """Exact match on internal code, supplier code or barcode (scanner input)."""
+        code = (code or "").strip()
+        if not code:
+            return None
+        with self.db.read_session() as s:
+            return s.scalar(
+                select(Product)
+                .where(
+                    Product.is_active.is_(True),
+                    or_(
+                        func.upper(Product.internal_code) == code.upper(),
+                        func.upper(Product.barcode) == code.upper(),
+                        func.upper(Product.supplier_code) == code.upper(),
+                    ),
+                )
+                .limit(1)
+            )
+
+    def stock_by_bin(self, product_id: int) -> list[StockLevel]:
+        with self.db.read_session() as s:
+            return list(
+                s.scalars(
+                    select(StockLevel)
+                    .join(Bin)
+                    .where(StockLevel.product_id == product_id, StockLevel.quantity != ZERO)
+                    .order_by(Bin.full_code)
+                )
+            )
+
+    def movements(self, product_id: int, limit: int = 1000) -> list[StockMovement]:
+        with self.db.read_session() as s:
+            return list(
+                s.scalars(
+                    select(StockMovement)
+                    .where(StockMovement.product_id == product_id)
+                    .order_by(StockMovement.occurred_at.desc(), StockMovement.id.desc())
+                    .limit(limit)
+                )
+            )
+
+    def has_movements(self, s: Session, product_id: int) -> bool:
+        return s.scalar(select(StockMovement.id).where(StockMovement.product_id == product_id).limit(1)) is not None
+
+    # -- create / update ----------------------------------------------------
+    def _validate(self, s: Session, data: dict, product_id: int | None) -> dict:
+        v: dict = {}
+        try:
+            v["item_type"] = ItemType(data.get("item_type") or ItemType.RAW_MATERIAL).value
+        except ValueError:
+            raise ValidationError("Choose a valid item type.", "item_type") from None
+        code = normalise_code(data.get("internal_code"))
+        if not code:
+            raise ValidationError("Internal product code is required.", "internal_code")
+        dup = s.scalar(select(Product.id).where(func.upper(Product.internal_code) == code))
+        if dup and dup != product_id:
+            raise DuplicateError(f"Product code '{code}' is already used.")
+        v["internal_code"] = code
+        v["name"] = clean_str(data.get("name"), "name", required=True, max_len=200)
+        v["supplier_code"] = clean_str(data.get("supplier_code"), "supplier_code", max_len=80)
+        v["barcode"] = clean_str(data.get("barcode"), "barcode", max_len=80)
+        if v["barcode"]:
+            dup = s.scalar(select(Product.id).where(Product.barcode == v["barcode"]))
+            if dup and dup != product_id:
+                raise DuplicateError(f"Barcode '{v['barcode']}' is already used by another product.")
+        v["description"] = clean_str(data.get("description"))
+        v["notes"] = clean_str(data.get("notes"))
+        unit = s.get(Unit, data.get("unit_id")) if data.get("unit_id") else None
+        if unit is None:
+            raise ValidationError("Unit of measure is required.", "unit_id")
+        v["unit_id"] = unit.id
+        for key, model in (("category_id", Category), ("supplier_id", Supplier), ("default_bin_id", Bin)):
+            val = data.get(key) or None
+            if val and s.get(model, val) is None:
+                raise ValidationError(f"Selected {key.replace('_id', '').replace('_', ' ')} no longer exists.", key)
+            v[key] = val
+        for key in ("min_stock", "reorder_qty"):
+            raw = data.get(key)
+            if raw in (None, ""):
+                v[key] = None
+            else:
+                q = to_qty(raw, key)
+                if q < ZERO:
+                    raise ValidationError(f"{key.replace('_', ' ').capitalize()} cannot be negative.", key)
+                if not unit.allow_decimal and q != q.to_integral_value():
+                    raise ValidationError(f"{unit.code} quantities must be whole numbers.", key)
+                v[key] = q
+        raw = data.get("unit_cost")
+        if raw in (None, ""):
+            v["unit_cost"] = None
+        else:
+            c = to_money(raw)
+            if c < ZERO:
+                raise ValidationError("Unit cost cannot be negative.", "unit_cost")
+            v["unit_cost"] = c
+        v["is_active"] = bool(data.get("is_active", True))
+        return v
+
+    def save(self, product_id: int | None, data: dict, expected_version: int | None = None) -> Product:
+        self.require(P.PRODUCTS_EDIT)
+        with self.db.session() as s:
+            v = self._validate(s, data, product_id)
+            if product_id:
+                p = s.get(Product, product_id)
+                if p is None:
+                    raise NotFoundError("Product not found.")
+                if expected_version is not None and p.version != expected_version:
+                    raise ConcurrencyError("This product was changed by someone else. Reopen it and try again.")
+                if v["unit_id"] != p.unit_id and self.has_movements(s, p.id):
+                    raise ValidationError(
+                        "The unit of measure cannot be changed after stock movements exist "
+                        "(it would change the meaning of past quantities). Create a new product instead.",
+                        "unit_id",
+                    )
+                if not v["is_active"] and p.is_active:
+                    on_hand = s.scalar(
+                        select(func.coalesce(func.sum(StockLevel.quantity), 0)).where(StockLevel.product_id == p.id)
+                    )
+                    if on_hand:
+                        raise ValidationError("Cannot deactivate a product that still has stock.", "is_active")
+                old = audit.snapshot(p, PRODUCT_FIELDS)
+                old_fin = audit.snapshot(p.finished_info, FINISHED_FIELDS) if p.finished_info else {}
+            else:
+                p = Product(created_by_id=self.user.id)
+                s.add(p)
+                old, old_fin = {}, {}
+            for k, val in v.items():
+                setattr(p, k, val)
+            self._apply_finished(s, p, data)
+            s.flush()
+            new = audit.snapshot(p, PRODUCT_FIELDS)
+            new_fin = audit.snapshot(p.finished_info, FINISHED_FIELDS) if p.finished_info else {}
+            o, n = audit.diff({**old, **old_fin}, {**new, **new_fin})
+            if n:
+                audit.record(s, self.ctx, "PRODUCT_UPDATED" if product_id else "PRODUCT_CREATED", "PRODUCT", p.id,
+                             f"{p.internal_code} {p.name}", old=o, new=n)
+            saved_id = p.id
+        return self.get(saved_id)
+
+    def _apply_finished(self, s: Session, p: Product, data: dict) -> None:
+        if p.item_type != ItemType.FINISHED.value:
+            return
+        fin = p.finished_info or FinishedProductInfo()
+        fin.production_date = data.get("production_date") or None
+        fin.site_id = data.get("site_id") or None
+        fin.customer = clean_str(data.get("customer"), "customer", max_len=200)
+        try:
+            fin.status = FinishedStatus(data.get("status") or FinishedStatus.READY).value
+        except ValueError:
+            raise ValidationError("Choose a valid status.", "status") from None
+        p.finished_info = fin
+
+    def set_finished_status(self, product_id: int, status: str) -> None:
+        self.require(P.PRODUCTS_EDIT)
+        with self.db.session() as s:
+            p = s.get(Product, product_id)
+            if p is None or p.finished_info is None:
+                raise NotFoundError("Finished product not found.")
+            old = p.finished_info.status
+            p.finished_info.status = FinishedStatus(status).value
+            audit.record(s, self.ctx, "FINISHED_STATUS_CHANGED", "PRODUCT", p.id, p.internal_code,
+                         old={"status": old}, new={"status": status})
