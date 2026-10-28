@@ -63,7 +63,7 @@ def test_every_page_opens(ui, sample):
     app, win, msgs, _ = ui
     sample.receive(sample.mdf, 40)
     keys = list(win.factories)
-    assert len(keys) == 15
+    assert len(keys) == 16
     for key in keys:
         win.go(key)
         page = win.page(key)
@@ -139,6 +139,108 @@ def test_goods_out_screen_blocks_then_overrides_negative(ui, sample):
     assert app.services.products.get(sample.mdf.id) is not None
     rows = {r.product.id: r for r in app.services.products.list()}
     assert rows[sample.mdf.id].on_hand == Decimal("-2")
+
+
+def test_goods_out_double_post_and_repeat_are_caught(ui, sample):
+    """Ctrl+S pressed twice / the same issue typed in twice must not silently create two issues."""
+    app, win, msgs, _ = ui
+    sample.receive(sample.mdf, 20)
+    win.go("goods_out")
+    page = win.page("goods_out")
+    page.site.set_value(sample.site.id)
+    page.lines.clear()
+    page.lines.add_row(sample.mdf.id, Decimal("2"))
+    token = page._token
+    page.post()
+    assert len(app.services.goods_out.search()) == 1 and page._token != token  # new form, new token
+    # The server refuses the old form's token even if the screen somehow sent it again
+    from wms.core.exceptions import AlreadyPostedError
+    from wms.services.goods_out import IssueLine
+    with pytest.raises(AlreadyPostedError):
+        app.services.goods_out.post({"site_id": sample.site.id, "issue_date": page.date.value(),
+                                     "client_token": token}, [IssueLine(sample.mdf.id, "2")])
+    # Re-entering the same materials for the same site asks first (auto-answered "Post again" here)
+    page.site.set_value(sample.site.id)
+    page.lines.clear()
+    page.lines.add_row(sample.mdf.id, Decimal("2"))
+    page.post()
+    assert any(t == "Possible duplicate" for _, t, _ in msgs)
+    assert len(app.services.goods_out.search()) == 2
+    # Re-entrancy: a post() arriving while one is running is ignored
+    page._posting = True
+    page.post()
+    assert len(app.services.goods_out.search()) == 2
+    assert not _errors(msgs), msgs
+
+
+def test_scanner_flow_in_lines_editor(ui, sample):
+    """A USB scanner types the barcode and presses Enter: product chosen, cursor to quantity, Enter -> next line."""
+    app, win, msgs, _ = ui
+    app.services.products.save(sample.mdf.id, {"item_type": "RAW_MATERIAL", "internal_code": "MDF-18",
+                                               "name": "MDF 18mm 2440x1220", "unit_id": sample.mdf.unit_id,
+                                               "barcode": "5012345678900", "default_bin_id": sample.bin1.id})
+    win.go("goods_in")
+    page = win.page("goods_in")
+    page.refresh()
+    ed = page.lines
+    ed.clear()
+    ed.add_row()
+    prod = ed.table.cellWidget(0, 0)
+    prod.setEditText("5012345678900")
+    prod.lineEdit().returnPressed.emit()
+    assert prod.value() == sample.mdf.id
+    qty = ed.table.cellWidget(0, 1)
+    qty.setText("4")
+    qty.returnPressed.emit()
+    assert ed.table.rowCount() == 2  # ready for the next scan
+    unknown = ed.table.cellWidget(1, 0)
+    unknown.setEditText("NO-SUCH-CODE")
+    unknown.lineEdit().returnPressed.emit()
+    assert unknown.value() is None and "No product" in ed.total_label.text()
+    assert [(v.product_id, v.quantity) for v in ed.values()] == [(sample.mdf.id, Decimal("4"))]
+
+
+def test_enter_in_a_dialog_field_never_presses_a_button(ui, sample):
+    from PySide6.QtWidgets import QPushButton
+
+    from wms.ui.dialogs.stock_dialogs import ReturnEntryDialog, TransferDialog
+    app, *_ = ui
+    for dlg in (TransferDialog(app), ReturnEntryDialog(app)):
+        assert all(not b.autoDefault() and not b.isDefault() for b in dlg.findChildren(QPushButton))
+
+
+def test_stocktake_screen_count_and_approve(ui, sample):
+    app, win, msgs, _ = ui
+    sample.receive(sample.mdf, 10)
+    count = app.services.stocktake.create(None)
+    win.go("stocktake")
+    page = win.page("stocktake")
+    page.refresh()
+    page._show(app.services.stocktake.get(count.id))
+    page.lines.cellWidget(0, 5).setText("8")
+    page.lines.cellWidget(0, 7).setText("2 sheets water damaged")
+    page.submit()
+    assert app.services.stocktake.get(count.id).status == "SUBMITTED"
+    page.approve()
+    assert app.services.stocktake.get(count.id).status == "APPROVED"
+    assert {r.product.id: r for r in app.services.products.list()}[sample.mdf.id].on_hand == Decimal("8")
+    assert not _errors(msgs), msgs
+
+
+def test_dashboard_shows_actionable_alerts(ui, sample):
+    from datetime import date
+
+    from wms.services.goods_out import IssueLine
+    app, win, msgs, _ = ui
+    sample.receive(sample.mdf, 1)
+    app.services.goods_out.post({"site_id": sample.site.id, "issue_date": date.today()},
+                                [IssueLine(sample.mdf.id, "3")], override_reason="sheets on site")
+    alerts = app.services.dashboard.load().alerts
+    texts = " | ".join(a.text for a in alerts)
+    assert "negative" in texts and "out of stock" in texts and "no scan" in texts
+    win.go("dashboard")
+    win.page("dashboard").refresh()
+    assert not _errors(msgs), msgs
 
 
 def test_operative_sees_limited_menu(qtbot, svc, sample):

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 from sqlalchemy import func, or_, select
@@ -15,7 +15,7 @@ from wms.core.numbers import ZERO, to_qty, utcnow
 from wms.core.permissions import P
 from wms.db.models import Bin, GoodsIssue, GoodsIssueLine, Product, Site, StockLevel, StockMovement
 from wms.services import audit
-from wms.services.base import BaseService, clean_str
+from wms.services.base import BaseService, check_client_token, clean_str, like_pattern
 from wms.services.goods_in import doc_datetime, validate_doc_date
 from wms.services.numbering import next_number
 from wms.services.stock_engine import StockEngine
@@ -31,21 +31,24 @@ class IssueLine:
     notes: str | None = None
 
 
-def allocate(s: Session, product: Product, qty: Decimal) -> list[tuple[Bin, Decimal]]:
+def allocate(s: Session, product: Product, qty: Decimal, shortfall_bin: Bin | None = None
+             ) -> list[tuple[Bin, Decimal]]:
     """Choose bins to pick from: default bin first, then bins with the most stock.
 
-    Only available (non-quarantine) bins are used. Raises InsufficientStockError
-    with the total available if there is not enough.
+    Only available (non-quarantine) bins are used. If there is not enough, raises
+    InsufficientStockError with the total available - unless ``shortfall_bin`` is given
+    (authorised override), in which case everything available is used first and only the
+    remainder is taken from ``shortfall_bin``, so the negative balance is as small as possible.
     """
     levels = list(
         s.scalars(
             select(StockLevel)
-            .join(Bin)
+            .join(Bin, Bin.id == StockLevel.bin_id)
             .where(StockLevel.product_id == product.id, StockLevel.quantity > ZERO,
                    Bin.is_available.is_(True), Bin.is_active.is_(True))
         )
     )
-    levels.sort(key=lambda l: (l.bin_id != product.default_bin_id, -l.quantity))
+    levels.sort(key=lambda l: (l.bin_id != product.default_bin_id, -l.quantity, l.bin_id))
     picks: list[tuple[Bin, Decimal]] = []
     remaining = qty
     for lvl in levels:
@@ -55,8 +58,15 @@ def allocate(s: Session, product: Product, qty: Decimal) -> list[tuple[Bin, Deci
         picks.append((lvl.bin, take))
         remaining -= take
     if remaining > ZERO:
-        total = sum((l.quantity for l in levels), ZERO)
-        raise InsufficientStockError(product.internal_code, "all available bins", total, qty)
+        if shortfall_bin is None:
+            total = sum((l.quantity for l in levels), ZERO)
+            raise InsufficientStockError(product.internal_code, "all available bins", total, qty)
+        for i, (b, take) in enumerate(picks):
+            if b.id == shortfall_bin.id:
+                picks[i] = (b, take + remaining)
+                break
+        else:
+            picks.append((shortfall_bin, remaining))
     return picks
 
 
@@ -68,6 +78,8 @@ class GoodsOutService(BaseService):
         if not lines:
             raise ValidationError("Add at least one product line.")
         with self.db.session() as s:
+            check_client_token(s, GoodsIssue, header.get("client_token"), "issue_number",
+                               EntityType.GOODS_ISSUE.value, "Goods Out")
             site = s.get(Site, header.get("site_id")) if header.get("site_id") else None
             if site is None:
                 raise ValidationError("Destination site / project is required.", "site_id")
@@ -85,6 +97,7 @@ class GoodsOutService(BaseService):
                 notes=clean_str(header.get("notes")),
                 user_id=self.user.id,
                 status=DocumentStatus.POSTED.value,
+                client_token=header.get("client_token") or None,
             )
             s.add(issue)
             s.flush()
@@ -113,9 +126,11 @@ class GoodsOutService(BaseService):
                         if not override_reason:
                             raise
                         fallback = s.get(Bin, product.default_bin_id) if product.default_bin_id else None
-                        if fallback is None:
-                            raise ValidationError(f"{product.internal_code} has no default bin to issue from.") from None
-                        picks = [(fallback, qty)]
+                        if fallback is None or not fallback.is_available:
+                            raise ValidationError(f"{product.internal_code} has no default (non-quarantine) bin to "
+                                                  f"take the missing quantity from - choose the bin on the line."
+                                                  ) from None
+                        picks = allocate(s, product, qty, shortfall_bin=fallback)
                 for b, take in picks:
                     mv = engine.post(
                         movement_type=MovementType.GOODS_OUT, product=product, quantity=take, from_bin=b,
@@ -182,17 +197,36 @@ class GoodsOutService(BaseService):
         if product_id:
             q = q.where(GoodsIssue.id.in_(select(GoodsIssueLine.issue_id).where(GoodsIssueLine.product_id == product_id)))
         if text and text.strip():
-            like = f"%{text.strip()}%"
+            like = like_pattern(text)
             q = q.where(or_(
-                GoodsIssue.issue_number.ilike(like), GoodsIssue.reference.ilike(like),
-                GoodsIssue.requested_by.ilike(like), GoodsIssue.issued_by.ilike(like), GoodsIssue.notes.ilike(like),
-                GoodsIssue.site_id.in_(select(Site.id).where(or_(Site.name.ilike(like), Site.project_number.ilike(like),
-                                                                 Site.customer.ilike(like)))),
+                GoodsIssue.issue_number.ilike(like, escape="\\"), GoodsIssue.reference.ilike(like, escape="\\"),
+                GoodsIssue.requested_by.ilike(like, escape="\\"), GoodsIssue.issued_by.ilike(like, escape="\\"), GoodsIssue.notes.ilike(like, escape="\\"),
+                GoodsIssue.site_id.in_(select(Site.id).where(or_(Site.name.ilike(like, escape="\\"), Site.project_number.ilike(like, escape="\\"),
+                                                                 Site.customer.ilike(like, escape="\\")))),
                 GoodsIssue.id.in_(select(GoodsIssueLine.issue_id).join(Product).where(
-                    or_(Product.internal_code.ilike(like), Product.name.ilike(like)))),
+                    or_(Product.internal_code.ilike(like, escape="\\"), Product.name.ilike(like, escape="\\")))),
             ))
         with self.db.read_session() as s:
             return list(s.scalars(q).unique())
+
+    def recent_similar(self, site_id: int, lines: list[IssueLine], minutes: int = 120) -> GoodsIssue | None:
+        """A posted Goods Out to the same site, in the last ``minutes``, with exactly the same products
+        and quantities - used to warn before what is probably the same issue being entered twice."""
+        wanted: dict[int, Decimal] = {}
+        for ln in lines:
+            wanted[ln.product_id] = wanted.get(ln.product_id, ZERO) + to_qty(ln.quantity)
+        since = utcnow() - timedelta(minutes=minutes)
+        with self.db.read_session() as s:
+            for issue in s.scalars(select(GoodsIssue).options(selectinload(GoodsIssue.lines))
+                                   .where(GoodsIssue.site_id == site_id, GoodsIssue.created_at >= since,
+                                          GoodsIssue.status == DocumentStatus.POSTED.value)
+                                   .order_by(GoodsIssue.id.desc())):
+                got: dict[int, Decimal] = {}
+                for l in issue.lines:
+                    got[l.product_id] = got.get(l.product_id, ZERO) + l.quantity
+                if got == wanted:
+                    return issue
+        return None
 
     def available_for_issue(self, product_id: int) -> Decimal:
         with self.db.read_session() as s:

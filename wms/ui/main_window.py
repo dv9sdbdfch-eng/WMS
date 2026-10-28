@@ -41,6 +41,7 @@ def _nav():
         returns,
         settings,
         sites,
+        stocktake,
         users,
     )
     return [
@@ -49,6 +50,7 @@ def _nav():
         ("STOCK", "finished", "Finished Products", P.PRODUCTS_VIEW, finished.FinishedPage),
         ("STOCK", "locations", "Locations / Bins", P.LOCATIONS_VIEW, locations.LocationsPage),
         ("STOCK", "low_stock", "Low Stock", P.PRODUCTS_VIEW, low_stock.LowStockPage),
+        ("STOCK", "stocktake", "Stocktake", P.STOCKTAKE_COUNT, stocktake.StocktakePage),
         ("OPERATIONS", "goods_in", "Goods In", P.GOODS_IN_POST, goods_in.GoodsInPage),
         ("OPERATIONS", "delivery_notes", "Delivery Notes", P.GOODS_IN_VIEW, delivery_notes.DeliveryNotesPage),
         ("OPERATIONS", "goods_out", "Goods Out", P.GOODS_OUT_VIEW, goods_out.GoodsOutPage),

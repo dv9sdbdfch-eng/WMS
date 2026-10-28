@@ -51,6 +51,20 @@ class DocumentStatus(LabelledEnum):
     REVERSED = "REVERSED"
 
 
+class CountStatus(LabelledEnum):
+    OPEN = "OPEN"
+    SUBMITTED = "SUBMITTED"
+    APPROVED = "APPROVED"
+    CANCELLED = "CANCELLED"
+
+
+class StockStatus(LabelledEnum):
+    OK = "OK"
+    LOW = "LOW"
+    OUT = "OUT"
+    NO_MINIMUM = "NO_MINIMUM"
+
+
 class SiteStatus(LabelledEnum):
     PLANNED = "PLANNED"
     ACTIVE = "ACTIVE"
@@ -101,6 +115,7 @@ class EntityType(LabelledEnum):
     ADJUSTMENT = "ADJUSTMENT"
     TRANSFER = "TRANSFER"
     PRODUCTION = "PRODUCTION"
+    STOCK_COUNT = "STOCK_COUNT"
     SUPPLIER = "SUPPLIER"
     CATEGORY = "CATEGORY"
     UNIT = "UNIT"
@@ -150,5 +165,9 @@ _LABELS = {
     AdjustmentReason.DATA_ENTRY_ERROR: "Data Entry Error",
     AdjustmentReason.OPENING_BALANCE: "Opening Balance",
     EntityType.GOODS_ISSUE: "Goods Out",
+    EntityType.STOCK_COUNT: "Stocktake",
+    CountStatus.SUBMITTED: "Awaiting Approval",
+    StockStatus.OUT: "Out of Stock",
+    StockStatus.NO_MINIMUM: "No Minimum Set",
     EntityType.DELIVERY_NOTE: "Delivery Note",
 }

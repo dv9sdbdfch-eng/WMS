@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from wms.core.numbers import utcnow
 from wms.core.permissions import P
 from wms.db.models import AuditLog
-from wms.services.base import AppContext, BaseService
+from wms.services.base import AppContext, BaseService, like_pattern
 
 
 def _jsonable(value: Any) -> Any:
@@ -90,13 +90,13 @@ class AuditService(BaseService):
         if date_to:
             q = q.where(AuditLog.occurred_at <= datetime.combine(date_to, datetime.max.time()).astimezone())
         if text:
-            like = f"%{text.strip()}%"
+            like = like_pattern(text)
             q = q.where(
-                AuditLog.entity_label.ilike(like)
-                | AuditLog.summary.ilike(like)
-                | AuditLog.username.ilike(like)
-                | AuditLog.new_values.ilike(like)
-                | AuditLog.old_values.ilike(like)
+                AuditLog.entity_label.ilike(like, escape="\\")
+                | AuditLog.summary.ilike(like, escape="\\")
+                | AuditLog.username.ilike(like, escape="\\")
+                | AuditLog.new_values.ilike(like, escape="\\")
+                | AuditLog.old_values.ilike(like, escape="\\")
             )
         with self.db.read_session() as s:
             return list(s.scalars(q))

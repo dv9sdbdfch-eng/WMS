@@ -10,6 +10,9 @@ from wms.core.exceptions import ValidationError
 QTY_PLACES = Decimal("0.001")
 MONEY_PLACES = Decimal("0.0001")
 ZERO = Decimal("0")
+# Largest quantity or amount accepted from input. Far above any real stock figure, far below the
+# 64-bit integer limit of the scaled-integer columns (see wms.db.types).
+MAX_ABS = Decimal("1000000000")
 
 
 def to_decimal(value, field: str = "value", places: Decimal = QTY_PLACES) -> Decimal:
@@ -29,6 +32,8 @@ def to_decimal(value, field: str = "value", places: Decimal = QTY_PLACES) -> Dec
             raise ValidationError(f"'{value}' is not a valid number.", field) from None
     if not d.is_finite():
         raise ValidationError(f"'{value}' is not a valid number.", field)
+    if abs(d) >= MAX_ABS:
+        raise ValidationError(f"'{value}' is too large - check the number.", field)
     return d.quantize(places, rounding=ROUND_HALF_UP)
 
 

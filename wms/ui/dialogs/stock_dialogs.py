@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import date
 
 from PySide6.QtWidgets import QComboBox, QDialog, QFormLayout, QLineEdit, QPlainTextEdit, QVBoxLayout
 
 from wms.core.enums import AdjustmentReason, ItemType, ReturnType
-from wms.core.exceptions import ValidationError
+from wms.core.exceptions import ReturnExceedsIssuedError, ValidationError
 from wms.core.numbers import fmt_qty
 from wms.core.permissions import P
 from wms.services.production import MaterialInput
@@ -34,6 +35,7 @@ class TransferDialog(QDialog):
     def __init__(self, app, product_id: int | None = None, parent=None, from_bin_id: int | None = None):
         super().__init__(parent)
         self.app = app
+        self._token = uuid.uuid4().hex  # the same dialog can never post twice
         self.setWindowTitle("Transfer between bins")
         self.setMinimumWidth(560)
         lay = QVBoxLayout(self)
@@ -92,7 +94,7 @@ class TransferDialog(QDialog):
             info(self, "Transfer", "Choose the product, both bins and the quantity.")
             return
         if run(self, self.app.services.stock.transfer, self.product.value(), self.src.value(), self.dst.value(),
-               qty, self.notes.text()):
+               qty, self.notes.text(), self._token):
             self.app.changed()
             self.accept()
 
@@ -103,6 +105,7 @@ class AdjustmentDialog(QDialog):
     def __init__(self, app, product_id: int | None = None, bin_id: int | None = None, parent=None):
         super().__init__(parent)
         self.app = app
+        self._token = uuid.uuid4().hex  # the same dialog can never post twice
         self.setWindowTitle("Stock adjustment")
         self.setMinimumWidth(580)
         lay = QVBoxLayout(self)
@@ -179,7 +182,7 @@ class AdjustmentDialog(QDialog):
                        f"recorded in the audit trail."):
             return
         if run(self, self.app.services.stock.adjust, self.product.value(), self.bin.value(), new,
-               self.reason_code.currentData(), self.reason.toPlainText(), self._prev):
+               self.reason_code.currentData(), self.reason.toPlainText(), self._prev, self._token):
             self.app.changed()
             self.accept()
 
@@ -188,6 +191,7 @@ class ReturnEntryDialog(QDialog):
     def __init__(self, app, return_type: str = ReturnType.FROM_SITE.value, parent=None):
         super().__init__(parent)
         self.app = app
+        self._token = uuid.uuid4().hex  # the same dialog can never post twice
         self.setWindowTitle("New return")
         self.resize(1000, 640)
         lay = QVBoxLayout(self)
@@ -238,10 +242,21 @@ class ReturnEntryDialog(QDialog):
             return
         header = {"return_type": self.rtype.currentData(), "return_date": self.date.value(),
                   "site_id": self.site.value(), "supplier_id": self.supplier.value(),
-                  "reference": self.reference.text(), "reason": self.reason.text()}
+                  "reference": self.reference.text(), "reason": self.reason.text(), "client_token": self._token}
         inputs = [ReturnLineInput(v.product_id, v.quantity, v.bin_id, v.condition or "USABLE", v.notes) for v in lines]
-        ret = run_with_override(self, self.app.can(P.STOCK_OVERRIDE_NEGATIVE), self.app.services.stock.post_return,
-                                header=header, lines=inputs)
+
+        def post(header, lines, override_reason=None):
+            try:
+                return self.app.services.stock.post_return(header, lines, override_reason)
+            except ReturnExceedsIssuedError as exc:
+                if not confirm(self, "More than was issued", f"{exc.message}\n\nThis is usually a typing mistake "
+                               f"or the wrong site. Post anyway (e.g. material bought directly for the site)?",
+                               yes="Post anyway", danger=True):
+                    return None
+                return self.app.services.stock.post_return({**header, "allow_more_than_issued": True}, lines,
+                                                           override_reason)
+
+        ret = run_with_override(self, self.app.can(P.STOCK_OVERRIDE_NEGATIVE), post, header=header, lines=inputs)
         if ret:
             self.app.changed()
             info(self, "Return posted", f"Return {ret.return_number} has been posted.")
@@ -252,6 +267,7 @@ class ProductionEntryDialog(QDialog):
     def __init__(self, app, parent=None):
         super().__init__(parent)
         self.app = app
+        self._token = uuid.uuid4().hex  # the same dialog can never post twice
         self.setWindowTitle("Record production")
         self.resize(1000, 660)
         lay = QVBoxLayout(self)
@@ -293,7 +309,8 @@ class ProductionEntryDialog(QDialog):
                                      "without consuming any material?"):
             return
         header = {"finished_product_id": self.product.value(), "quantity": qty, "output_bin_id": self.bin.value(),
-                  "production_date": self.date.value(), "site_id": self.site.value(), "notes": self.notes.text()}
+                  "production_date": self.date.value(), "site_id": self.site.value(), "notes": self.notes.text(),
+                  "client_token": self._token}
         order = run_with_override(self, self.app.can(P.STOCK_OVERRIDE_NEGATIVE), self.app.services.production.post,
                                   header=header, materials=[MaterialInput(v.product_id, v.quantity, v.bin_id)
                                                             for v in lines])

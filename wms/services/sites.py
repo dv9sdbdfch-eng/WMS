@@ -14,7 +14,7 @@ from wms.core.numbers import ZERO
 from wms.core.permissions import P
 from wms.db.models import Product, Site, StockMovement
 from wms.services import audit
-from wms.services.base import BaseService, clean_str, normalise_code
+from wms.services.base import BaseService, clean_code, clean_str, like_pattern
 
 SITE_FIELDS = ("project_number", "name", "customer", "address", "postcode", "project_manager", "contact_name",
                "contact_phone", "contact_email", "status", "start_date", "end_date", "notes")
@@ -40,9 +40,9 @@ class SiteService(BaseService):
         if statuses:
             q = q.where(Site.status.in_(statuses))
         if text and text.strip():
-            like = f"%{text.strip()}%"
-            q = q.where(or_(Site.project_number.ilike(like), Site.name.ilike(like), Site.customer.ilike(like),
-                            Site.address.ilike(like), Site.postcode.ilike(like), Site.project_manager.ilike(like)))
+            like = like_pattern(text)
+            q = q.where(or_(Site.project_number.ilike(like, escape="\\"), Site.name.ilike(like, escape="\\"), Site.customer.ilike(like, escape="\\"),
+                            Site.address.ilike(like, escape="\\"), Site.postcode.ilike(like, escape="\\"), Site.project_manager.ilike(like, escape="\\")))
         with self.db.read_session() as s:
             return list(s.scalars(q))
 
@@ -58,9 +58,7 @@ class SiteService(BaseService):
 
     def save(self, site_id: int | None, data: dict, expected_version: int | None = None) -> Site:
         self.require(P.SITES_EDIT)
-        number = normalise_code(data.get("project_number"))
-        if not number:
-            raise ValidationError("Project number is required.", "project_number")
+        number = clean_code(data.get("project_number"), "project_number", "Project number", 50)
         name = clean_str(data.get("name"), "name", required=True, max_len=200)
         try:
             status = SiteStatus(data.get("status") or SiteStatus.ACTIVE).value

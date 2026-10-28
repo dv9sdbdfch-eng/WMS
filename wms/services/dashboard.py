@@ -3,16 +3,31 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
-from sqlalchemy import func, select
+from sqlalchemy import exists, func, select
 
-from wms.core.enums import DocumentStatus, SiteStatus
+from wms.core.enums import CountStatus, DocumentStatus, EntityType, SiteStatus, StockStatus
 from wms.core.numbers import ZERO
-from wms.db.models import DeliveryNote, GoodsIssue, Site, StockMovement
+from wms.db.models import (
+    Attachment,
+    DeliveryNote,
+    GoodsIssue,
+    Site,
+    StockCount,
+    StockLevel,
+    StockMovement,
+)
 from wms.services.base import BaseService
 from wms.services.products import ProductRow, ProductService
+
+
+@dataclass
+class Alert:
+    level: str  # "danger" or "warn"
+    text: str
+    page: str  # main-window page that resolves it
 
 
 @dataclass
@@ -27,6 +42,7 @@ class DashboardData:
     recent_issues: list[GoodsIssue] = field(default_factory=list)
     recent_movements: list[StockMovement] = field(default_factory=list)
     active_sites: list[Site] = field(default_factory=list)
+    alerts: list[Alert] = field(default_factory=list)
 
 
 class DashboardService(BaseService):
@@ -53,4 +69,37 @@ class DashboardService(BaseService):
                                                     .order_by(StockMovement.recorded_at.desc()).limit(15)))
             d.active_sites = list(s.scalars(select(Site).where(Site.status == SiteStatus.ACTIVE.value)
                                             .order_by(Site.project_number)))
+            d.alerts = self._alerts(s, d)
         return d
+
+    def _alerts(self, s, d: DashboardData) -> list[Alert]:
+        """Problems someone has to act on, most serious first. Cheap queries only (runs on every refresh)."""
+        out: list[Alert] = []
+        negative = s.scalar(select(func.count(StockLevel.id)).where(StockLevel.quantity < 0)) or 0
+        if negative:
+            out.append(Alert("danger", f"{negative} bin balance(s) are negative after a stock override - count "
+                                       f"and adjust them.", "movements"))
+        n_out = sum(1 for r in d.low_stock if r.status is StockStatus.OUT)
+        if n_out:
+            out.append(Alert("danger", f"{n_out} product(s) with a minimum level are out of stock.", "low_stock"))
+        if len(d.low_stock) > n_out:
+            out.append(Alert("warn", f"{len(d.low_stock) - n_out} product(s) are at or below their minimum level.",
+                             "low_stock"))
+        waiting = s.scalar(select(func.count(StockCount.id)).where(
+            StockCount.status == CountStatus.SUBMITTED.value)) or 0
+        if waiting:
+            out.append(Alert("warn", f"{waiting} stock count(s) are waiting for approval.", "stocktake"))
+        since = datetime.combine(date.today() - timedelta(days=30), datetime.min.time()).astimezone()
+        no_scan = s.scalar(select(func.count(DeliveryNote.id)).where(
+            DeliveryNote.status == DocumentStatus.POSTED.value, DeliveryNote.created_at >= since,
+            ~exists().where(Attachment.entity_type == EntityType.DELIVERY_NOTE.value,
+                            Attachment.entity_id == DeliveryNote.id, Attachment.is_deleted.is_(False)))) or 0
+        if no_scan:
+            out.append(Alert("warn", f"{no_scan} delivery note(s) from the last 30 days have no scan attached.",
+                             "delivery_notes"))
+        week = datetime.combine(date.today() - timedelta(days=7), datetime.min.time()).astimezone()
+        overrides = s.scalar(select(func.count(StockMovement.id)).where(
+            StockMovement.is_override.is_(True), StockMovement.recorded_at >= week)) or 0
+        if overrides:
+            out.append(Alert("warn", f"{overrides} negative-stock override(s) in the last 7 days.", "movements"))
+        return out

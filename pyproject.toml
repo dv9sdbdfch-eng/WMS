@@ -1,6 +1,6 @@
 [project]
 name = "store-wms"
-version = "1.0.1"
+version = "1.1.0"
 description = "Warehouse management for furniture manufacturing (Windows desktop)"
 requires-python = ">=3.12"
 

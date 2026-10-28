@@ -135,9 +135,30 @@ class DeliveryNoteDialog(QDialog):
             self.preview.empty.setText("No scan attached. Use 'Attach file...' to add the original delivery note.")
 
         buttons = [button("Print", self.print_note)]
+        if dn.status == "POSTED" and app.can(P.GOODS_IN_POST):
+            buttons.append(button("Edit PO / notes...", self.edit_header))
         if dn.status == "POSTED" and app.can(P.GOODS_IN_REVERSE):
             buttons.append(button("Reverse delivery note...", self.reverse, danger=True))
         self.lay.addLayout(h(*buttons, None, button("Close", self.accept)))
+
+    def edit_header(self):
+        from PySide6.QtWidgets import QLineEdit
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Edit delivery note {self.dn.dn_number}")
+        dlg.setMinimumWidth(480)
+        v = QVBoxLayout(dlg)
+        po, notes = QLineEdit(self.dn.po_reference or ""), QLineEdit(self.dn.notes or "")
+        form = QFormLayout()
+        v.addLayout(form)
+        form.addRow("PO / reference", po)
+        form.addRow("Notes", notes)
+        v.addWidget(label("Supplier, number, date and lines cannot be changed after posting - reverse the note and "
+                          "enter it again instead. This change is recorded in the audit trail.", "Muted", wrap=True))
+        v.addLayout(h(None, button("Cancel", dlg.reject), button("Save", dlg.accept, primary=True)))
+        if dlg.exec() == QDialog.DialogCode.Accepted and run(
+                self, self.app.services.goods_in.update_header, self.dn.id, po.text(), notes.text()):
+            self.app.changed()
+            self.accept()
 
     def _preview(self, row: int):
         att = self.docs.current()

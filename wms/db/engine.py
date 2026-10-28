@@ -55,7 +55,63 @@ def _postgres_append_only_triggers() -> list[str]:
     return stmts
 
 
+# Stock documents and their lines: never deleted, and a posted line never changes. Mistakes are
+# corrected by reversal, so the original record always stays readable.
+DOCUMENT_TABLES = ("delivery_notes", "goods_issues", "stock_returns", "production_orders",
+                   "stock_adjustments", "stock_transfers", "stock_counts")
+LINE_TABLES = ("delivery_note_lines", "goods_issue_lines", "return_lines", "production_lines")
+REVERSIBLE_TABLES = ("delivery_notes", "goods_issues", "stock_returns", "production_orders")
+
+
+def _sqlite_document_triggers() -> list[str]:
+    def abort(name: str, when: str, table: str, event: str, msg: str) -> str:
+        return (f"CREATE TRIGGER IF NOT EXISTS trg_{table}_{name} BEFORE {event} ON {table} "
+                f"{('WHEN ' + when) if when else ''} BEGIN SELECT RAISE(ABORT, '{msg}'); END;")
+
+    stmts = []
+    for t in (*DOCUMENT_TABLES, *LINE_TABLES, "stock_count_lines"):
+        stmts.append(abort("no_delete", "", t, "DELETE", f"{t}: stock records cannot be deleted - reverse instead"))
+    for t in LINE_TABLES:
+        stmts.append(abort("posted_fixed", "OLD.movement_id IS NOT NULL", t,
+                           "UPDATE OF product_id, quantity, bin_id, movement_id",
+                           f"{t}: a posted line cannot be changed - reverse the document instead"))
+        stmts.append(abort("qty_positive", "NEW.quantity <= 0", t, "INSERT", f"{t}: quantity must be above zero"))
+    for t in REVERSIBLE_TABLES:
+        stmts.append(abort("reversed_final", "OLD.status = 'REVERSED'", t, "UPDATE",
+                           f"{t}: a reversed document cannot be changed or reopened"))
+    for t in ("stock_adjustments", "stock_transfers"):
+        stmts.append(abort("posted_fixed", "OLD.movement_id IS NOT NULL", t, "UPDATE",
+                           f"{t}: a posted record cannot be changed"))
+    stmts.append(abort("closed_final", "OLD.status IN ('APPROVED', 'CANCELLED')", "stock_counts", "UPDATE",
+                       "stock_counts: an approved or cancelled count cannot be changed"))
+    stmts.append(abort("approved_fixed", "OLD.adjustment_id IS NOT NULL", "stock_count_lines", "UPDATE",
+                       "stock_count_lines: an approved count line cannot be changed"))
+    return stmts
+
+
+def _postgres_document_triggers() -> list[str]:
+    stmts = [
+        "CREATE OR REPLACE FUNCTION wms_no_delete() RETURNS trigger AS $$ "
+        "BEGIN RAISE EXCEPTION '%: stock records cannot be deleted', TG_TABLE_NAME; END; $$ LANGUAGE plpgsql;"
+    ]
+    for t in (*DOCUMENT_TABLES, *LINE_TABLES, "stock_count_lines"):
+        stmts.append(f"DROP TRIGGER IF EXISTS trg_{t}_no_delete ON {t};")
+        stmts.append(f"CREATE TRIGGER trg_{t}_no_delete BEFORE DELETE ON {t} "
+                     f"FOR EACH ROW EXECUTE FUNCTION wms_no_delete();")
+    return stmts
+
+
+def integrity_trigger_sql(dialect_name: str) -> list[str]:
+    """Every database-level guard: append-only ledger/audit plus protected stock documents."""
+    if dialect_name == "sqlite":
+        return _sqlite_append_only_triggers() + _sqlite_document_triggers()
+    if dialect_name == "postgresql":
+        return _postgres_append_only_triggers() + _postgres_document_triggers()
+    return []
+
+
 def append_only_trigger_sql(dialect_name: str) -> list[str]:
+    """Ledger and audit triggers only (what migration 0001 installs)."""
     if dialect_name == "sqlite":
         return _sqlite_append_only_triggers()
     if dialect_name == "postgresql":
@@ -142,7 +198,7 @@ class Database:
             if not tables:
                 log.info("Creating new database schema")
                 Base.metadata.create_all(conn)
-                for stmt in append_only_trigger_sql(self.dialect):
+                for stmt in integrity_trigger_sql(self.dialect):
                     conn.execute(text(stmt))
                 command.stamp(cfg, "head")
             else:

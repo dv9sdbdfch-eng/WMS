@@ -33,6 +33,15 @@ class DuplicateError(WMSError):
     pass
 
 
+class AlreadyPostedError(DuplicateError):
+    """The same entry form was submitted again (double-click, repeated Enter, retry after a freeze)."""
+
+    def __init__(self, message: str, entity_type: str, entity_id: int):
+        super().__init__(message)
+        self.entity_type = entity_type
+        self.entity_id = entity_id
+
+
 class PermissionDeniedError(WMSError):
     pass
 
@@ -61,3 +70,20 @@ class InsufficientStockError(WMSError):
             f"Insufficient stock for {product_code} in bin {bin_code}: "
             f"available {available.normalize():f}, requested {requested.normalize():f}."
         )
+
+
+class ReturnExceedsIssuedError(WMSError):
+    """A return from site is for more than was ever issued to that site.
+
+    Usually a typing mistake or the wrong site. The UI asks for confirmation (e.g. material
+    bought directly for the site) and re-submits with ``allow_more_than_issued``.
+    """
+
+    def __init__(self, product_code: str, project_number: str, issued: Decimal, returning: Decimal):
+        self.product_code = product_code
+        self.project_number = project_number
+        self.issued = issued
+        self.returning = returning
+        super().__init__(
+            f"{product_code}: returning {returning.normalize():f} from {project_number}, but only "
+            f"{issued.normalize():f} (net) was issued to that site.")

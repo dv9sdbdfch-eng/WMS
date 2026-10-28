@@ -8,6 +8,7 @@ from decimal import Decimal
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QComboBox,
     QHeaderView,
     QLineEdit,
@@ -101,6 +102,10 @@ class LinesEditor(QWidget):
         self.table.setCellWidget(r, 0, prod)
         q = DecimalEdit()
         q.textChanged.connect(lambda _: self._update_total())
+        # Scanner / keyboard flow: scan (or type a code) + Enter -> product chosen, cursor in Quantity;
+        # quantity + Enter -> next line, cursor back in Product, ready for the next scan.
+        prod.lineEdit().returnPressed.connect(lambda w=prod, qe=q: self._code_entered(w, qe))
+        q.returnPressed.connect(lambda qe=q: self._quantity_entered(qe))
         self.table.setCellWidget(r, 1, q)
         unit = QLineEdit()
         unit.setReadOnly(True)
@@ -133,6 +138,30 @@ class LinesEditor(QWidget):
             self._bin_widget(r).set_value(bin_id)
         prod.setFocus()
         self.changed.emit()
+
+    def _code_entered(self, prod: PickCombo, qty_edit: DecimalEdit) -> None:
+        text = prod.currentText().strip()
+        if prod.value() is None and text:
+            p = self.app.services.products.find_by_code(text)
+            if p is None or p.id not in self._products:
+                prod.lineEdit().selectAll()
+                QApplication.beep()
+                self.total_label.setText(f"No product with code / barcode '{text}'")
+                return
+            prod.set_value(p.id)
+            self._product_picked(prod)
+        if prod.value() is not None:
+            qty_edit.setFocus()
+            qty_edit.selectAll()
+
+    def _quantity_entered(self, qty_edit: DecimalEdit) -> None:
+        r = next((i for i in range(self.table.rowCount()) if self.table.cellWidget(i, 1) is qty_edit), -1)
+        if r < 0 or self.table.cellWidget(r, 0).value() is None or not qty_edit.text().strip():
+            return
+        if r == self.table.rowCount() - 1:
+            self.add_row()
+        else:
+            self.table.cellWidget(r + 1, 0).setFocus()
 
     def _bin_col_index(self) -> int:
         return next(i for i, c in enumerate(self.cols) if i > 2 and c not in ("Available", "Condition", "Notes")

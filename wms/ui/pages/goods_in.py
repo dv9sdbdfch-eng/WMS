@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import date, timedelta
 
 from PySide6.QtWidgets import QFileDialog, QFormLayout, QLineEdit, QListWidget, QSplitter, QVBoxLayout, QWidget
@@ -23,7 +24,10 @@ class GoodsInPage(Page):
     def __init__(self, app, parent=None):
         super().__init__(app, parent)
         self.add_action(button("Clear form", self.clear))
-        self.add_action(button("Post delivery", self.post, primary=True, shortcut="Ctrl+S"))
+        self.post_button = button("Post delivery", self.post, primary=True, shortcut="Ctrl+S")
+        self.add_action(self.post_button)
+        self._token = uuid.uuid4().hex  # one per filled-in form: the server refuses a second posting
+        self._posting = False
 
         split = QSplitter()
         left = QWidget()
@@ -128,8 +132,21 @@ class GoodsInPage(Page):
         self.files.clear()
         self.preview.show_file(None)
         self.dup_warning.hide()
+        self._token = uuid.uuid4().hex
 
     def post(self):
+        # Ignore a second click / Ctrl+S that arrives while the first posting is still running.
+        if self._posting:
+            return
+        self._posting = True
+        self.post_button.setEnabled(False)
+        try:
+            self._post()
+        finally:
+            self._posting = False
+            self.post_button.setEnabled(True)
+
+    def _post(self):
         try:
             values = self.lines.values()
         except ValidationError as e:
@@ -158,7 +175,7 @@ class GoodsInPage(Page):
                                            "You can attach it later from Delivery Notes."):
             return
         header = {"supplier_id": self.supplier.value(), "dn_number": self.dn_number.text(), "delivery_date": d,
-                  "po_reference": self.po.text(), "notes": self.notes.text()}
+                  "po_reference": self.po.text(), "notes": self.notes.text(), "client_token": self._token}
         lines = [ReceiptLine(v.product_id, v.quantity, v.bin_id, v.unit_cost, v.notes) for v in values]
         dn = run(self, self.app.services.goods_in.post, header, lines, list(self._paths))
         if dn:
