@@ -38,7 +38,7 @@ def _signed(m):
 
 
 class SiteDialog(QDialog):
-    def __init__(self, app, site_id: int | None, parent=None):
+    def __init__(self, app, site_id: int | None, parent=None, tab: str | None = None):
         super().__init__(parent)
         self.app = app
         self.site = app.services.sites.get(site_id) if site_id else None
@@ -54,6 +54,10 @@ class SiteDialog(QDialog):
         self.tabs.addTab(self._details(), "Details")
         if self.site:
             self._build_history()
+            if tab in ("materials", "summary"):
+                self.tabs.setCurrentWidget(self.summary_tab)
+            elif tab == "history":
+                self.tabs.setCurrentWidget(self.history_tab)
         self.btn_save = button("Save", self.save, primary=True, shortcut="Ctrl+S")
         self.btn_save.setVisible(self.can_edit)
         lay.addLayout(h(None, button("Close", self.reject), self.btn_save))
@@ -113,23 +117,30 @@ class SiteDialog(QDialog):
         ml = QVBoxLayout(mw)
         ml.addWidget(label("Positive quantities went to site; negative quantities came back.", "Muted"))
         ml.addWidget(self.movements, 1)
-        self.tabs.addTab(mw, "Materials Issued")
+        self.tabs.addTab(mw, "Movement History")
+        self.history_tab = mw
 
         summary = app.services.sites.material_summary(sid)
         st = DataTable([Col("Code", lambda r: r.product.internal_code, width=110),
                         Col("Material", lambda r: r.product.name, width=260),
                         Col("Issued", lambda r: r.issued, QTY, 90),
                         Col("Returned", lambda r: r.returned, QTY, 90),
-                        Col("Net used", lambda r: r.net, QTY, 90),
+                        Col("Net Qty", lambda r: r.net, QTY, 90),
                         Col("Unit", lambda r: r.product.unit.code, width=50),
+                        Col("Last Movement", lambda r: r.last_movement, DATETIME, 130),
                         Col("Value (at issue cost)", lambda r: r.value, MONEY, 130)])
         st.set_items(summary)
+        st.activated_item.connect(lambda r: app.open_entity("PRODUCT", r.product.id, self, tab="history"))
         sw = QWidget()
         sl = QVBoxLayout(sw)
+        sl.addWidget(label("What have we sent to this project? Issued minus returned, per material.", "Muted"))
         sl.addWidget(st, 1)
-        sl.addWidget(label(f"Total material value on site: {fmt_money(sum((r.value for r in summary), 0))}",
-                           "SectionTitle"))
-        self.tabs.addTab(sw, "Summary by Material")
+        sl.addLayout(h(label(f"{len(summary)} material(s)   ·   Total material value on site: "
+                             f"{fmt_money(sum((r.value for r in summary), 0))}", "SectionTitle"), None,
+                       button("Open complete movement history",
+                              lambda: self.tabs.setCurrentWidget(self.history_tab))))
+        self.tabs.insertTab(1, sw, "Material Summary")
+        self.summary_tab = sw
         if app.can(P.AUDIT_VIEW):
             at = DataTable([Col("When", lambda a: a.occurred_at, DATETIME, 130),
                             Col("User", lambda a: a.username, width=100),

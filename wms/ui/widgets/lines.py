@@ -197,6 +197,22 @@ class LinesEditor(QWidget):
         self._update_total()
         self.changed.emit()
 
+    def add_product(self, product_id: int) -> None:
+        """Put a product on the form (from search): into the empty last line, or a new line.
+        The cursor lands in its Quantity box."""
+        if product_id not in self._products:
+            self.reload_options()
+        r = self.table.rowCount() - 1
+        prod = self.table.cellWidget(r, 0) if r >= 0 else None
+        if prod is None or prod.value() is not None:
+            self.add_row(product_id)
+            r = self.table.rowCount() - 1
+        else:
+            prod.set_value(product_id)
+            self._product_picked(prod)
+        self.table.setCurrentCell(r, 1)
+        self.table.cellWidget(r, 1).setFocus()
+
     def remove_row(self):
         r = self.table.currentRow()
         if r < 0:

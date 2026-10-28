@@ -125,6 +125,15 @@ class GoodsOutPage(Page):
             self.lines.reload_options()
         self.history.refresh()
 
+    def add_product(self, product_id: int, site_id: int | None = None) -> None:
+        """Start issuing a product found in search."""
+        if not self.can_post:
+            return
+        self.tabs.setCurrentIndex(0)
+        if site_id and self.site.value() is None:
+            self.site.set_value(site_id)
+        self.lines.add_product(product_id)
+
     def clear(self):
         self.requested_by.clear()
         self.reference.clear()

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 
 from sqlalchemy import func, or_, select
@@ -28,6 +28,11 @@ class SiteMaterialSummary:
     issued: Decimal
     returned: Decimal
     value: Decimal
+    last_movement: datetime | None = None
+
+    @property
+    def id(self) -> int:
+        return self.product.id
 
     @property
     def net(self) -> Decimal:
@@ -113,6 +118,8 @@ class SiteService(BaseService):
         totals: dict[int, SiteMaterialSummary] = {}
         for m in self.movements(site_id):
             row = totals.setdefault(m.product_id, SiteMaterialSummary(m.product, ZERO, ZERO, ZERO))
+            if row.last_movement is None or m.occurred_at > row.last_movement:
+                row.last_movement = m.occurred_at
             # A reversal of a Goods Out moves stock back into a bin (to_bin set).
             sign = 1 if m.from_bin_id else -1
             cost = m.unit_cost or ZERO

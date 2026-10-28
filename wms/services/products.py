@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal
 
-from sqlalchemy import exists, func, or_, select
+from sqlalchemy import and_, exists, func, or_, select, true
 from sqlalchemy.orm import Session, aliased
 
 from wms.core.enums import FinishedStatus, ItemType, StockStatus
@@ -28,7 +28,7 @@ from wms.services.base import BaseService, clean_code, clean_str, like_pattern, 
 from wms.services.stock_engine import product_totals_query
 
 PRODUCT_FIELDS = (
-    "item_type", "internal_code", "supplier_code", "barcode", "name", "description", "category_id", "unit_id",
+    "item_type", "internal_code", "supplier_code", "barcode", "name", "description", "brand", "category_id", "unit_id",
     "supplier_id", "default_bin_id", "min_stock", "reorder_qty", "unit_cost", "notes", "is_active",
 )
 FINISHED_FIELDS = ("production_date", "site_id", "customer", "status")
@@ -71,29 +71,77 @@ class ProductRow:
         return max(target - self.available, ZERO)
 
 
-def text_filter(text: str):
-    """WHERE clause matching a product by any of its identifying fields, supplier, category or bin."""
-    like = like_pattern(text)
+SEARCH_SEPARATORS = " -/._"
+
+
+def code_key(text: str | None) -> str:
+    """How codes are compared when the user types them differently: 'h 3311', 'H-3311' and 'H3311'
+    are the same. Spaces, dashes, slashes, dots and underscores are dropped; case is ignored."""
+    return "".join(ch for ch in (text or "").upper() if ch not in SEARCH_SEPARATORS)
+
+
+def code_key_sql(col):
+    """``code_key`` done by the database on a column, so stored codes are compared the same way."""
+    expr = col
+    for ch in SEARCH_SEPARATORS:
+        expr = func.replace(expr, ch, "")
+    return func.upper(expr)
+
+
+def key_pattern(key: str) -> str:
+    """'contains' LIKE pattern for a code key (wildcards typed by the user are matched literally)."""
+    return "%" + key.replace("\\", "\\\\").replace("%", "\\%") + "%"
+
+
+def search_terms(text: str | None, max_terms: int = 6) -> list[str]:
+    """Words of a search, trimmed. 'oak 18' must match both words, in any field and any order."""
+    return (text or "").split()[:max_terms]
+
+
+def _stocked_in(bin_condition):
+    """Ids of products currently held in a bin matching the condition. (Bins are picked first: 400
+    bins are cheaper to test than 20,000 stock rows.)"""
+    return select(StockLevel.product_id).where(StockLevel.quantity != ZERO,
+                                               StockLevel.bin_id.in_(select(Bin.id).where(bin_condition)))
+
+
+def _term_filter(term: str):
+    like = like_pattern(term)
     sup = aliased(Supplier)
     cat = aliased(Category)
-    in_bin = exists().where(
-        StockLevel.product_id == Product.id,
-        StockLevel.quantity != ZERO,
-        StockLevel.bin_id == Bin.id,
-        Bin.full_code.ilike(like, escape="\\"),
-    )
-    default_bin = exists().where(Bin.id == Product.default_bin_id, Bin.full_code.ilike(like, escape="\\"))
+    stocked_in = _stocked_in(Bin.full_code.ilike(like, escape="\\"))
     return or_(
         Product.internal_code.ilike(like, escape="\\"),
         Product.supplier_code.ilike(like, escape="\\"),
         Product.barcode.ilike(like, escape="\\"),
         Product.name.ilike(like, escape="\\"),
         Product.description.ilike(like, escape="\\"),
+        Product.brand.ilike(like, escape="\\"),
         exists().where(sup.id == Product.supplier_id, sup.name.ilike(like, escape="\\")),
         exists().where(cat.id == Product.category_id, cat.name.ilike(like, escape="\\")),
-        in_bin,
-        default_bin,
+        Product.id.in_(stocked_in),
+        exists().where(Bin.id == Product.default_bin_id, Bin.full_code.ilike(like, escape="\\")),
     )
+
+
+def text_filter(text: str):
+    """WHERE clause matching a product by any of its identifying fields, brand, supplier, category or bin.
+
+    Every word must match somewhere ('oak 18'). Codes also match when typed with different spacing or
+    punctuation ('h 3311' finds H3311, 'B04' finds bin B-04)."""
+    terms = search_terms(text)
+    if not terms:
+        return true()
+    words = and_(*(_term_filter(t) for t in terms))
+    key = code_key(text)
+    if len(key) < 2:
+        return words
+    pat = key_pattern(key)
+    by_code = or_(code_key_sql(Product.internal_code).like(pat, escape="\\"),
+                  code_key_sql(Product.supplier_code).like(pat, escape="\\"),
+                  code_key_sql(Product.barcode).like(pat, escape="\\"),
+                  Product.id.in_(_stocked_in(code_key_sql(Bin.code).like(pat, escape="\\"))))
+    return or_(words, by_code)
 
 
 class ProductService(BaseService):
@@ -228,6 +276,7 @@ class ProductService(BaseService):
         if clash:
             raise DuplicateError(f"'{code}' is the barcode of product {clash} - choose another code.")
         v["description"] = clean_str(data.get("description"))
+        v["brand"] = clean_str(data.get("brand"), "brand", max_len=100)
         v["notes"] = clean_str(data.get("notes"))
         unit = s.get(Unit, data.get("unit_id")) if data.get("unit_id") else None
         if unit is None:
