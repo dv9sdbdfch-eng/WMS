@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from PySide6.QtWidgets import QCheckBox, QComboBox
 
-from wms.core.enums import ItemType
+from wms.core.enums import ItemType, StockStatus
 from wms.core.permissions import P
 from wms.ui.pages.base import Page
 from wms.ui.widgets.common import MONEY, QTY, Col, DataTable, PickCombo, SearchBox, button, h, label
@@ -18,6 +18,7 @@ def product_columns():
         Col("Available", lambda r: r.available, QTY, 90),
         Col("Unit", lambda r: r.product.unit.code, width=60),
         Col("Min", lambda r: r.product.min_stock, QTY, 70),
+        Col("Status", lambda r: "" if r.status is StockStatus.NO_MINIMUM else r.status.label, width=95),
         Col("Default Bin", lambda r: r.product.default_bin.full_code if r.product.default_bin else "", width=200),
         Col("Supplier", lambda r: r.product.supplier.name if r.product.supplier else "", width=150),
         Col("Supplier Code", lambda r: r.product.supplier_code or "", width=110),

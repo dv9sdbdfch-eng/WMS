@@ -12,7 +12,7 @@ from wms.core.exceptions import DuplicateError, NotFoundError, ValidationError
 from wms.core.permissions import P
 from wms.db.models import Bin, Location, StockLevel
 from wms.services import audit
-from wms.services.base import BaseService, clean_str, normalise_code
+from wms.services.base import BaseService, clean_code, clean_str, normalise_code, prefix_pattern
 
 # Allowed parent kind for each kind (None = top level).
 PARENT_KIND = {
@@ -42,7 +42,7 @@ class LocationService(BaseService):
                 if recursive:
                     loc = s.get(Location, location_id)
                     q = q.join(Location).where(
-                        (Location.id == location_id) | Location.path.like(f"{loc.path} / %")
+                        (Location.id == location_id) | Location.path.like(prefix_pattern(loc.path), escape="\\")
                     )
                 else:
                     q = q.where(Bin.location_id == location_id)
@@ -65,15 +65,15 @@ class LocationService(BaseService):
     def save_location(self, location_id: int | None, data: dict) -> Location:
         self.require(P.LOCATIONS_EDIT)
         kind = LocationKind(data.get("kind") or LocationKind.WAREHOUSE)
-        code = normalise_code(data.get("code"))
-        if not code:
-            raise ValidationError("Code is required.", "code")
+        code = clean_code(data.get("code"), "code", "Code", 30)
         if "/" in code:
             raise ValidationError("Code cannot contain '/'.", "code")
         name = clean_str(data.get("name"), "name", max_len=120) or code
         parent_id = data.get("parent_id")
         with self.db.session() as s:
             parent = s.get(Location, parent_id) if parent_id else None
+            if parent is not None and not parent.is_active:
+                raise ValidationError(f"{parent.path} is archived - reactivate it first.")
             allowed = PARENT_KIND[kind]
             if allowed is None and parent is not None:
                 raise ValidationError("A warehouse cannot be inside another location.")
@@ -92,6 +92,7 @@ class LocationService(BaseService):
                     raise ValidationError("A location cannot be moved inside itself.")
                 if not data.get("is_active", True) and loc.is_active:
                     self._ensure_empty(s, loc)
+                    self._archive_children(s, loc)
             else:
                 loc = Location()
                 s.add(loc)
@@ -110,11 +111,28 @@ class LocationService(BaseService):
 
     def _ensure_empty(self, s: Session, loc: Location) -> None:
         bins = s.scalars(
-            select(Bin).join(Location).where((Location.id == loc.id) | Location.path.like(f"{loc.path} / %"))
+            select(Bin).join(Location).where((Location.id == loc.id) | Location.path.like(prefix_pattern(loc.path), escape="\\"))
         )
         for b in bins:
             if self.bin_quantity_total(s, b.id):
                 raise ValidationError(f"Cannot deactivate: bin {b.full_code} still holds stock.")
+
+    def _archive_children(self, s: Session, loc: Location) -> None:
+        """Archiving a location archives everything under it, so its bins can no longer be chosen
+        for Goods In or transfers. History still shows them (bins are never deleted)."""
+        bins = list(s.scalars(select(Bin).join(Location, Location.id == Bin.location_id).where(
+            Bin.is_active.is_(True),
+            (Location.id == loc.id) | Location.path.like(prefix_pattern(loc.path), escape="\\"))))
+        subs = list(s.scalars(select(Location).where(Location.is_active.is_(True),
+                                                     Location.path.like(prefix_pattern(loc.path), escape="\\"))))
+        for b in bins:
+            b.is_active = False
+        for sub in subs:
+            sub.is_active = False
+        if bins or subs:
+            audit.record(s, self.ctx, "LOCATION_ARCHIVED", "LOCATION", loc.id, loc.path,
+                         f"{len(subs)} sub-location(s) and {len(bins)} bin(s) archived with it.",
+                         new={"bins": [b.full_code for b in bins], "locations": [x.path for x in subs]})
 
     def _refresh_paths(self, s: Session, loc: Location) -> None:
         loc.path = f"{loc.parent.path} / {loc.code}" if loc.parent else loc.code
@@ -127,15 +145,15 @@ class LocationService(BaseService):
     # -- bins ---------------------------------------------------------------
     def save_bin(self, bin_id: int | None, data: dict) -> Bin:
         self.require(P.LOCATIONS_EDIT)
-        code = normalise_code(data.get("code"))
-        if not code:
-            raise ValidationError("Bin code is required.", "code")
+        code = clean_code(data.get("code"), "code", "Bin code", 30)
         if "/" in code:
             raise ValidationError("Code cannot contain '/'.", "code")
         with self.db.session() as s:
             loc = s.get(Location, data.get("location_id"))
             if loc is None:
                 raise ValidationError("Select the location this bin belongs to.", "location_id")
+            if not loc.is_active and data.get("is_active", True):
+                raise ValidationError(f"{loc.path} is archived - reactivate the location first.", "location_id")
             dup = s.scalar(select(Bin.id).where(Bin.location_id == loc.id, Bin.code == code))
             if dup and dup != bin_id:
                 raise DuplicateError(f"Bin '{code}' already exists in {loc.path}.")
@@ -169,11 +187,15 @@ class LocationService(BaseService):
         if end < start or end - start > 500:
             raise ValidationError("Choose a range of up to 500 bins.")
         prefix = normalise_code(prefix)
+        if "/" in prefix or len(prefix) + max(width, len(str(end))) > 30:
+            raise ValidationError("Bin prefix is too long or contains '/'.")
         created = 0
         with self.db.session() as s:
             loc = s.get(Location, location_id)
             if loc is None:
                 raise NotFoundError("Location not found.")
+            if not loc.is_active:
+                raise ValidationError(f"{loc.path} is archived - reactivate it first.")
             existing = set(s.scalars(select(Bin.code).where(Bin.location_id == loc.id)))
             for i in range(start, end + 1):
                 code = f"{prefix}{i:0{width}d}"

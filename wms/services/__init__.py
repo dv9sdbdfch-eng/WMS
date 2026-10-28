@@ -89,6 +89,16 @@ class Services:
         return AuditService(self.ctx)
 
     @cached_property
+    def settings(self):
+        from wms.services.settings import SettingsService
+        return SettingsService(self.ctx)
+
+    @cached_property
+    def stocktake(self):
+        from wms.services.stocktake import StocktakeService
+        return StocktakeService(self.ctx)
+
+    @cached_property
     def backup(self):
         from wms.services.backup import BackupService
         return BackupService(self.ctx)

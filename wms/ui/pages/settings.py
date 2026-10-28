@@ -21,7 +21,6 @@ from PySide6.QtWidgets import (
 from wms import __version__
 from wms.core.numbers import fmt_qty
 from wms.core.permissions import P
-from wms.services import audit
 from wms.ui.pages.base import Page
 from wms.ui.widgets.common import DATETIME, Col, DataTable, SearchBox, button, confirm, h, info, label, run
 
@@ -101,27 +100,10 @@ class SettingsPage(Page):
             self.backup_dir.setText(d)
 
     def _save_general(self):
-        cfg = self.app.ctx.config
-        old = {"company_name": cfg.company_name, "auto_backup_on_exit": cfg.auto_backup_on_exit,
-               "backups_to_keep": cfg.backups_to_keep, "backup_dir": str(cfg.backup_path),
-               "max_attachment_mb": cfg.max_attachment_mb}
-        cfg.company_name = self.company.text().strip() or "My Company Ltd"
-        cfg.auto_backup_on_exit = self.auto_backup.isChecked()
-        cfg.backups_to_keep = self.keep.value()
-        cfg.backup_dir = self.backup_dir.text().strip()
-        cfg.max_attachment_mb = self.max_mb.value()
-        new = {"company_name": cfg.company_name, "auto_backup_on_exit": cfg.auto_backup_on_exit,
-               "backups_to_keep": cfg.backups_to_keep, "backup_dir": str(cfg.backup_path),
-               "max_attachment_mb": cfg.max_attachment_mb}
-
-        def save():
-            cfg.save()
-            o, n = audit.diff(old, new)
-            if n:
-                with self.app.ctx.db.session() as s:
-                    audit.record(s, self.app.ctx, "SETTINGS_CHANGED", "SETTING", None, "Settings", old=o, new=n)
-            return True
-        if run(self, save):
+        changes = {"company_name": self.company.text(), "auto_backup_on_exit": self.auto_backup.isChecked(),
+                   "backups_to_keep": self.keep.value(), "backup_dir": self.backup_dir.text().strip(),
+                   "max_attachment_mb": self.max_mb.value()}
+        if run(self, self.app.services.settings.save_general, changes) is not None:
             info(self, "Settings", "Settings saved.")
 
     # -- suppliers / categories / units -------------------------------------

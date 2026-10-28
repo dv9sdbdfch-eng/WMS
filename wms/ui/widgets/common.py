@@ -479,6 +479,10 @@ def h(*widgets, stretch_end: bool = False, spacing: int = 8) -> QHBoxLayout:
 def button(text: str, slot: Callable | None = None, primary: bool = False, danger: bool = False,
            shortcut: str | None = None, tooltip: str | None = None) -> QPushButton:
     b = QPushButton(text)
+    # Never let Enter in a field "click" a dialog button: barcode scanners send Enter after every
+    # scan, and an operative pressing Enter after a quantity must not post (or cancel) a document.
+    b.setAutoDefault(False)
+    b.setDefault(False)
     if primary:
         b.setObjectName("Primary")
     if danger:

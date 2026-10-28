@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import date
 
 from PySide6.QtWidgets import QComboBox, QFormLayout, QLineEdit, QTabWidget, QVBoxLayout, QWidget
 
 from wms.core.exceptions import ValidationError
+from wms.core.numbers import fmt_datetime
 from wms.core.permissions import P
 from wms.services.goods_out import IssueLine
 from wms.ui.pages.base import ListPage, Page
@@ -80,7 +82,10 @@ class GoodsOutPage(Page):
         self.can_post = app.can(P.GOODS_OUT_POST)
         if self.can_post:
             self.tabs.addTab(self._entry_tab(), "New Goods Out")
-            self.add_action(button("Post Goods Out", self.post, primary=True, shortcut="Ctrl+S"))
+            self.post_button = button("Post Goods Out", self.post, primary=True, shortcut="Ctrl+S")
+            self.add_action(self.post_button)
+        self._token = uuid.uuid4().hex  # one per filled-in form: the server refuses a second posting
+        self._posting = False
         self.tabs.addTab(self.history, "History")
         self.tabs.currentChanged.connect(lambda _: self.history.refresh() if self.tabs.currentWidget()
                                          is self.history else None)
@@ -128,11 +133,23 @@ class GoodsOutPage(Page):
         self.date.set_value(date.today())
         self.lines.clear()
         self.lines.add_row()
+        self._token = uuid.uuid4().hex
 
     def post(self):
         if self.tabs.currentWidget() is self.history:
             self.tabs.setCurrentIndex(0)
             return
+        if self._posting:  # second click / Ctrl+S while the first posting is still running
+            return
+        self._posting = True
+        self.post_button.setEnabled(False)
+        try:
+            self._post()
+        finally:
+            self._posting = False
+            self.post_button.setEnabled(True)
+
+    def _post(self):
         try:
             values = self.lines.values()
         except ValidationError as e:
@@ -150,8 +167,14 @@ class GoodsOutPage(Page):
             return
         header = {"site_id": self.site.value(), "issue_date": self.date.value(),
                   "requested_by": self.requested_by.text(), "issued_by": self.issued_by.text(),
-                  "reference": self.reference.text(), "notes": self.notes.text()}
+                  "reference": self.reference.text(), "notes": self.notes.text(), "client_token": self._token}
         lines = [IssueLine(v.product_id, v.quantity, v.bin_id, v.notes) for v in values]
+        same = self.app.services.goods_out.recent_similar(self.site.value(), lines)
+        if same and not confirm(self, "Possible duplicate",
+                                f"{same.issue_number} was posted to this site at {fmt_datetime(same.created_at)} "
+                                f"with exactly the same materials and quantities.\n\nIs this a separate, second "
+                                f"issue? Choose Cancel if it was already entered.", yes="Post again", danger=True):
+            return
         issue = run_with_override(self, self.app.can(P.STOCK_OVERRIDE_NEGATIVE), self.app.services.goods_out.post,
                                   header=header, lines=lines)
         if issue:

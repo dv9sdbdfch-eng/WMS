@@ -17,7 +17,7 @@ from wms.core.permissions import P
 from wms.db.models import Bin, DeliveryNote, DeliveryNoteLine, Product, StockMovement, Supplier
 from wms.services import audit
 from wms.services.attachments import AttachmentService
-from wms.services.base import BaseService, clean_str
+from wms.services.base import BaseService, check_client_token, clean_str, like_pattern
 from wms.services.stock_engine import StockEngine
 
 
@@ -71,9 +71,24 @@ class GoodsInService(BaseService):
         if not lines:
             raise ValidationError("Add at least one product line.")
         att_service = AttachmentService(self.ctx)
-        files = [att_service.validate_file(f) for f in (attachments or [])]
+        if attachments:
+            self.require(P.ATTACHMENTS_ADD)
+        for f in attachments or []:
+            att_service.validate_file(f)
+        # Scans are copied into the store first and recorded in the same transaction as the stock,
+        # so either the delivery, its lines and its scans are all saved, or none of them are.
+        staged = [att_service.stage(f) for f in attachments or []]
+        try:
+            dn_id = self._post(header, lines, dn_number, delivery_date, update_costs, att_service, staged)
+        except BaseException:
+            att_service.discard(staged)
+            raise
+        return self.get(dn_id)
 
+    def _post(self, header, lines, dn_number, delivery_date, update_costs, att_service, staged) -> int:
         with self.db.session() as s:
+            check_client_token(s, DeliveryNote, header.get("client_token"), "dn_number",
+                               EntityType.DELIVERY_NOTE.value, "delivery note")
             supplier = s.get(Supplier, header.get("supplier_id")) if header.get("supplier_id") else None
             if supplier is None:
                 raise ValidationError("Supplier is required.", "supplier_id")
@@ -94,6 +109,7 @@ class GoodsInService(BaseService):
                 notes=clean_str(header.get("notes")),
                 received_by_id=self.user.id,
                 status=DocumentStatus.POSTED.value,
+                client_token=header.get("client_token") or None,
             )
             s.add(dn)
             s.flush()
@@ -130,11 +146,9 @@ class GoodsInService(BaseService):
                          new={"dn_number": dn_number, "supplier": supplier.name, "delivery_date": delivery_date,
                               "lines": [{"product_id": l.product_id, "qty": l.quantity, "bin_id": l.bin_id}
                                         for l in dn.lines]})
-            dn_id = dn.id
-
-        for f in files:
-            att_service.add(EntityType.DELIVERY_NOTE.value, dn_id, f)
-        return self.get(dn_id)
+            for f in staged:
+                att_service.attach_staged(s, EntityType.DELIVERY_NOTE.value, dn.id, f)
+            return dn.id
 
     def reverse(self, dn_id: int, reason: str, override_reason: str | None = None) -> DeliveryNote:
         self.require(P.GOODS_IN_REVERSE)
@@ -155,6 +169,25 @@ class GoodsInService(BaseService):
             dn.reversal_reason = reason
             audit.record(s, self.ctx, "GOODS_IN_REVERSED", EntityType.DELIVERY_NOTE.value, dn.id, dn.dn_number,
                          reason, old={"status": "POSTED"}, new={"status": "REVERSED"})
+        return self.get(dn_id)
+
+    def update_header(self, dn_id: int, po_reference: str | None, notes: str | None) -> DeliveryNote:
+        """Correct the PO reference / notes of a posted delivery note. Supplier, number, date and lines
+        never change after posting (reverse and re-enter instead); every edit is audited."""
+        self.require(P.GOODS_IN_POST)
+        with self.db.session() as s:
+            dn = s.get(DeliveryNote, dn_id)
+            if dn is None:
+                raise NotFoundError("Delivery note not found.")
+            if dn.status != DocumentStatus.POSTED.value:
+                raise ValidationError("A reversed delivery note cannot be edited.")
+            old = {"po_reference": dn.po_reference, "notes": dn.notes}
+            dn.po_reference = clean_str(po_reference, "po_reference", max_len=80)
+            dn.notes = clean_str(notes)
+            o, n = audit.diff(old, {"po_reference": dn.po_reference, "notes": dn.notes})
+            if n:
+                audit.record(s, self.ctx, "DELIVERY_NOTE_EDITED", EntityType.DELIVERY_NOTE.value, dn.id,
+                             f"{dn.dn_number} ({dn.supplier.name})", old=o, new=n)
         return self.get(dn_id)
 
     def get(self, dn_id: int) -> DeliveryNote:
@@ -195,15 +228,17 @@ class GoodsInService(BaseService):
             q = q.where(DeliveryNote.id.in_(select(DeliveryNoteLine.delivery_note_id)
                                             .where(DeliveryNoteLine.product_id == product_id)))
         if text and text.strip():
-            like = f"%{text.strip()}%"
+            like = like_pattern(text)
+            norm = normalise_dn_number(text)
             q = q.where(or_(
-                DeliveryNote.dn_number.ilike(like),
-                DeliveryNote.po_reference.ilike(like),
-                DeliveryNote.notes.ilike(like),
-                DeliveryNote.supplier_id.in_(select(Supplier.id).where(Supplier.name.ilike(like))),
+                DeliveryNote.dn_number.ilike(like, escape="\\"),
+                *([DeliveryNote.dn_number_norm.contains(norm, autoescape=True)] if norm else []),
+                DeliveryNote.po_reference.ilike(like, escape="\\"),
+                DeliveryNote.notes.ilike(like, escape="\\"),
+                DeliveryNote.supplier_id.in_(select(Supplier.id).where(Supplier.name.ilike(like, escape="\\"))),
                 DeliveryNote.id.in_(select(DeliveryNoteLine.delivery_note_id).join(Product).where(
-                    or_(Product.internal_code.ilike(like), Product.name.ilike(like),
-                        Product.supplier_code.ilike(like)))),
+                    or_(Product.internal_code.ilike(like, escape="\\"), Product.name.ilike(like, escape="\\"),
+                        Product.supplier_code.ilike(like, escape="\\")))),
             ))
         with self.db.read_session() as s:
             rows = s.execute(q).unique().all()

@@ -15,7 +15,7 @@ from wms.core.numbers import ZERO, to_qty, utcnow
 from wms.core.permissions import P
 from wms.db.models import Bin, FinishedProductInfo, Product, ProductionLine, ProductionOrder, Site, StockMovement
 from wms.services import audit
-from wms.services.base import BaseService, clean_str
+from wms.services.base import BaseService, check_client_token, clean_str
 from wms.services.goods_in import doc_datetime, validate_doc_date
 from wms.services.goods_out import allocate
 from wms.services.numbering import next_number
@@ -35,6 +35,8 @@ class ProductionService(BaseService):
         self.require(P.PRODUCTION_POST)
         pdate = validate_doc_date(header.get("production_date"), "production_date")
         with self.db.session() as s:
+            check_client_token(s, ProductionOrder, header.get("client_token"), "order_number",
+                               EntityType.PRODUCTION.value, "production record")
             fp = s.get(Product, header.get("finished_product_id")) if header.get("finished_product_id") else None
             if fp is None or fp.item_type != ItemType.FINISHED.value:
                 raise ValidationError("Choose the finished product that was made.", "finished_product_id")
@@ -49,6 +51,7 @@ class ProductionService(BaseService):
                 order_number=next_number(s, "PRODUCTION"), finished_product_id=fp.id, quantity=qty,
                 output_bin_id=out_bin.id, site_id=site.id if site else None, production_date=pdate,
                 notes=clean_str(header.get("notes")), user_id=self.user.id, status=DocumentStatus.POSTED.value,
+                client_token=header.get("client_token") or None,
             )
             s.add(order)
             s.flush()
@@ -65,14 +68,17 @@ class ProductionService(BaseService):
                     raise ValidationError("A product cannot be consumed to make itself.")
                 mqty = to_qty(m.quantity, f"material line {i} quantity")
                 if m.bin_id:
-                    picks = [(s.get(Bin, m.bin_id), mqty)]
+                    b = s.get(Bin, m.bin_id)
+                    if b is None:
+                        raise ValidationError(f"Material line {i}: bin not found.")
+                    picks = [(b, mqty)]
                 else:
                     try:
                         picks = allocate(s, mat, mqty)
                     except InsufficientStockError:
                         if not override_reason or not mat.default_bin_id:
                             raise
-                        picks = [(s.get(Bin, mat.default_bin_id), mqty)]
+                        picks = allocate(s, mat, mqty, shortfall_bin=s.get(Bin, mat.default_bin_id))
                 for b, take in picks:
                     mv = engine.post(movement_type=MovementType.PRODUCTION_CONSUME, product=mat, quantity=take,
                                      from_bin=b, override_reason=override_reason,

@@ -9,6 +9,7 @@ current data first.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sqlite3
 import tempfile
@@ -56,6 +57,24 @@ class IntegrityReport:
                 and not self.missing_files)
 
 
+def _check_sqlite_file(path: Path) -> list[str]:
+    """Raise unless ``path`` is a healthy Store WMS database; returns its attachment file names."""
+    try:
+        con = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+        try:
+            result = con.execute("PRAGMA integrity_check").fetchone()[0]
+            if result != "ok":
+                raise ValidationError(f"The database inside the backup is damaged: {result}")
+            tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if not {"products", "stock_movements", "stock_levels"} <= tables:
+                raise ValidationError("The backup does not contain a Store WMS database.")
+            return [r[0] for r in con.execute("SELECT stored_name FROM attachments WHERE is_deleted = 0")]
+        finally:
+            con.close()
+    except sqlite3.DatabaseError as exc:
+        raise ValidationError(f"The database inside the backup cannot be read: {exc}") from None
+
+
 class BackupService(BaseService):
     @property
     def backup_dir(self) -> Path:
@@ -95,7 +114,15 @@ class BackupService(BaseService):
                     for f in store.rglob("*"):
                         if f.is_file():
                             z.write(f, Path("attachments") / f.relative_to(store))
+                missing = [a.stored_name for a in AttachmentService(self.ctx).missing_files()]
+                if missing:
+                    manifest["attachments_missing_on_disk"] = missing
                 z.writestr(MANIFEST, json.dumps(manifest, indent=2))
+            try:
+                self.verify(part)  # never leave a backup behind that could not be restored
+            except Exception:
+                part.unlink(missing_ok=True)
+                raise
             part.replace(target)
         with self.db.session() as s:
             audit.record(s, self.ctx, "BACKUP_CREATED", "SYSTEM", None, target.name, note or None)
@@ -142,13 +169,10 @@ class BackupService(BaseService):
                 manifest = json.loads(z.read(MANIFEST))
                 with tempfile.TemporaryDirectory() as tmp:
                     z.extract(DB_NAME, tmp)
-                    con = sqlite3.connect(str(Path(tmp) / DB_NAME))
-                    try:
-                        result = con.execute("PRAGMA integrity_check").fetchone()[0]
-                    finally:
-                        con.close()
-                if result != "ok":
-                    raise ValidationError(f"The database inside the backup is damaged: {result}")
+                    stored = _check_sqlite_file(Path(tmp) / DB_NAME)
+                missing = sorted(n for n in stored if f"attachments/{n}" not in names)
+                manifest["attachments_in_database"] = len(stored)
+                manifest["attachments_missing_from_backup"] = missing
                 return manifest
         except zipfile.BadZipFile:
             raise ValidationError("This file is not a valid backup (.zip) file.") from None
@@ -170,18 +194,27 @@ class BackupService(BaseService):
                          f"Safety copy: {safety_named.name}")
         self.db.dispose()
         cfg = self.ctx.config
-        with zipfile.ZipFile(backup_file) as z, tempfile.TemporaryDirectory() as tmp:
-            z.extract(DB_NAME, tmp)
+        store = cfg.attachments_path.resolve()
+        with zipfile.ZipFile(backup_file) as z:
+            # Stage the database next to the live file, check it opens, then swap it in with an
+            # atomic rename: a failure part-way never leaves a half-copied database behind.
+            staged = cfg.db_path.with_name(cfg.db_path.name + ".restoring")
+            with z.open(DB_NAME) as src, open(staged, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+            _check_sqlite_file(staged)
             for suffix in ("-wal", "-shm"):
                 Path(str(cfg.db_path) + suffix).unlink(missing_ok=True)
-            shutil.copy2(Path(tmp) / DB_NAME, cfg.db_path)
+            os.replace(staged, cfg.db_path)
             for name in z.namelist():
-                if name.startswith("attachments/") and not name.endswith("/"):
-                    target = cfg.attachments_path / Path(name).relative_to("attachments")
-                    if not target.exists():
-                        target.parent.mkdir(parents=True, exist_ok=True)
-                        with z.open(name) as src, open(target, "wb") as dst:
-                            shutil.copyfileobj(src, dst)
+                if not name.startswith("attachments/") or name.endswith("/"):
+                    continue
+                target = (store / Path(name).relative_to("attachments")).resolve()
+                if not target.is_relative_to(store):
+                    continue  # "attachments/../.." entries would write outside the store - never follow them
+                if not target.exists():
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with z.open(name) as src, open(target, "wb") as dst:
+                        shutil.copyfileobj(src, dst)
         return safety_named
 
     # -- integrity ----------------------------------------------------------

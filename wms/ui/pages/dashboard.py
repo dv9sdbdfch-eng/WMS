@@ -30,6 +30,13 @@ class DashboardPage(Page):
             cards.addWidget(c)
         self.body.addLayout(cards)
         self.c_value.setVisible(app.can(P.REPORTS_VIEW))
+        # "Needs attention": problems to act on, not statistics. Double-click opens the screen that fixes it.
+        self.t_alerts = DataTable([Col("", lambda a: "!" if a.level == "danger" else "", width=24),
+                                   Col("Needs attention", lambda a: a.text)])
+        self.t_alerts.set_row_style(lambda a: "low" if a.level == "danger" else None)
+        self.t_alerts.activated_item.connect(lambda a: self.main_window.go(a.page))
+        self.t_alerts.setMaximumHeight(150)
+        self.body.addWidget(self.t_alerts)
 
         grid = QGridLayout()
         grid.setSpacing(14)
@@ -84,6 +91,8 @@ class DashboardPage(Page):
         self.c_out.set_value(str(d.issued_today))
         self.c_low.set_value(str(len(d.low_stock)), warn=bool(d.low_stock))
         self.t_low.set_items(d.low_stock)
+        self.t_alerts.set_items(d.alerts)
+        self.t_alerts.setVisible(bool(d.alerts))
         self.t_dn.set_items(d.recent_deliveries)
         self.t_go.set_items(d.recent_issues)
         self.t_mv.set_items(d.recent_movements)

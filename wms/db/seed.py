@@ -51,6 +51,7 @@ SEQUENCES = [
     ("ADJUSTMENT", "ADJ-"),
     ("TRANSFER", "TRF-"),
     ("PRODUCTION", "PRD-"),
+    ("STOCK_COUNT", "SC-"),
 ]
 
 

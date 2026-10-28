@@ -9,8 +9,9 @@ from datetime import date
 from decimal import Decimal
 
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
-from wms.core.enums import FinishedStatus, ItemType, MovementType, ReturnCondition, ReturnType
+from wms.core.enums import DocumentStatus, FinishedStatus, ItemType, MovementType, ReturnCondition, ReturnType
 from wms.core.numbers import ZERO
 from wms.core.permissions import P
 from wms.db.models import (
@@ -24,7 +25,7 @@ from wms.db.models import (
     StockReturn,
     Supplier,
 )
-from wms.services.base import BaseService
+from wms.services.base import BaseService, prefix_pattern
 from wms.services.products import ProductService
 from wms.services.sites import SITE_MOVEMENTS
 from wms.services.stock_ops import StockOpsService
@@ -85,6 +86,13 @@ def _in_range(d: date | None, f: ReportFilters) -> bool:
     if f.date_to and d > f.date_to:
         return False
     return True
+
+
+def _line_value(line, status: str) -> Decimal | None:
+    """Value of a document line; reversed documents count as nothing so totals match stock."""
+    if status != DocumentStatus.POSTED.value:
+        return None
+    return ((line.unit_cost or ZERO) * line.quantity).quantize(Decimal("0.01"))
 
 
 def _local_date(dt) -> date:
@@ -157,7 +165,7 @@ class ReportService(BaseService):
         with self.db.read_session() as s:
             data = [[dn.delivery_date, dn.dn_number, dn.supplier.name, l.product.internal_code, l.product.name,
                      l.quantity, l.product.unit.code, l.bin.full_code, l.unit_cost,
-                     ((l.unit_cost or ZERO) * l.quantity).quantize(Decimal("0.01")), dn.status.title(),
+                     _line_value(l, dn.status), dn.status.title(),
                      dn.received_by.full_name] for l, dn in s.execute(q)]
         return ReportResult("Goods In", cols, data)
 
@@ -178,14 +186,14 @@ class ReportService(BaseService):
         with self.db.read_session() as s:
             data = [[gi.issue_date, gi.issue_number, gi.site.display, gi.reference or "", l.product.internal_code,
                      l.product.name, l.quantity, l.product.unit.code, l.bin.full_code,
-                     ((l.unit_cost or ZERO) * l.quantity).quantize(Decimal("0.01")), gi.requested_by or "",
+                     _line_value(l, gi.status), gi.requested_by or "",
                      gi.issued_by, gi.status.title()] for l, gi in s.execute(q)]
         return ReportResult("Goods Out", cols, data)
 
     def movements(self, f: ReportFilters) -> ReportResult:
         rows = StockOpsService(self.ctx).movements(text=f.text, product_id=f.product_id, site_id=f.site_id,
                                                    supplier_id=f.supplier_id, date_from=f.date_from,
-                                                   date_to=f.date_to, limit=100000)
+                                                   date_to=f.date_to, limit=None)
         cols = [Column("Date / Time", DATETIME), Column("Type"), Column("Code"), Column("Product"),
                 Column("Quantity", QTY), Column("Unit"), Column("From"), Column("To"), Column("Site / Project"),
                 Column("Document"), Column("Reference"), Column("User"), Column("Notes")]
@@ -198,7 +206,7 @@ class ReportService(BaseService):
     def stock_by_site(self, f: ReportFilters) -> ReportResult:
         rows = StockOpsService(self.ctx).movements(site_id=f.site_id, product_id=f.product_id,
                                                    movement_types=list(SITE_MOVEMENTS), date_from=f.date_from,
-                                                   date_to=f.date_to, limit=200000)
+                                                   date_to=f.date_to, limit=None)
         agg: dict[tuple[int, int], list] = {}
         for m in rows:
             if m.site is None:
@@ -221,9 +229,35 @@ class ReportService(BaseService):
                 Column("Returned", QTY), Column("Net Used", QTY), Column("Unit"), Column("Net Value", MONEY, True)]
         return ReportResult("Stock by Site", cols, data)
 
+    def project_history(self, f: ReportFilters) -> ReportResult:
+        """Every material movement to and from a site: what, how much, when, which document, who."""
+        rows = StockOpsService(self.ctx).movements(site_id=f.site_id, product_id=f.product_id,
+                                                   movement_types=list(SITE_MOVEMENTS), date_from=f.date_from,
+                                                   date_to=f.date_to, limit=None)
+        cols = [Column("Date", DATETIME), Column("Site / Project"), Column("Document"), Column("Type"),
+                Column("Code"), Column("Material"), Column("Issued", QTY, True), Column("Returned", QTY, True),
+                Column("Unit"), Column("Bin"), Column("Reference"), Column("User"), Column("Notes")]
+        data = []
+        for m in sorted(rows, key=lambda m: (m.site.display if m.site else "", m.occurred_at, m.id)):
+            out = m.from_bin_id is not None  # stock left the store -> to site
+            qty = m.quantity if out else -m.quantity
+            is_issue = m.movement_type == MovementType.GOODS_OUT.value
+            label = MovementType(m.movement_type).label + (" (reversal)" if m.reversal_of_id else "")
+            data.append([m.occurred_at, m.site.display if m.site else "", m.doc_number or "", label,
+                         m.product.internal_code, m.product.name, qty if is_issue else None,
+                         None if is_issue else -qty, m.product.unit.code,
+                         (m.from_bin or m.to_bin).full_code, m.reference or "", m.user.full_name, m.notes or ""])
+        return ReportResult("Project Material History", cols, data)
+
     def _levels(self, f: ReportFilters) -> list[StockLevel]:
-        q = select(StockLevel).join(Bin).join(Product).where(StockLevel.quantity != ZERO).order_by(
-            Bin.full_code, Product.internal_code)
+        # Explicit ON clauses: Product also links to Bin through default_bin_id, and an implicit
+        # join(Product) picks that path - every level was repeated once per product defaulting to the bin.
+        q = (select(StockLevel)
+             .join(Bin, Bin.id == StockLevel.bin_id)
+             .join(Product, Product.id == StockLevel.product_id)
+             .where(StockLevel.quantity != ZERO)
+             .order_by(Bin.full_code, Product.internal_code)
+             .options(selectinload(StockLevel.bin).joinedload(Bin.location)))
         if f.product_id:
             q = q.where(StockLevel.product_id == f.product_id)
         if f.item_type:
@@ -232,7 +266,7 @@ class ReportService(BaseService):
             from wms.db.models import Location
             with self.db.read_session() as s:
                 path = s.get(Location, f.location_id).path
-            q = q.where(Bin.full_code.like(f"{path} / %"))
+            q = q.where(Bin.full_code.like(prefix_pattern(path), escape="\\"))
         with self.db.read_session() as s:
             return list(s.scalars(q))
 
@@ -260,12 +294,16 @@ class ReportService(BaseService):
     def low_stock(self, f: ReportFilters) -> ReportResult:
         rows = ProductService(self.ctx).list(low_only=True, supplier_id=f.supplier_id,
                                              item_types=[f.item_type] if f.item_type else None)
-        cols = [Column("Code"), Column("Name"), Column("Supplier"), Column("Supplier Code"), Column("On Hand", QTY),
-                Column("Min Level", QTY), Column("Reorder Qty", QTY), Column("Suggested Order", QTY), Column("Unit"),
-                Column("Default Bin")]
-        data = [[r.product.internal_code, r.product.name, r.product.supplier.name if r.product.supplier else "",
-                 r.product.supplier_code or "", r.on_hand, r.product.min_stock, r.product.reorder_qty, r.shortfall,
-                 r.product.unit.code, r.product.default_bin.full_code if r.product.default_bin else ""] for r in rows]
+        rows.sort(key=lambda r: (r.product.supplier.name if r.product.supplier else "~", r.product.internal_code))
+        cols = [Column("Supplier"), Column("Supplier Code"), Column("Code"), Column("Name"), Column("Status"),
+                Column("Available", QTY), Column("On Hand", QTY), Column("Min Level", QTY), Column("Reorder Qty", QTY),
+                Column("Suggested Order", QTY), Column("Unit"), Column("Unit Cost", MONEY),
+                Column("Order Value", MONEY, True), Column("Default Bin")]
+        data = [[r.product.supplier.name if r.product.supplier else "", r.product.supplier_code or "",
+                 r.product.internal_code, r.product.name, r.status.label, r.available, r.on_hand,
+                 r.product.min_stock, r.product.reorder_qty, r.shortfall, r.product.unit.code, r.product.unit_cost,
+                 (r.shortfall * (r.product.unit_cost or ZERO)).quantize(Decimal("0.01")),
+                 r.product.default_bin.full_code if r.product.default_bin else ""] for r in rows]
         return ReportResult("Low Stock", cols, data)
 
     def finished_products(self, f: ReportFilters) -> ReportResult:
@@ -287,7 +325,11 @@ class ReportService(BaseService):
         return ReportResult("Finished Products", cols, data)
 
     def supplier_deliveries(self, f: ReportFilters) -> ReportResult:
-        q = select(DeliveryNote).where(DeliveryNote.status == "POSTED")
+        q = (select(Supplier.id, Supplier.name, DeliveryNote.id, DeliveryNote.delivery_date,
+                    DeliveryNoteLine.quantity, DeliveryNoteLine.unit_cost)
+             .join(DeliveryNote, DeliveryNote.supplier_id == Supplier.id)
+             .join(DeliveryNoteLine, DeliveryNoteLine.delivery_note_id == DeliveryNote.id, isouter=True)
+             .where(DeliveryNote.status == DocumentStatus.POSTED.value))
         if f.supplier_id:
             q = q.where(DeliveryNote.supplier_id == f.supplier_id)
         if f.date_from:
@@ -295,20 +337,24 @@ class ReportService(BaseService):
         if f.date_to:
             q = q.where(DeliveryNote.delivery_date <= f.date_to)
         agg: dict[int, list] = {}
+        notes: dict[int, set] = {}
         with self.db.read_session() as s:
-            for dn in s.scalars(q):
-                r = agg.setdefault(dn.supplier_id, [dn.supplier.name, 0, 0, ZERO, None])
-                r[1] += 1
-                r[2] += len(dn.lines)
-                r[3] += sum(((l.unit_cost or ZERO) * l.quantity for l in dn.lines), ZERO)
-                r[4] = max(r[4], dn.delivery_date) if r[4] else dn.delivery_date
+            for sup_id, name, dn_id, ddate, qty, cost in s.execute(q):
+                r = agg.setdefault(sup_id, [name, 0, 0, ZERO, ddate])
+                notes.setdefault(sup_id, set()).add(dn_id)
+                if qty is not None:
+                    r[2] += 1
+                    r[3] += (cost or ZERO) * qty
+                r[4] = max(r[4], ddate)
+        for sup_id, r in agg.items():
+            r[1] = len(notes[sup_id])
         data = [[r[0], r[1], r[2], r[3].quantize(Decimal("0.01")), r[4]] for r in sorted(agg.values())]
         cols = [Column("Supplier"), Column("Deliveries", INT, True), Column("Lines", INT, True),
                 Column("Total Value", MONEY, True), Column("Last Delivery", DATE)]
         return ReportResult("Supplier Deliveries", cols, data)
 
     def returns(self, f: ReportFilters) -> ReportResult:
-        rets = StockOpsService(self.ctx).returns(text=f.text, date_from=f.date_from, date_to=f.date_to, limit=100000)
+        rets = StockOpsService(self.ctx).returns(text=f.text, date_from=f.date_from, date_to=f.date_to, limit=None)
         cols = [Column("Date", DATE), Column("Return No."), Column("Type"), Column("Site / Supplier"), Column("Code"),
                 Column("Product"), Column("Quantity", QTY), Column("Unit"), Column("Condition"), Column("Bin"),
                 Column("Reference"), Column("Reason"), Column("Status")]
@@ -332,7 +378,7 @@ class ReportService(BaseService):
 
     def adjustments(self, f: ReportFilters) -> ReportResult:
         rows = StockOpsService(self.ctx).adjustments(text=f.text, date_from=f.date_from, date_to=f.date_to,
-                                                     limit=100000)
+                                                     limit=None)
         from wms.core.enums import AdjustmentReason
         cols = [Column("Date / Time", DATETIME), Column("Adjustment No."), Column("Code"), Column("Product"),
                 Column("Bin"), Column("Previous Qty", QTY), Column("New Qty", QTY), Column("Difference", QTY),
@@ -354,11 +400,15 @@ REPORTS: list[ReportDef] = [
               {"dates", "product", "site", "supplier", "text"}, ReportService.movements),
     ReportDef("stock_by_site", "Stock by Site", "Materials issued to and returned from each site.",
               {"dates", "site", "product"}, ReportService.stock_by_site),
+    ReportDef("project_history", "Project Material History",
+              "Every issue and return for a site / project, with document, reference and user.",
+              {"dates", "site", "product"}, ReportService.project_history),
     ReportDef("stock_by_location", "Stock by Location", "Current stock grouped by warehouse location.",
               {"location", "product", "item_type"}, ReportService.stock_by_location),
     ReportDef("stock_by_bin", "Stock by Bin", "Current stock in every bin.",
               {"location", "product", "item_type"}, ReportService.stock_by_bin),
-    ReportDef("low_stock", "Low Stock", "Products at or below their minimum level, with a suggested order.",
+    ReportDef("low_stock", "Low Stock / Reorder List",
+              "Out-of-stock and low products by supplier, with suggested order quantity and value.",
               {"supplier", "item_type"}, ReportService.low_stock),
     ReportDef("finished_products", "Finished Products", "Finished products with status and stock.",
               {"dates", "site", "text"}, ReportService.finished_products),

@@ -9,6 +9,8 @@ from wms.db.models.documents import (
     ProductionOrder,
     ReturnLine,
     StockAdjustment,
+    StockCount,
+    StockCountLine,
     StockReturn,
     StockTransfer,
 )
@@ -42,6 +44,8 @@ __all__ = [
     "Setting",
     "Site",
     "StockAdjustment",
+    "StockCount",
+    "StockCountLine",
     "StockLevel",
     "StockMovement",
     "StockReturn",

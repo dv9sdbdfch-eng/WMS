@@ -8,7 +8,7 @@ from decimal import Decimal
 from sqlalchemy import exists, func, or_, select
 from sqlalchemy.orm import Session, aliased
 
-from wms.core.enums import FinishedStatus, ItemType
+from wms.core.enums import FinishedStatus, ItemType, StockStatus
 from wms.core.exceptions import ConcurrencyError, DuplicateError, NotFoundError, ValidationError
 from wms.core.numbers import ZERO, to_money, to_qty
 from wms.core.permissions import P
@@ -24,7 +24,7 @@ from wms.db.models import (
     Unit,
 )
 from wms.services import audit
-from wms.services.base import BaseService, clean_str, normalise_code
+from wms.services.base import BaseService, clean_code, clean_str, like_pattern, prefix_pattern
 from wms.services.stock_engine import product_totals_query
 
 PRODUCT_FIELDS = (
@@ -41,9 +41,21 @@ class ProductRow:
     available: Decimal
 
     @property
-    def is_low(self) -> bool:
+    def status(self) -> StockStatus:
+        """OUT / LOW / OK against the minimum level, judged on stock that can be issued
+        (quarantine stock does not count). Products without a minimum are never flagged."""
         p = self.product
-        return p.min_stock is not None and p.min_stock > ZERO and self.on_hand <= p.min_stock
+        if p.min_stock is None or p.min_stock <= ZERO:
+            return StockStatus.NO_MINIMUM
+        if self.available <= ZERO:
+            return StockStatus.OUT
+        if self.available <= p.min_stock:
+            return StockStatus.LOW
+        return StockStatus.OK
+
+    @property
+    def is_low(self) -> bool:
+        return self.status in (StockStatus.LOW, StockStatus.OUT)
 
     @property
     def stock_value(self) -> Decimal:
@@ -56,29 +68,29 @@ class ProductRow:
         if not self.is_low:
             return ZERO
         target = (p.min_stock or ZERO) + (p.reorder_qty or ZERO)
-        return max(target - self.on_hand, ZERO)
+        return max(target - self.available, ZERO)
 
 
 def text_filter(text: str):
     """WHERE clause matching a product by any of its identifying fields, supplier, category or bin."""
-    like = f"%{text.strip()}%"
+    like = like_pattern(text)
     sup = aliased(Supplier)
     cat = aliased(Category)
     in_bin = exists().where(
         StockLevel.product_id == Product.id,
         StockLevel.quantity != ZERO,
         StockLevel.bin_id == Bin.id,
-        Bin.full_code.ilike(like),
+        Bin.full_code.ilike(like, escape="\\"),
     )
-    default_bin = exists().where(Bin.id == Product.default_bin_id, Bin.full_code.ilike(like))
+    default_bin = exists().where(Bin.id == Product.default_bin_id, Bin.full_code.ilike(like, escape="\\"))
     return or_(
-        Product.internal_code.ilike(like),
-        Product.supplier_code.ilike(like),
-        Product.barcode.ilike(like),
-        Product.name.ilike(like),
-        Product.description.ilike(like),
-        exists().where(sup.id == Product.supplier_id, sup.name.ilike(like)),
-        exists().where(cat.id == Product.category_id, cat.name.ilike(like)),
+        Product.internal_code.ilike(like, escape="\\"),
+        Product.supplier_code.ilike(like, escape="\\"),
+        Product.barcode.ilike(like, escape="\\"),
+        Product.name.ilike(like, escape="\\"),
+        Product.description.ilike(like, escape="\\"),
+        exists().where(sup.id == Product.supplier_id, sup.name.ilike(like, escape="\\")),
+        exists().where(cat.id == Product.category_id, cat.name.ilike(like, escape="\\")),
         in_bin,
         default_bin,
     )
@@ -120,7 +132,7 @@ class ProductService(BaseService):
                     StockLevel.product_id == Product.id,
                     StockLevel.quantity != ZERO,
                     StockLevel.bin_id == Bin.id,
-                    Bin.full_code.like(f"{path} / %"),
+                    Bin.full_code.like(prefix_pattern(path), escape="\\"),
                 )
             )
         if text and text.strip():
@@ -144,23 +156,23 @@ class ProductService(BaseService):
             return p
 
     def find_by_code(self, code: str) -> Product | None:
-        """Exact match on internal code, supplier code or barcode (scanner input)."""
-        code = (code or "").strip()
+        """Exact match for scanner / typed input: internal code, then barcode, then supplier code.
+
+        Internal codes and barcodes are unique, so a scan never picks the wrong product. Supplier
+        codes may repeat between suppliers; an ambiguous supplier code returns None (the user
+        then picks from the search list instead of getting a random match).
+        """
+        code = " ".join((code or "").split()).upper()
         if not code:
             return None
         with self.db.read_session() as s:
-            return s.scalar(
-                select(Product)
-                .where(
-                    Product.is_active.is_(True),
-                    or_(
-                        func.upper(Product.internal_code) == code.upper(),
-                        func.upper(Product.barcode) == code.upper(),
-                        func.upper(Product.supplier_code) == code.upper(),
-                    ),
-                )
-                .limit(1)
-            )
+            active = Product.is_active.is_(True)
+            for col in (Product.internal_code, Product.barcode):
+                p = s.scalar(select(Product).where(active, func.upper(col) == code).limit(1))
+                if p is not None:
+                    return p
+            found = list(s.scalars(select(Product).where(active, func.upper(Product.supplier_code) == code).limit(2)))
+            return found[0] if len(found) == 1 else None
 
     def stock_by_bin(self, product_id: int) -> list[StockLevel]:
         with self.db.read_session() as s:
@@ -194,9 +206,7 @@ class ProductService(BaseService):
             v["item_type"] = ItemType(data.get("item_type") or ItemType.RAW_MATERIAL).value
         except ValueError:
             raise ValidationError("Choose a valid item type.", "item_type") from None
-        code = normalise_code(data.get("internal_code"))
-        if not code:
-            raise ValidationError("Internal product code is required.", "internal_code")
+        code = clean_code(data.get("internal_code"), "internal_code", "Internal product code", 50)
         dup = s.scalar(select(Product.id).where(func.upper(Product.internal_code) == code))
         if dup and dup != product_id:
             raise DuplicateError(f"Product code '{code}' is already used.")
@@ -205,9 +215,18 @@ class ProductService(BaseService):
         v["supplier_code"] = clean_str(data.get("supplier_code"), "supplier_code", max_len=80)
         v["barcode"] = clean_str(data.get("barcode"), "barcode", max_len=80)
         if v["barcode"]:
-            dup = s.scalar(select(Product.id).where(Product.barcode == v["barcode"]))
-            if dup and dup != product_id:
-                raise DuplicateError(f"Barcode '{v['barcode']}' is already used by another product.")
+            # A scanned barcode must identify exactly one product: unique among barcodes (ignoring
+            # case) and never equal to another product's internal code.
+            bc = v["barcode"].upper()
+            dup = s.scalar(select(Product.internal_code).where(
+                Product.id != (product_id or 0),
+                or_(func.upper(Product.barcode) == bc, func.upper(Product.internal_code) == bc)))
+            if dup:
+                raise DuplicateError(f"Barcode '{v['barcode']}' is already used by product {dup}.")
+        clash = s.scalar(select(Product.internal_code).where(Product.id != (product_id or 0),
+                                                             func.upper(Product.barcode) == code))
+        if clash:
+            raise DuplicateError(f"'{code}' is the barcode of product {clash} - choose another code.")
         v["description"] = clean_str(data.get("description"))
         v["notes"] = clean_str(data.get("notes"))
         unit = s.get(Unit, data.get("unit_id")) if data.get("unit_id") else None
@@ -258,11 +277,14 @@ class ProductService(BaseService):
                         "unit_id",
                     )
                 if not v["is_active"] and p.is_active:
-                    on_hand = s.scalar(
-                        select(func.coalesce(func.sum(StockLevel.quantity), 0)).where(StockLevel.product_id == p.id)
-                    )
-                    if on_hand:
-                        raise ValidationError("Cannot deactivate a product that still has stock.", "is_active")
+                    # Any bin with a non-zero balance blocks archiving - including +5 in one bin and
+                    # -5 in another, which add up to zero but are both real problems to resolve first.
+                    holding = s.scalar(select(func.count(StockLevel.id)).where(
+                        StockLevel.product_id == p.id, StockLevel.quantity != ZERO))
+                    if holding:
+                        raise ValidationError(
+                            f"Cannot archive {p.internal_code}: {holding} bin(s) still show stock for it "
+                            f"(positive or negative). Issue, transfer or adjust it to zero first.", "is_active")
                 old = audit.snapshot(p, PRODUCT_FIELDS)
                 old_fin = audit.snapshot(p.finished_info, FINISHED_FIELDS) if p.finished_info else {}
             else:

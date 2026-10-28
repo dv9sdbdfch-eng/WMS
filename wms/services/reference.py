@@ -8,7 +8,7 @@ from wms.core.exceptions import DuplicateError, NotFoundError, ValidationError
 from wms.core.permissions import P
 from wms.db.models import Category, Product, Supplier, Unit
 from wms.services import audit
-from wms.services.base import BaseService, clean_str, normalise_code
+from wms.services.base import BaseService, clean_code, clean_str, like_pattern
 
 SUPPLIER_FIELDS = ("code", "name", "contact_name", "phone", "email", "address", "account_number", "notes", "is_active")
 
@@ -21,15 +21,13 @@ class ReferenceService(BaseService):
             if not include_inactive:
                 q = q.where(Supplier.is_active.is_(True))
             if text:
-                like = f"%{text.strip()}%"
-                q = q.where(or_(Supplier.name.ilike(like), Supplier.code.ilike(like), Supplier.contact_name.ilike(like)))
+                like = like_pattern(text)
+                q = q.where(or_(Supplier.name.ilike(like, escape="\\"), Supplier.code.ilike(like, escape="\\"), Supplier.contact_name.ilike(like, escape="\\")))
             return list(s.scalars(q))
 
     def save_supplier(self, supplier_id: int | None, data: dict) -> Supplier:
         self.require(P.SUPPLIERS_EDIT)
-        code = normalise_code(data.get("code"))
-        if not code:
-            raise ValidationError("Supplier code is required.", "code")
+        code = clean_code(data.get("code"), "code", "Supplier code", 30)
         name = clean_str(data.get("name"), "name", required=True, max_len=200)
         with self.db.session() as s:
             dup = s.scalar(select(Supplier.id).where(func.upper(Supplier.code) == code))
@@ -100,9 +98,7 @@ class ReferenceService(BaseService):
 
     def save_unit(self, unit_id: int | None, code: str, name: str, allow_decimal: bool, is_active: bool = True) -> Unit:
         self.require(P.SUPPLIERS_EDIT)
-        code = normalise_code(code)
-        if not code:
-            raise ValidationError("Unit code is required.", "code")
+        code = clean_code(code, "code", "Unit code", 12)
         name = clean_str(name, "name", required=True, max_len=50)
         with self.db.session() as s:
             dup = s.scalar(select(Unit.id).where(Unit.code == code))

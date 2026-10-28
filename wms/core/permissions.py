@@ -26,6 +26,7 @@ class P:
     STOCK_TRANSFER = "stock.transfer"
     STOCK_ADJUST = "stock.adjust"
     STOCK_OVERRIDE_NEGATIVE = "stock.override_negative"
+    STOCKTAKE_COUNT = "stocktake.count"
     RETURNS_POST = "returns.post"
     PRODUCTION_POST = "production.post"
     ATTACHMENTS_ADD = "attachments.add"
@@ -59,6 +60,7 @@ PERMISSION_LABELS = {
     P.STOCK_TRANSFER: "Transfer stock between bins",
     P.STOCK_ADJUST: "Stock adjustments",
     P.STOCK_OVERRIDE_NEGATIVE: "Override negative stock",
+    P.STOCKTAKE_COUNT: "Stocktake: create counts and enter quantities (approval needs Stock adjustments)",
     P.RETURNS_POST: "Post returns",
     P.PRODUCTION_POST: "Record production",
     P.ATTACHMENTS_ADD: "Add photos and documents",
@@ -89,6 +91,7 @@ DEFAULT_ROLES: dict[str, tuple[str, str, list[str]]] = {
             P.GOODS_IN_POST,
             P.GOODS_OUT_POST,
             P.STOCK_TRANSFER,
+            P.STOCKTAKE_COUNT,
             P.RETURNS_POST,
             P.ATTACHMENTS_ADD,
         ],
