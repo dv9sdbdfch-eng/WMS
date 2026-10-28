@@ -1,6 +1,7 @@
 # Builds the Windows installer on GitHub's Windows machines.
 #  - every push to main: installer is attached to the run (Actions tab -> run -> Artifacts)
 #  - pushing a tag like v1.0.1: installer is also published on the Releases page
+# (build.bat does the same steps on a local Windows PC.)
 name: Build Windows installer
 on:
   push:
@@ -14,16 +15,45 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - name: Install Inno Setup
-        run: choco install innosetup --no-progress -y
-      - name: Test and build
-        shell: cmd
-        run: build.bat
+      - name: Install packages
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt 2>&1 | Tee-Object pip.log
+          if ($LASTEXITCODE -ne 0) { Get-Content pip.log -Tail 15 | ForEach-Object { "::error::$_" }; exit 1 }
+      - name: Run tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python -m pytest -q -p no:cacheprovider 2>&1 | Tee-Object test.log
+          if ($LASTEXITCODE -ne 0) { Get-Content test.log -Tail 40 | ForEach-Object { "::error::$_" }; exit 1 }
+      - name: Self-test of the source
+        env:
+          WMS_DATA_DIR: ${{ runner.temp }}\wms-selftest
+        run: python run.py --self-test
+      - name: Build program
+        run: |
+          pyinstaller packaging\StoreWMS.spec --noconfirm --clean 2>&1 | Tee-Object pyi.log
+          if ($LASTEXITCODE -ne 0) { Get-Content pyi.log -Tail 30 | ForEach-Object { "::error::$_" }; exit 1 }
+      - name: Self-test of the built exe
+        env:
+          WMS_DATA_DIR: ${{ runner.temp }}\wms-exetest
+        run: |
+          $p = Start-Process dist\StoreWMS\StoreWMS.exe -ArgumentList "--self-test" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Get-Content "$env:WMS_DATA_DIR\logs\wms.log" -Tail 30 | ForEach-Object { "::error::$_" }; exit 1 }
+          Get-Content "$env:WMS_DATA_DIR\logs\wms.log" -Tail 5
+      - name: Build installer
+        run: |
+          choco install innosetup --no-progress -y
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" packaging\installer.iss
+          if ($LASTEXITCODE -ne 0) { exit 1 }
       - uses: actions/upload-artifact@v4
         with:
           name: StoreWMS-installer
