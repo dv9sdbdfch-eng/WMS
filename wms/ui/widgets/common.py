@@ -132,6 +132,7 @@ class Col:
     get: Callable[[Any], Any]
     kind: str = TEXT
     width: int | None = None
+    sort: str | None = None  # server-side sort key (tables created with server_sort=True)
 
 
 class ObjectTableModel(QAbstractTableModel):
@@ -140,6 +141,7 @@ class ObjectTableModel(QAbstractTableModel):
         self.columns = list(columns)
         self.items: list = []
         self.row_style: Callable[[Any], str | None] | None = None  # returns "low", "negative", "muted"
+        self.sort_mark: tuple[int, bool] | None = None  # (column, descending) shown as an arrow in the title
 
     def set_items(self, items: Iterable) -> None:
         self.beginResetModel()
@@ -153,9 +155,23 @@ class ObjectTableModel(QAbstractTableModel):
         return len(self.columns)
 
     def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):  # noqa: N802
-        if orientation == Qt.Orientation.Horizontal and role == Qt.ItemDataRole.DisplayRole:
-            return self.columns[section].title
+        if orientation != Qt.Orientation.Horizontal:
+            return None
+        marked = self.sort_mark is not None and self.sort_mark[0] == section
+        if role == Qt.ItemDataRole.DisplayRole:
+            title = self.columns[section].title
+            return f"{title}  {'▼' if self.sort_mark[1] else '▲'}" if marked else title
+        if role == Qt.ItemDataRole.ToolTipRole and self.columns[section].sort:
+            if marked:
+                return ("Sorted Z-A / largest / newest first" if self.sort_mark[1]
+                        else "Sorted A-Z / smallest / oldest first") + " - click to reverse"
+            return "Click to sort by this column"
         return None
+
+    def set_sort_mark(self, mark: tuple[int, bool] | None) -> None:
+        self.sort_mark = mark
+        if self.columns:
+            self.headerDataChanged.emit(Qt.Orientation.Horizontal, 0, len(self.columns) - 1)
 
     def raw(self, row: int, col: int):
         try:
@@ -210,19 +226,37 @@ def format_value(v, kind: str) -> str:
 
 
 class DataTable(QTableView):
-    """Sortable read-only table of objects. Double-click / Enter emits ``activated_item``."""
+    """Sortable read-only table of objects. Double-click / Enter emits ``activated_item``.
+
+    With ``server_sort=True`` clicking a header does not sort the rows on screen; it emits
+    ``sort_requested(key, descending)`` so the caller can ask the database for the correct
+    order (needed when only the first N of many results are shown). Columns without a
+    ``sort`` key are not sortable. The header arrow always shows the current sort.
+    """
 
     activated_item = Signal(object)
     selection_changed_item = Signal(object)
+    sort_requested = Signal(str, bool)
 
-    def __init__(self, columns: Sequence[Col], parent=None):
+    def __init__(self, columns: Sequence[Col], parent=None, server_sort: bool = False):
         super().__init__(parent)
         self.model_ = ObjectTableModel(columns, self)
         self.proxy = QSortFilterProxyModel(self)
         self.proxy.setSourceModel(self.model_)
         self.proxy.setSortRole(Qt.ItemDataRole.UserRole)
         self.setModel(self.proxy)
-        self.setSortingEnabled(True)
+        self.server_sort = server_sort
+        self.sort_key: str | None = None
+        self.sort_desc = False
+        if server_sort:
+            hdr = self.horizontalHeader()
+            hdr.setSectionsClickable(True)
+            # The style's own arrow points different ways on different platforms, so the
+            # sorted column gets an unambiguous ▲ (A-Z, oldest first) / ▼ (newest first) instead.
+            hdr.setSortIndicatorShown(False)
+            hdr.sectionClicked.connect(self._header_clicked)
+        else:
+            self.setSortingEnabled(True)
         self.setAlternatingRowColors(True)
         self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
@@ -243,11 +277,39 @@ class DataTable(QTableView):
         QShortcut(QKeySequence.StandardKey.Copy, self, self.copy_selection, context=Qt.ShortcutContext.WidgetShortcut)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._menu)
+        self._extra_actions: list[tuple[str, Callable]] = []
         self._sorted_once = False
+
+    def _header_clicked(self, section: int) -> None:
+        key = self.model_.columns[section].sort
+        if not key:
+            self.show_sort(self.sort_key, self.sort_desc)  # not sortable: keep the arrow where it was
+            return
+        # First click: text A-Z, numbers / dates biggest or newest first. Next click reverses.
+        first_desc = self.model_.columns[section].kind in (QTY, MONEY, INT, DATE, DATETIME)
+        desc = (not self.sort_desc) if key == self.sort_key else first_desc
+        self.show_sort(key, desc)
+        self.sort_requested.emit(key, desc)
+
+    def show_sort(self, key: str | None, descending: bool) -> None:
+        """Put the header arrow on the column sorted by ``key`` (server-sorted tables)."""
+        self.sort_key, self.sort_desc = key, descending
+        cols = [c.sort for c in self.model_.columns]
+        self.model_.set_sort_mark((cols.index(key), descending) if key and key in cols else None)
+
+    def add_menu_action(self, text: str, slot: Callable) -> None:
+        """Extra right-click action (applies to the current row)."""
+        self._extra_actions.append((text, slot))
 
     def _menu(self, pos):
         m = QMenu(self)
         m.addAction("Open", self._emit_activated)
+        for text, slot in self._extra_actions:
+            if text == "-":
+                m.addSeparator()
+            else:
+                m.addAction(text, slot)
+        m.addSeparator()
         m.addAction("Copy row", self.copy_selection)
         m.addAction("Copy whole table", self.copy_all)
         m.exec(self.viewport().mapToGlobal(pos))
@@ -260,7 +322,7 @@ class DataTable(QTableView):
     def set_items(self, items: Iterable, keep_selection: bool = True) -> None:
         current = self.current()
         self.model_.set_items(items)
-        if not self._sorted_once:
+        if not self._sorted_once and not self.server_sort:
             self.horizontalHeader().setSortIndicator(-1, Qt.SortOrder.AscendingOrder)
             self._sorted_once = True
         if keep_selection and current is not None:

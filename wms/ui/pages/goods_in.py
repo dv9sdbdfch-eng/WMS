@@ -83,6 +83,12 @@ class GoodsInPage(Page):
         self.supplier.set_options(self.app.supplier_options())
         self.lines.reload_options()
 
+    def add_product(self, product_id: int, supplier_id: int | None = None) -> None:
+        """Start receiving a product found in search."""
+        if supplier_id and self.supplier.value() is None:
+            self.supplier.set_value(supplier_id)
+        self.lines.add_product(product_id)
+
     # -- duplicate protection ----------------------------------------------
     def _check_duplicate(self):
         sup, number = self.supplier.value(), self.dn_number.text().strip()

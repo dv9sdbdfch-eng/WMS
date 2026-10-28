@@ -18,6 +18,7 @@ from wms.db.engine import Database
 from wms.services import Services
 from wms.services.base import AppContext
 from wms.services.reports import REPORTS, ReportFilters
+from wms.services.search import SearchCriteria
 
 
 def timed(label: str, fn, repeat: int = 3, results: dict | None = None):
@@ -50,6 +51,7 @@ def run(data_dir: Path, ui: bool = False) -> dict:
     timed("barcode lookup", lambda: [svc.products.find_by_code("5000000001234")], results=res)
     timed("global search 'DN1012'", lambda: svc.search.search("DN1012"), results=res)
     timed("global search 'walnut'", lambda: svc.search.search("walnut"), results=res)
+    search_cases(svc, res)
     timed("delivery notes list", lambda: svc.goods_in.search(), results=res)
     timed("delivery notes by supplier + dates", lambda: svc.goods_in.search(
         supplier_id=1, date_from=date.today() - timedelta(days=90), date_to=date.today()), results=res)
@@ -74,6 +76,28 @@ def run(data_dir: Path, ui: bool = False) -> dict:
         timed("UI: add one line", lambda: [editor.add_row()], repeat=3, results=res)
     db.dispose()
     return res
+
+
+def search_cases(svc, res: dict) -> None:
+    """The Search screen: what a user types or ticks, timed as the screen runs it."""
+    s, c = svc.search, SearchCriteria
+    timed("search: products, no filter", lambda: s.products(c()).rows, results=res)
+    timed("search: products 'oak'", lambda: s.products(c(text="oak")).rows, results=res)
+    timed("search: products 'prd 01234' (spaces)", lambda: s.products(c(text="prd 01234")).rows, results=res)
+    timed("search: products 'B1' (bins)", lambda: s.products(c(text="B1")).rows, results=res)
+    timed("search: products low stock", lambda: s.products(c(stock_status="LOW_STOCK")).rows, results=res)
+    timed("search: products supplier + zone + last 30 days", lambda: s.products(
+        c(supplier_id=1, zone_id=2, date_preset="LAST_30")).rows, results=res)
+    timed("search: products sorted by qty", lambda: s.products(c(), sort="qty", descending=True).rows,
+          results=res)
+    timed("search: transactions, no filter", lambda: s.movements(c()).rows, results=res)
+    timed("search: transactions 'DN101234'", lambda: s.movements(c(text="DN101234")).rows, results=res)
+    timed("search: Goods In from supplier, last 30 days", lambda: s.movements(
+        c(supplier_id=1, movement_types=["GOODS_IN"], date_preset="LAST_30")).rows, results=res)
+    timed("search: other matches 'B1'", lambda: s.matches("B1"), results=res)
+    timed("search: exact scan", lambda: [s.exact_product("PRD-01234")], results=res)
+    timed("search: bin screen", lambda: [s.bin_view(1)], results=res)
+    timed("search: supplier screen", lambda: [s.supplier_view(1)], results=res)
 
 
 def main(argv=None) -> int:

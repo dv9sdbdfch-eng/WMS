@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
     QFormLayout,
     QGridLayout,
+    QLabel,
     QLineEdit,
     QPlainTextEdit,
     QTabWidget,
@@ -18,6 +20,7 @@ from PySide6.QtWidgets import (
 from wms.core.enums import AttachmentKind, EntityType, FinishedStatus, ItemType, MovementType
 from wms.core.numbers import fmt_datetime, fmt_qty
 from wms.core.permissions import P
+from wms.services.search import location_of, movement_reference, movement_route, signed_qty
 from wms.ui.widgets.attachments import AttachmentPanel, PhotoThumb
 from wms.ui.widgets.common import (
     DATETIME,
@@ -36,7 +39,8 @@ from wms.ui.widgets.common import (
 
 
 class ProductDialog(QDialog):
-    def __init__(self, app, product_id: int | None, parent=None, default_type: str | None = None):
+    def __init__(self, app, product_id: int | None, parent=None, default_type: str | None = None,
+                 tab: str | None = None):
         super().__init__(parent)
         self.app = app
         self.product_id = product_id
@@ -50,37 +54,23 @@ class ProductDialog(QDialog):
         lay.addWidget(self.header)
         self.tabs = QTabWidget()
         lay.addWidget(self.tabs, 1)
+        if product_id:
+            self.tabs.addTab(self._build_overview(), "Overview")
         self._build_details(default_type)
         self.photos = AttachmentPanel(app, EntityType.PRODUCT.value, AttachmentKind.PHOTO.value)
         self.photos.changed.connect(self._refresh_thumb)
         self.tabs.addTab(self.photos, "Photos")
-        self.bins_table = DataTable([Col("Bin", lambda l: l.bin.full_code, width=320),
-                                     Col("Quantity", lambda l: l.quantity, QTY, 100),
-                                     Col("Available for issue", lambda l: "Yes" if l.bin.is_available else
-                                         "No (quarantine)")])
-        bins_w = QWidget()
-        bl = QVBoxLayout(bins_w)
-        bl.addWidget(self.bins_table, 1)
-        actions = []
-        if app.can(P.STOCK_TRANSFER):
-            actions.append(button("Transfer between bins...", self.transfer))
-        if app.can(P.STOCK_ADJUST):
-            actions.append(button("Stock adjustment...", self.adjust))
-        bl.addLayout(h(*actions, None))
-        self.tabs.addTab(bins_w, "Stock by Bin")
-        self.mv_table = DataTable([
-            Col("Date / Time", lambda m: m.occurred_at, DATETIME, 130),
-            Col("Type", lambda m: MovementType(m.movement_type).label, width=150),
-            Col("Qty", lambda m: m.quantity, QTY, 80),
-            Col("From", lambda m: m.from_bin.full_code if m.from_bin else "", width=200),
-            Col("To", lambda m: m.to_bin.full_code if m.to_bin else "", width=200),
-            Col("Site", lambda m: m.site.display if m.site else "", width=180),
-            Col("Document", lambda m: m.doc_number or "", width=110),
-            Col("Reference", lambda m: m.reference or "", width=100),
-            Col("User", lambda m: m.user.full_name, width=120),
-            Col("Notes", lambda m: m.notes or "")])
+        self.mv_table = DataTable(product_history_columns())
         self.mv_table.activated_item.connect(self._open_movement_doc)
-        self.tabs.addTab(self.mv_table, "Movement History")
+        mv_w = QWidget()
+        ml = QVBoxLayout(mv_w)
+        ml.addWidget(label("Everything that happened to this material, newest first. + came into the "
+                           "warehouse, - left it. Double-click a line to open its document.", "Muted", wrap=True))
+        ml.addWidget(self.mv_table, 1)
+        self.mv_count = label("", "Muted")
+        ml.addWidget(self.mv_count)
+        self.tabs.addTab(mv_w, "Movement History")
+        self.history_tab = mv_w
         self.audit_table = DataTable([Col("When", lambda a: a.occurred_at, DATETIME, 130),
                                       Col("User", lambda a: a.username, width=100),
                                       Col("Action", lambda a: a.action, width=170),
@@ -92,6 +82,76 @@ class ProductDialog(QDialog):
         self.btn_save.setVisible(self.can_edit)
         lay.addLayout(h(None, button("Close", self.reject), self.btn_save))
         self._load()
+        if tab == "history":
+            self.tabs.setCurrentWidget(self.history_tab)
+        elif tab == "photos":
+            self.tabs.setCurrentWidget(self.photos)
+
+    # -- overview tab (what search opens) -------------------------------------
+    def _build_overview(self) -> QWidget:
+        w = QWidget()
+        grid = QGridLayout(w)
+        grid.setHorizontalSpacing(24)
+        self.ov_form = QFormLayout()
+        self.ov_fields: dict[str, QLabel] = {}
+        for key, text in (("code", "Code"), ("supplier_code", "Supplier code"), ("barcode", "Barcode"),
+                          ("name", "Name"), ("description", "Description"), ("brand", "Brand"),
+                          ("supplier", "Supplier"), ("category", "Category"), ("type", "Type"),
+                          ("status", "Status")):
+            lab = label("", wrap=True)
+            lab.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            self.ov_fields[key] = lab
+            self.ov_form.addRow(f"{text}:", lab)
+        left = QVBoxLayout()
+        left.addWidget(label("Product information", "SectionTitle"))
+        left.addLayout(self.ov_form)
+        left.addStretch(1)
+        self.ov_thumb = PhotoThumb(self.app, 220)
+        left.addWidget(self.ov_thumb)
+        right = QVBoxLayout()
+        self.ov_total = label("", "CardValue")
+        right.addWidget(label("Current stock", "SectionTitle"))
+        right.addWidget(self.ov_total)
+        right.addWidget(label("Stock locations", "SectionTitle"))
+        self.bins_table = DataTable([
+            Col("Location", lambda l: location_of(l.bin), width=260),
+            Col("Bin", lambda l: l.bin.code, width=110),
+            Col("Quantity", lambda l: l.quantity, QTY, 100),
+            Col("Available for issue", lambda l: "Yes" if l.bin.is_available else "No (quarantine)")])
+        self.bins_table.activated_item.connect(lambda l: self.app.open_entity("BIN", l.bin_id, self))
+        right.addWidget(self.bins_table, 1)
+        self.bins_total = label("", "SectionTitle")
+        right.addWidget(self.bins_total)
+        actions = []
+        if self.app.can(P.STOCK_TRANSFER):
+            actions.append(button("Transfer between bins...", self.transfer))
+        if self.app.can(P.STOCK_ADJUST):
+            actions.append(button("Stock adjustment...", self.adjust))
+        actions.append(button("Movement history", lambda: self.tabs.setCurrentWidget(self.history_tab)))
+        right.addLayout(h(*actions, None))
+        grid.addLayout(left, 0, 0)
+        grid.addLayout(right, 0, 1)
+        grid.setColumnStretch(0, 2)
+        grid.setColumnStretch(1, 3)
+        return w
+
+    def _load_overview(self, p, levels):
+        f = self.ov_fields
+        f["code"].setText(p.internal_code)
+        f["supplier_code"].setText(p.supplier_code or "-")
+        f["barcode"].setText(p.barcode or "-")
+        f["name"].setText(p.name)
+        f["description"].setText(p.description or "-")
+        f["brand"].setText(p.brand or "-")
+        f["supplier"].setText(p.supplier.name if p.supplier else "-")
+        f["category"].setText(p.category.full_name if p.category else "-")
+        f["type"].setText(ItemType(p.item_type).label)
+        f["status"].setText("Active" if p.is_active else "Archived")
+        self.ov_thumb.show_for(EntityType.PRODUCT.value, p.id)
+        total = sum((l.quantity for l in levels), 0)
+        self.ov_total.setText(f"{fmt_qty(total)} {p.unit.code}")
+        self.bins_table.set_items(levels)
+        self.bins_total.setText(f"Total = {fmt_qty(total)} {p.unit.code}  in {len(levels)} bin(s)")
 
     # -- details tab --------------------------------------------------------
     def _build_details(self, default_type):
@@ -110,6 +170,8 @@ class ProductDialog(QDialog):
         self.name = QLineEdit()
         self.supplier_code = QLineEdit()
         self.barcode = QLineEdit()
+        self.brand = QLineEdit()
+        self.brand.setPlaceholderText("e.g. Egger, Blum, Hettich")
         self.description = QPlainTextEdit()
         self.description.setFixedHeight(70)
         self.category = PickCombo("None")
@@ -127,6 +189,7 @@ class ProductDialog(QDialog):
         left.addRow("Internal product code *", self.code)
         left.addRow("Product name *", self.name)
         left.addRow("Description", self.description)
+        left.addRow("Brand", self.brand)
         left.addRow("Category", self.category)
         left.addRow("Unit of measure *", self.unit)
         left.addRow("Supplier", self.supplier)
@@ -166,7 +229,7 @@ class ProductDialog(QDialog):
         grid.setColumnStretch(0, 3)
         grid.setColumnStretch(1, 3)
         self.tabs.addTab(w, "Details")
-        for wdg in (self.item_type, self.code, self.name, self.supplier_code, self.barcode, self.description,
+        for wdg in (self.item_type, self.code, self.name, self.supplier_code, self.barcode, self.brand, self.description,
                     self.category, self.unit, self.supplier, self.default_bin, self.min_stock, self.reorder,
                     self.cost, self.notes, self.active, self.f_status, self.f_site, self.f_customer, self.f_date):
             wdg.setEnabled(self.can_edit)
@@ -200,6 +263,7 @@ class ProductDialog(QDialog):
         self.name.setText(p.name)
         self.supplier_code.setText(p.supplier_code or "")
         self.barcode.setText(p.barcode or "")
+        self.brand.setText(p.brand or "")
         self.description.setPlainText(p.description or "")
         self.category.set_value(p.category_id)
         self.unit.set_value(p.unit_id)
@@ -223,8 +287,11 @@ class ProductDialog(QDialog):
         total = sum((l.quantity for l in levels), 0)
         self.info.setText(f"On hand: {fmt_qty(total)} {p.unit.code}\nCreated {fmt_datetime(p.created_at)}\n"
                           f"Last updated {fmt_datetime(p.updated_at)}")
-        self.bins_table.set_items(levels)
-        self.mv_table.set_items(app.services.products.movements(p.id))
+        self._load_overview(p, levels)
+        moves = app.services.products.movements(p.id)
+        self.mv_table.set_items(moves)
+        self.mv_count.setText(f"{len(moves)} movement(s)" + (" - showing the latest 1000" if len(moves) >= 1000
+                                                            else ""))
         if app.can(P.AUDIT_VIEW):
             self.audit_table.set_items(app.services.audit.for_entity(EntityType.PRODUCT.value, p.id))
 
@@ -235,6 +302,7 @@ class ProductDialog(QDialog):
             "name": self.name.text(),
             "supplier_code": self.supplier_code.text(),
             "barcode": self.barcode.text(),
+            "brand": self.brand.text(),
             "description": self.description.toPlainText(),
             "category_id": self.category.value(),
             "unit_id": self.unit.value(),
@@ -265,6 +333,8 @@ class ProductDialog(QDialog):
         was_new = self.product_id is None
         self.product_id, self.product = p.id, p
         self.setWindowTitle(f"Product {p.internal_code}")
+        if was_new:
+            self.tabs.insertTab(0, self._build_overview(), "Overview")
         for i in range(self.tabs.count()):
             self.tabs.setTabEnabled(i, True)
         self._load()
@@ -286,10 +356,32 @@ class ProductDialog(QDialog):
             self._load()
 
     def _open_movement_doc(self, m):
-        mapping = {"DELIVERY_NOTE": "DELIVERY_NOTE", "GOODS_ISSUE": "GOODS_ISSUE", "RETURN": "RETURN",
-                   "PRODUCTION": "PRODUCTION"}
-        if m.doc_type in mapping and m.doc_id:
-            self.app.open_entity(mapping[m.doc_type], m.doc_id, self)
+        open_movement(self.app, m, self)
+
+
+def product_history_columns() -> list[Col]:
+    """Movement history as a warehouse user reads it: 25/10/2026 | Goods In | +50 | Egger -> Bin B01."""
+    return [
+        Col("Date / Time", lambda m: m.occurred_at, DATETIME, 130),
+        Col("Movement Type", lambda m: MovementType(m.movement_type).label + (" (reversal)" if m.reversal_of_id
+                                                                              else ""), width=160),
+        Col("Quantity", signed_qty, QTY, 85),
+        Col("From", lambda m: movement_route(m)[0], width=220),
+        Col("To", lambda m: movement_route(m)[1], width=220),
+        Col("Project", lambda m: m.site.display if m.site else "", width=170),
+        Col("Supplier", lambda m: m.supplier.name if m.supplier else "", width=140),
+        Col("Reference", movement_reference, width=140),
+        Col("User", lambda m: m.user.full_name, width=120),
+        Col("Notes", lambda m: m.notes or "")]
+
+
+def open_movement(app, m, parent) -> None:
+    """Open the document behind a movement, or the movement itself when it has no document screen."""
+    if m.doc_type in ("DELIVERY_NOTE", "GOODS_ISSUE", "RETURN", "PRODUCTION") and m.doc_id:
+        app.open_entity(m.doc_type, m.doc_id, parent)
+    else:
+        from wms.ui.pages.movements import MovementDetailDialog
+        MovementDetailDialog(app, m, parent).exec()
 
 
 def _changes(a) -> str:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, Index, Integer, String, Text
+from sqlalchemy import Boolean, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from wms.core.numbers import utcnow
@@ -83,3 +83,27 @@ class Setting(Base):
 
     key: Mapped[str] = mapped_column(String(60), primary_key=True)
     value: Mapped[str | None] = mapped_column(Text)
+
+
+class SavedSearch(IdMixin, Base):
+    """A named filter combination ("Low Stock - Egger"). Criteria are stored as JSON
+    (see ``wms.services.search.SearchCriteria``) so new filters need no schema change."""
+
+    __tablename__ = "saved_searches"
+    __table_args__ = (UniqueConstraint("user_id", "name"),)
+
+    user_id: Mapped[int] = fk("users.id", nullable=False, ondelete="CASCADE")
+    name: Mapped[str] = mapped_column(String(80), nullable=False)
+    criteria: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, nullable=False)
+
+
+class RecentSearch(IdMixin, Base):
+    """The last few texts a user searched for (trimmed to a short list by the search service)."""
+
+    __tablename__ = "recent_searches"
+    __table_args__ = (UniqueConstraint("user_id", "text"),)
+
+    user_id: Mapped[int] = fk("users.id", nullable=False, ondelete="CASCADE")
+    text: Mapped[str] = mapped_column(String(120), nullable=False)
+    searched_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, nullable=False)

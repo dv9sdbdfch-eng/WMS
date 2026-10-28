@@ -319,37 +319,85 @@ class ProductionDialog(QDialog):
 
 
 class BinContentsDialog(QDialog):
+    """BIN B04: where it is, what is in it, and what recently went in and out."""
+
     def __init__(self, app, bin_id: int, parent=None):
         super().__init__(parent)
         self.app = app
         self.bin_id = bin_id
-        b = next((x for x in app.services.locations.bins(include_inactive=True) if x.id == bin_id), None)
-        self.setWindowTitle(f"Bin {b.full_code if b else ''}")
-        self.resize(900, 560)
+        self.resize(1100, 680)
         lay = QVBoxLayout(self)
-        lay.addWidget(label(f"Bin {b.full_code}" if b else "Bin", "PageTitle"))
-        if b and not b.is_available:
-            lay.addWidget(label("Quarantine bin - stock here cannot be issued.", "Banner"))
+        self.title = label("", "PageTitle")
+        self.where = label("", "SectionTitle")
+        self.summary = label("", "Muted")
+        lay.addWidget(self.title)
+        lay.addWidget(self.where)
+        lay.addWidget(self.summary)
+        self.banner = label("Quarantine bin - stock here cannot be issued.", "Banner")
+        self.banner.hide()
+        lay.addWidget(self.banner)
+        tabs = QTabWidget()
         self.table = DataTable([Col("Code", lambda l: l.product.internal_code, width=120),
-                                Col("Product", lambda l: l.product.name, width=320),
+                                Col("Product", lambda l: l.product.name, width=340),
                                 Col("Quantity", lambda l: l.quantity, QTY, 100),
-                                Col("Unit", lambda l: l.product.unit.code)])
+                                Col("Unit", lambda l: l.product.unit.code, width=60),
+                                Col("Supplier", lambda l: l.product.supplier.name if l.product.supplier else "")])
         self.table.activated_item.connect(lambda l: app.open_entity("PRODUCT", l.product_id, self))
-        lay.addWidget(self.table, 1)
-        buttons = []
+        tabs.addTab(self.table, "Contents")
+        self.moved_in = DataTable(_bin_movement_columns())
+        self.moved_out = DataTable(_bin_movement_columns())
+        for t in (self.moved_in, self.moved_out):
+            t.activated_item.connect(self._open_movement)
+        tabs.addTab(self.moved_in, "Recent movements into the bin")
+        tabs.addTab(self.moved_out, "Recent movements out of the bin")
+        lay.addWidget(tabs, 1)
+        buttons = [button("View product", lambda: self._open_product())]
         if app.can(P.STOCK_TRANSFER):
             buttons.append(button("Transfer selected...", self.transfer))
         lay.addLayout(h(*buttons, None, button("Close", self.accept)))
         self.refresh()
 
     def refresh(self):
-        self.table.set_items(self.app.services.locations.bin_contents(self.bin_id))
+        v = self.app.services.search.bin_view(self.bin_id)
+        b = v.bin
+        self.setWindowTitle(f"Bin {b.code}")
+        self.title.setText(f"BIN {b.code}" + ("" if b.is_active else "  (archived)"))
+        self.where.setText(f"Location: {v.path_text}")
+        self.summary.setText(f"{v.product_count} different product(s)   ·   full code {b.full_code}"
+                             + (f"   ·   {b.description}" if b.description else ""))
+        self.banner.setVisible(not b.is_available)
+        self.table.set_items(v.contents)
+        self.moved_in.set_items(v.recent_in)
+        self.moved_out.set_items(v.recent_out)
+
+    def _open_product(self):
+        lvl = self.table.current()
+        if lvl is not None:
+            self.app.open_entity("PRODUCT", lvl.product_id, self)
+
+    def _open_movement(self, m):
+        from wms.ui.dialogs.product_dialog import open_movement
+        open_movement(self.app, m, self)
 
     def transfer(self):
         from wms.ui.dialogs.stock_dialogs import TransferDialog
         lvl = self.table.current()
         if TransferDialog(self.app, lvl.product_id if lvl else None, self, from_bin_id=self.bin_id).exec():
+            self.app.changed()
             self.refresh()
+
+
+def _bin_movement_columns() -> list[Col]:
+    from wms.services.search import movement_reference, movement_route
+    return [Col("Date / Time", lambda m: m.occurred_at, DATETIME, 130),
+            Col("Type", lambda m: MovementType(m.movement_type).label, width=150),
+            Col("Code", lambda m: m.product.internal_code, width=110),
+            Col("Product", lambda m: m.product.name, width=220),
+            Col("Qty", lambda m: m.quantity, QTY, 80),
+            Col("From", lambda m: movement_route(m)[0], width=200),
+            Col("To", lambda m: movement_route(m)[1], width=200),
+            Col("Reference", movement_reference, width=120),
+            Col("User", lambda m: m.user.full_name)]
 
 
 __all__ = ["DeliveryNoteDialog", "GoodsIssueDialog", "ReturnDialog", "ProductionDialog", "BinContentsDialog",

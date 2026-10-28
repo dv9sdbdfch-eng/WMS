@@ -51,10 +51,13 @@ class App(QObject):
         return [(loc.path, loc.id) for loc in self.services.locations.tree()]
 
     # -- navigation from search / links -------------------------------------
-    def open_entity(self, entity_type: str, entity_id: int, parent: QWidget | None = None) -> None:
+    def open_entity(self, entity_type: str, entity_id: int, parent: QWidget | None = None,
+                    tab: str | None = None) -> None:
+        """Open a record's own screen. ``tab`` picks the starting tab where a screen has several
+        ("history" for a product, "materials" for a project, "products" for a supplier)."""
         if entity_type == EntityType.PRODUCT.value:
             from wms.ui.dialogs.product_dialog import ProductDialog
-            ProductDialog(self, entity_id, parent).exec()
+            ProductDialog(self, entity_id, parent, tab=tab).exec()
         elif entity_type == EntityType.DELIVERY_NOTE.value:
             from wms.ui.dialogs.documents import DeliveryNoteDialog
             DeliveryNoteDialog(self, entity_id, parent).exec()
@@ -63,7 +66,7 @@ class App(QObject):
             GoodsIssueDialog(self, entity_id, parent).exec()
         elif entity_type == EntityType.SITE.value:
             from wms.ui.dialogs.site_dialog import SiteDialog
-            SiteDialog(self, entity_id, parent).exec()
+            SiteDialog(self, entity_id, parent, tab=tab).exec()
         elif entity_type == EntityType.RETURN.value:
             from wms.ui.dialogs.documents import ReturnDialog
             ReturnDialog(self, entity_id, parent).exec()
@@ -72,7 +75,7 @@ class App(QObject):
             BinContentsDialog(self, entity_id, parent).exec()
         elif entity_type == EntityType.SUPPLIER.value:
             from wms.ui.dialogs.reference_dialogs import SupplierDialog
-            SupplierDialog(self, entity_id, parent).exec()
+            SupplierDialog(self, entity_id, parent, tab=tab).exec()
         elif entity_type == EntityType.PRODUCTION.value:
             from wms.ui.dialogs.documents import ProductionDialog
             ProductionDialog(self, entity_id, parent).exec()
