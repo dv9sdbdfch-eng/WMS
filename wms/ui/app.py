@@ -21,6 +21,23 @@ class App(QObject):
         self.services = Services(ctx)
         # Set after a backup restore: the window closes and the program starts again.
         self.restart_required = False
+        self.main_window = None  # set by MainWindow
+
+    def start_posting(self, page_key: str, product_id: int, supplier_id: int | None = None,
+                      site_id: int | None = None) -> bool:
+        """Open Goods In / Goods Out with this product on a new line (Product Passport, search)."""
+        mw = self.main_window
+        if mw is None or page_key not in mw.factories:
+            return False
+        mw.go(page_key)
+        page = mw.page(page_key)
+        if page_key == "goods_in":
+            page.add_product(product_id, supplier_id=supplier_id)
+        else:
+            page.add_product(product_id, site_id=site_id)
+        mw.raise_()
+        mw.activateWindow()
+        return True
 
     @property
     def user(self):

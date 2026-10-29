@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from wms.core.enums import EntityType
 from wms.core.numbers import fmt_date
 from wms.core.permissions import P
 from wms.ui.widgets.common import DATE, DATETIME, INT, MONEY, QTY, Col, DataTable, PickCombo, button, h, label, run
@@ -83,6 +84,11 @@ class SupplierDialog(QDialog):
             dn.activated_item.connect(lambda r: app.open_entity("DELIVERY_NOTE", r[0].id, self))
             tabs.addTab(dn, "Delivery History")
             self.deliveries_tab = dn
+        if self.sup:
+            from wms.ui.widgets.attachments import AttachmentPanel
+            self.docs = AttachmentPanel(app, EntityType.SUPPLIER.value, None, thumbs=False)  # price lists, certificates
+            self.docs.set_entity(self.sup.id)
+            tabs.addTab(self.docs, "Documents")
         if self.sup and tab == "products":
             tabs.setCurrentWidget(self.products_tab)
         elif self.sup and tab == "deliveries" and hasattr(self, "deliveries_tab"):

@@ -256,6 +256,12 @@ class GoodsIssueDialog(QDialog):
                        Col("Notes", lambda l: l.notes or "")])
         t.set_items(gi.lines)
         lay.addWidget(t, 1)
+        # Signed issue note, photo of what left (spec 26)
+        lay.addWidget(label("Documents", "SectionTitle"))
+        self.docs = AttachmentPanel(app, EntityType.GOODS_ISSUE.value, None, thumbs=False)
+        self.docs.setMaximumHeight(140)
+        self.docs.set_entity(gi.id)
+        lay.addWidget(self.docs)
         buttons = [button("Print issue note", self.print_note)]
         if gi.status == "POSTED" and app.can(P.GOODS_OUT_REVERSE):
             buttons.append(button("Reverse (posted in error)...", self.reverse, danger=True))

@@ -109,6 +109,21 @@ class ListPage(Page):
         self.table.set_items(rows)
         self.count.setText(self.describe(rows))
 
+    def apply_preset(self, preset: dict) -> None:
+        """Show a ready-made selection (a Dashboard counter): {"status": "OVERDUE"} picks that entry
+        of the page's ``status`` drop-down. The search text is cleared so nothing hides the records."""
+        from PySide6.QtWidgets import QComboBox
+        self.search.setText("")
+        for name, value in preset.items():
+            widget = getattr(self, name, None)
+            if isinstance(widget, QComboBox):
+                i = widget.findData(value)
+                if i >= 0:
+                    widget.blockSignals(True)
+                    widget.setCurrentIndex(i)
+                    widget.blockSignals(False)
+        self.refresh()
+
     def _open(self, item) -> None:
         if item is not None:
             self.open_item(item)

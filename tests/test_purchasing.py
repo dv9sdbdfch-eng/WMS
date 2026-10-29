@@ -90,8 +90,7 @@ def test_over_delivery_and_wrong_product_are_recorded_automatically(svc, sample)
     assert wrong.product_id == sample.edge.id and wrong.quantity == D("50") and wrong.is_automatic
     assert {over.status, wrong.status} == {"OPEN"} and over.purchase_order_id == po.id
     assert view(svc, po)[0] == "RECEIVED"
-    alerts = [a.text for a in svc.dashboard.load().alerts]
-    assert any("2 delivery problem(s)" in a for a in alerts)
+    assert svc.dashboard.load().action("discrepancies").count == 2
     # Reversing the delivery closes the problems recorded for it
     svc.goods_in.reverse(dn.id, "wrong supplier paperwork")
     assert {d.status for d in svc.purchasing.discrepancies(delivery_note_id=dn.id)} == {"RESOLVED"}
@@ -217,7 +216,7 @@ def test_manual_discrepancy_with_photo_and_resolution(svc, sample, tmp_path):
     with pytest.raises(ValidationError, match="already been resolved"):
         svc.purchasing.resolve_discrepancy(d.id, "again")
     assert svc.purchasing.discrepancies(status="OPEN") == []
-    assert not any("delivery problem" in a.text for a in svc.dashboard.load().alerts)
+    assert svc.dashboard.load().action("discrepancies").count == 0
 
 
 def test_overdue_orders_on_dashboard(svc, sample):
@@ -226,7 +225,8 @@ def test_overdue_orders_on_dashboard(svc, sample):
     assert svc.purchasing.overdue() == []  # draft: not sent yet
     svc.purchasing.mark_ordered(po.id)
     assert [r.po.po_number for r in svc.purchasing.overdue()] == [po.po_number]
-    assert any("past their expected delivery date" in a.text for a in svc.dashboard.load().alerts)
+    assert svc.dashboard.load().action("overdue_po").count == 1
+    assert [r.po.id for r in svc.purchasing.list(overdue_only=True)] == [po.id]  # the list the counter opens
     rows = svc.purchasing.list("MDF-18")
     assert [(r.po.id, r.lines_outstanding, r.value) for r in rows] == [(po.id, 1, D("122.50"))]
 

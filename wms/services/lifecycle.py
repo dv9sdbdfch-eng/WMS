@@ -137,3 +137,10 @@ def last_removal(s: Session, entity_type: str, entity_id: int) -> AuditLog | Non
         select(AuditLog).where(AuditLog.entity_type == entity_type, AuditLog.entity_id == entity_id,
                                AuditLog.action.like("%\\_ARCHIVED", escape="\\"))
         .order_by(AuditLog.occurred_at.desc(), AuditLog.id.desc()).limit(1))
+
+
+def attachment_count(s, entity_type: str, entity_id: int) -> int:
+    """Files attached to a record: a record with documents is archived, never deleted with them."""
+    from wms.db.models import Attachment
+    return count(s, Attachment.id, Attachment.entity_type == entity_type, Attachment.entity_id == entity_id,
+                 Attachment.is_deleted.is_(False))

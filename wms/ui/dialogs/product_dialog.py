@@ -18,11 +18,12 @@ from PySide6.QtWidgets import (
 )
 
 from wms.core.enums import AttachmentKind, EntityType, FinishedStatus, ItemType, StockStatus
-from wms.core.numbers import fmt_datetime, fmt_qty
+from wms.core.numbers import fmt_date, fmt_datetime, fmt_qty
 from wms.core.permissions import P
-from wms.services.search import location_of, movement_reference, movement_route, signed_qty
+from wms.services.search import movement_reference, movement_route, signed_qty
 from wms.ui.widgets.attachments import AttachmentPanel, PhotoThumb
 from wms.ui.widgets.common import (
+    DATE,
     DATETIME,
     QTY,
     Col,
@@ -61,6 +62,10 @@ class ProductDialog(QDialog):
         self.photos = AttachmentPanel(app, EntityType.PRODUCT.value, AttachmentKind.PHOTO.value)
         self.photos.changed.connect(self._refresh_thumb)
         self.tabs.addTab(self.photos, "Photos")
+        # Spec sheets, certificates, drawings (spec 26). Delivery notes and orders show on the Overview.
+        self.files = AttachmentPanel(app, EntityType.PRODUCT.value, AttachmentKind.DOCUMENT.value, thumbs=False)
+        self.files.changed.connect(lambda: self._load() if self.product_id else None)
+        self.tabs.addTab(self.files, "Documents")
         self.mv_table = DataTable(product_history_columns())
         self.mv_table.activated_item.connect(self._open_movement_doc)
         mv_w = QWidget()
@@ -113,31 +118,31 @@ class ProductDialog(QDialog):
             self.app.changed()
             self.accept()
 
-    # -- overview tab (what search opens) -------------------------------------
+    # -- overview tab = Product Passport (spec 21, what search opens) --------------------
     def _build_overview(self) -> QWidget:
         w = QWidget()
         grid = QGridLayout(w)
         grid.setHorizontalSpacing(24)
+        # Identity
         self.ov_form = QFormLayout()
         self.ov_fields: dict[str, QLabel] = {}
-        for key, text in (("code", "Code"), ("supplier_code", "Supplier code"), ("barcode", "Barcode"),
-                          ("name", "Name"), ("description", "Description"), ("brand", "Brand"),
-                          ("supplier", "Supplier"), ("category", "Category"), ("type", "Type"),
-                          ("status", "Status")):
+        for key, text in (("code", "Internal code"), ("supplier_code", "Product number"), ("barcode", "Barcode"),
+                          ("name", "Name"), ("description", "Description"), ("category", "Category"),
+                          ("brand", "Brand"), ("supplier", "Supplier"), ("type", "Type"), ("status", "Status")):
             lab = label("", wrap=True)
             lab.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             self.ov_fields[key] = lab
             self.ov_form.addRow(f"{text}:", lab)
         left = QVBoxLayout()
-        left.addWidget(label("Product information", "SectionTitle"))
-        left.addLayout(self.ov_form)
-        left.addStretch(1)
         self.ov_thumb = PhotoThumb(self.app, 220)
         left.addWidget(self.ov_thumb)
+        left.addWidget(label("Identity", "SectionTitle"))
+        left.addLayout(self.ov_form)
+        left.addStretch(1)
+
         right = QVBoxLayout()
-        self.ov_total = label("", "CardValue")
-        right.addWidget(label("Current stock", "SectionTitle"))
-        right.addWidget(self.ov_total)
+        # Stock
+        right.addWidget(label("Stock", "SectionTitle"))
         states = QGridLayout()
         states.setHorizontalSpacing(18)
         self.ov_states: dict[str, QLabel] = {}
@@ -145,10 +150,11 @@ class ProductDialog(QDialog):
                 ("on_hand", "On Hand", "Physically in the warehouse, in every bin"),
                 ("reserved", "Reserved", "Set aside for projects, not yet issued"),
                 ("available", "Available", "On Hand minus Reserved (quarantine bins excluded)"),
-                ("incoming", "Incoming", "Still to arrive on purchase orders"))):
+                ("incoming", "Incoming", "Still to arrive on purchase orders"),
+                ("minimum", "Minimum Stock", "Reorder when Available falls to the reorder level / minimum"))):
             head = label(text, "Muted")
             head.setToolTip(tip)
-            val = label("", "SectionTitle")
+            val = label("", "CardValue" if key == "available" else "SectionTitle")
             val.setToolTip(tip)
             states.addWidget(head, 0, col)
             states.addWidget(val, 1, col)
@@ -156,27 +162,76 @@ class ProductDialog(QDialog):
         right.addLayout(states)
         self.ov_reorder = label("", "Muted", wrap=True)
         right.addWidget(self.ov_reorder)
-        right.addWidget(label("Stock locations", "SectionTitle"))
+
+        sections = QGridLayout()
+        sections.setSpacing(12)
+        # Locations
         self.bins_table = DataTable([
-            Col("Location", lambda l: location_of(l.bin), width=260),
-            Col("Bin", lambda l: l.bin.code, width=110),
-            Col("Quantity", lambda l: l.quantity, QTY, 100),
-            Col("Available for issue", lambda l: "Yes" if l.bin.is_available else "No (quarantine)")])
+            Col("Bin", lambda l: l.bin.full_code, width=230),
+            Col("Quantity", lambda l: l.quantity, QTY, 90),
+            Col("Issuable", lambda l: "Yes" if l.bin.is_available else "No (quarantine)")])
         self.bins_table.activated_item.connect(lambda l: self.app.open_entity("BIN", l.bin_id, self))
-        right.addWidget(self.bins_table, 1)
-        self.bins_total = label("", "SectionTitle")
-        right.addWidget(self.bins_total)
+        self.bins_total = label("", "Muted")
+        # Purchasing
+        self.ov_last = label("", wrap=True)
+        self.ov_orders = DataTable([Col("PO", lambda o: o.po_number, width=90),
+                                    Col("Supplier", lambda o: o.supplier, width=130),
+                                    Col("Expected", lambda o: o.expected_date, DATE, 85),
+                                    Col("Outstanding", lambda o: o.outstanding, QTY, 90)])
+        self.ov_orders.set_row_style(lambda o: "low" if o.is_overdue else None)
+        self.ov_orders.activated_item.connect(lambda o: self.app.open_entity("PURCHASE_ORDER", o.po_id, self))
+        purchasing = QVBoxLayout()
+        purchasing.addWidget(self.ov_last)
+        purchasing.addWidget(self.ov_orders, 1)
+        # Projects
+        self.ov_projects = DataTable([Col("Project", lambda u: u.project, width=210),
+                                      Col("Issued", lambda u: u.issued, QTY, 75),
+                                      Col("Returned", lambda u: u.returned, QTY, 75),
+                                      Col("Net", lambda u: u.net, QTY, 70),
+                                      Col("Last", lambda u: u.last, DATE, 85)])
+        self.ov_projects.activated_item.connect(lambda u: self.app.open_entity("SITE", u.site_id, self))
+        # Documents
+        self.ov_docs = DataTable([Col("File", lambda d: d.attachment.original_name, width=200),
+                                  Col("From", lambda d: d.source, width=170),
+                                  Col("Added", lambda d: d.attachment.uploaded_at, DATE, 85)])
+        self.ov_docs.activated_item.connect(self._open_document)
+
+        def block(title, body, row, col):
+            v = QVBoxLayout()
+            v.addWidget(label(title, "SectionTitle"))
+            if isinstance(body, QWidget):
+                v.addWidget(body, 1)
+            else:
+                v.addLayout(body, 1)
+            sections.addLayout(v, row, col)
+
+        loc = QVBoxLayout()
+        loc.addWidget(self.bins_table, 1)
+        loc.addWidget(self.bins_total)
+        block("Locations", loc, 0, 0)
+        block("Purchasing", purchasing, 0, 1)
+        block("Projects", self.ov_projects, 1, 0)
+        block("Documents", self.ov_docs, 1, 1)
+        right.addLayout(sections, 1)
+
+        # Actions (spec 21): Goods In, Goods Out, Transfer, Reserve, History
         actions = []
+        if self.app.can(P.GOODS_IN_POST):
+            actions.append(button("Goods In", lambda: self._start("goods_in")))
+        if self.app.can(P.GOODS_OUT_POST):
+            actions.append(button("Goods Out", lambda: self._start("goods_out")))
         if self.app.can(P.STOCK_TRANSFER):
-            actions.append(button("Transfer between bins...", self.transfer))
+            actions.append(button("Transfer...", self.transfer))
+        if self.app.can(P.RESERVATIONS_EDIT):
+            actions.append(button("Reserve...", self.reserve))
         if self.app.can(P.STOCK_ADJUST):
-            actions.append(button("Stock adjustment...", self.adjust))
-        actions.append(button("Movement history", lambda: self.tabs.setCurrentWidget(self.history_tab)))
+            actions.append(button("Adjust...", self.adjust))
+        actions.append(button("History", lambda: self.tabs.setCurrentWidget(self.history_tab)))
         right.addLayout(h(*actions, None))
         grid.addLayout(left, 0, 0)
         grid.addLayout(right, 0, 1)
         grid.setColumnStretch(0, 2)
-        grid.setColumnStretch(1, 3)
+        grid.setColumnStretch(1, 5)
         return w
 
     def _load_overview(self, p, levels):
@@ -193,19 +248,52 @@ class ProductDialog(QDialog):
         f["status"].setText("Active" if p.is_active else "Archived")
         self.ov_thumb.show_for(EntityType.PRODUCT.value, p.id)
         total = sum((l.quantity for l in levels), 0)
-        self.ov_total.setText(f"{fmt_qty(total)} {p.unit.code}")
         r = self.app.services.products.row(p.id)
         u = p.unit.code
         for key in ("on_hand", "reserved", "available", "incoming"):
             self.ov_states[key].setText(f"{fmt_qty(getattr(r, key))} {u}")
+        self.ov_states["minimum"].setText(f"{fmt_qty(p.min_stock)} {u}" if p.min_stock else "-")
         notes = []
         if r.quarantine > 0:
             notes.append(f"{fmt_qty(r.quarantine)} {u} is in quarantine bins and cannot be issued or reserved.")
         if r.status in (StockStatus.OUT, StockStatus.LOW, StockStatus.REORDER):
             notes.append(f"{r.status.label}: suggested order {fmt_qty(r.shortfall)} {u}.")
         self.ov_reorder.setText("  ".join(notes))
+        self.ov_reorder.setVisible(bool(notes))
         self.bins_table.set_items(levels)
-        self.bins_total.setText(f"Total = {fmt_qty(total)} {p.unit.code}  in {len(levels)} bin(s)")
+        self.bins_total.setText(f"Total {fmt_qty(total)} {u} in {len(levels)} bin(s)")
+
+        pp = self.passport = self.app.services.products.passport(p.id)
+        last = pp.last_delivery
+        lines = [f"Last delivery: {fmt_date(last.delivery_date)}  ·  {last.dn_number}  ·  "
+                 f"{fmt_qty(last.quantity)} {u}" if last else "Last delivery: none yet",
+                 f"Last supplier: {last.supplier}" if last else "",
+                 f"Outstanding on purchase orders: {fmt_qty(pp.outstanding)} {u}"]
+        self.ov_last.setText("\n".join(x for x in lines if x))
+        self.ov_orders.set_items(pp.open_orders)
+        self.ov_projects.set_items(pp.projects)
+        self.ov_docs.set_items(pp.documents)
+
+    def _open_document(self, d):
+        if d.entity_type == EntityType.PRODUCT.value:
+            from PySide6.QtCore import QUrl
+            from PySide6.QtGui import QDesktopServices
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.app.services.attachments.path_of(d.attachment))))
+        else:
+            self.app.open_entity(d.entity_type, d.entity_id, self)
+
+    def _start(self, page_key: str):
+        """Goods In / Goods Out with this product already on a line."""
+        p = self.product
+        if self.app.start_posting(page_key, p.id, supplier_id=p.supplier_id):
+            self.accept()
+
+    def reserve(self):
+        from wms.ui.dialogs.reservations import ReservationDialog
+        if ReservationDialog(self.app, self, product_id=self.product_id).exec():
+            self.saved = True
+            self.app.changed()
+            self._load()
 
     # -- details tab --------------------------------------------------------
     def _build_details(self, default_type):
@@ -308,6 +396,7 @@ class ProductDialog(QDialog):
         if p is None:
             self.header.setText("New product")
             self.photos.set_entity(None)
+            self.files.set_entity(None)
             self.info.setText("Save the product first, then add photos.")
             for i in range(1, self.tabs.count()):
                 self.tabs.setTabEnabled(i, False)
@@ -340,6 +429,7 @@ class ProductDialog(QDialog):
             self.f_customer.setText(fi.customer or "")
         self._type_changed()
         self.photos.set_entity(p.id)
+        self.files.set_entity(p.id)
         self._refresh_thumb()
         levels = app.services.products.stock_by_bin(p.id)
         total = sum((l.quantity for l in levels), 0)

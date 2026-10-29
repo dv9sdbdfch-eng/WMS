@@ -583,6 +583,16 @@ class SearchService(BaseService):
             exact = self._exact_product(s, c.text)
         return SearchResult(rows, total or 0, limit, exact)
 
+    def count_products(self, c: SearchCriteria) -> int:
+        """How many products a search finds, without loading them (Dashboard counters)."""
+        self.require(P.PRODUCTS_VIEW)
+        c.validate()
+        st = StockColumns()
+        conds = self._product_conditions(c, st, products_mode=True)
+        with self.db.read_session() as s:
+            q = self._apply_related_product_filters(s, c, st.join(select(Product.id)).where(*conds))
+            return s.scalar(select(func.count()).select_from(q.subquery())) or 0
+
     def _product_order(self, sort: str, descending: bool, text: str, st: StockColumns):
         status = case((st.reorder_point.is_(None), 3), (st.available <= 0, 0), (st.available <= st.reorder_point, 1),
                       else_=2)

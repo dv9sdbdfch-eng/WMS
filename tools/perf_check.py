@@ -82,11 +82,27 @@ def run(data_dir: Path, ui: bool = False) -> dict:
 
         def startup():
             w = MainWindow(App(svc.ctx))  # opens on the Dashboard
-            w.close()
+            w.show()
+            QApplication.processEvents()
             return [w]
 
-        timed("UI: start-up (main window + Dashboard)", startup, repeat=1, results=res)
+        # Closing the window makes the exit backup; that is timed on its own below, not as start-up.
+        cfg.auto_backup_on_exit = False
+        windows = timed("UI: start-up (main window + Dashboard)", startup, repeat=3, results=res)
         timed("UI: open product (Product screen)", lambda: [ProductDialog(app, 1234)], repeat=3, results=res)
+        from wms.ui.dialogs.documents import BinContentsDialog
+        from wms.ui.dialogs.site_dialog import SiteDialog
+        bins = svc.locations.bins()[:50]
+        busiest = max(bins, key=lambda b: len(svc.locations.bin_contents(b.id))).id
+        site = max(svc.sites.list()[:50], key=lambda st: len(svc.sites.movements(st.id))).id
+        timed("UI: open bin (Bin screen, fullest bin)", lambda: [BinContentsDialog(app, busiest)], results=res)
+        timed("UI: open project (Project screen, busiest project)", lambda: [SiteDialog(app, site)], results=res)
+        for w in windows:
+            w.close()
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        timed("backup now (database + attachments, verified)",
+              lambda: [svc.backup.create(note="perf", destination=Path(tmp))], repeat=1, results=res)
     db.dispose()
     return res
 
