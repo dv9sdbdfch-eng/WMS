@@ -70,6 +70,11 @@ def _print(parent, result):
     QDesktopServices.openUrl(QUrl.fromLocalFile(str(out)))
 
 
+def open_file(path: Path) -> None:
+    """Open a file in its Windows program (PDF viewer, Excel)."""
+    QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+
 def print_bin_labels(parent, app, bin_ids: list[int]) -> Path | None:
     """Make the label PDF for these bins and open it (print from the PDF viewer)."""
     out = Path(tempfile.gettempdir()) / f"Bin_labels_{len(bin_ids)}.pdf"
@@ -79,7 +84,7 @@ def print_bin_labels(parent, app, bin_ids: list[int]) -> Path | None:
         info(parent, "Print labels", f"Close the open PDF '{out.name}' first and try again.")
         return None
     if path:
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+        open_file(path)
     return path
 
 

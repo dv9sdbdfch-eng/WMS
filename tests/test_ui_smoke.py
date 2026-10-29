@@ -467,11 +467,9 @@ def test_reason_codes_tab_lists_defaults(ui):
 def test_bin_screen_shows_location_levels_and_prints_a_label(ui, sample, monkeypatch):
     app, win, msgs, _ = ui
     sample.receive(sample.mdf, 6, sample.bin1)
-    from PySide6.QtGui import QDesktopServices
-
     from wms.ui.dialogs import documents
     opened = []
-    monkeypatch.setattr(QDesktopServices, "openUrl", lambda url: opened.append(url.toLocalFile()))
+    monkeypatch.setattr(documents, "open_file", lambda path: opened.append(str(path)))
     dlg = documents.BinContentsDialog(app, sample.bin1.id)
     text = dlg.where.text()
     assert "Zone: Zone A" in text and "Rack: R03" in text and "Status: Active" in text
@@ -480,4 +478,6 @@ def test_bin_screen_shows_location_levels_and_prints_a_label(ui, sample, monkeyp
     assert opened and opened[0].endswith(".pdf")
     dlg.stocktake()
     assert app.services.stocktake.list()[0].lines[0].bin_id == sample.bin1.id
+    dlg.close()
+    dlg.deleteLater()
     assert not _errors(msgs), msgs
