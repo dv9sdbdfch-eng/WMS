@@ -7,7 +7,7 @@ from datetime import date
 
 from PySide6.QtWidgets import QComboBox, QDialog, QFormLayout, QLineEdit, QPlainTextEdit, QVBoxLayout
 
-from wms.core.enums import AdjustmentReason, ItemType, ReturnType
+from wms.core.enums import ItemType, ReturnType
 from wms.core.exceptions import ReturnExceedsIssuedError, ValidationError
 from wms.core.numbers import fmt_qty
 from wms.core.permissions import P
@@ -124,7 +124,8 @@ class AdjustmentDialog(QDialog):
         self.new_qty.textChanged.connect(lambda _: self._update_diff())
         self.diff = label("", "Muted")
         self.reason_code = QComboBox()
-        for val, text in AdjustmentReason.choices():
+        self.reason_code.addItem("Choose a reason...", None)
+        for val, text in app.services.reasons.choices("ADJUSTMENT"):
             self.reason_code.addItem(text, val)
         self.reason = QPlainTextEdit()
         self.reason.setFixedHeight(70)

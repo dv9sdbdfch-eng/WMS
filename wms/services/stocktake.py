@@ -227,7 +227,7 @@ class StocktakeService(BaseService):
                     s, l.product_id, l.bin_id, l.counted_qty, AdjustmentReason.STOCK_COUNT.value,
                     f"{c.count_number}: counted {fmt_qty(l.counted_qty)}, system {fmt_qty(l.system_qty)}"
                     + (f" - {l.notes}" if l.notes else ""),
-                    expected_previous=l.system_qty)
+                    expected_previous=l.system_qty, from_stocktake=True)
                 l.adjustment_id = adj.id
                 posted += 1
             c.status = CountStatus.APPROVED.value

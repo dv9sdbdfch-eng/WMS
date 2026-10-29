@@ -67,7 +67,10 @@ def self_test(cfg: AppConfig) -> int:
     )
     db.dispose()
     print(f"{APP_NAME} {__version__} self-test: database {'OK' if rep.database_ok else 'DAMAGED'}, "
-          f"{len(rep.stock_discrepancies)} stock mismatch(es), {len(rep.missing_files)} missing file(s)")
+          f"{len(rep.stock_discrepancies)} stock mismatch(es), {len(rep.critical_ledger_issues)} critical ledger "
+          f"problem(s), {len(rep.missing_files)} missing file(s)")
+    for issue in rep.critical_ledger_issues[:50]:
+        print(f"  {issue}")
     return 0 if rep.ok else 2
 
 

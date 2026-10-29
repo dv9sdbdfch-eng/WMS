@@ -72,8 +72,11 @@ MOVEMENT_GROUPS: dict[str, tuple[str, tuple[str, ...]]] = {
     "TRANSFER": ("Transfer", (MovementType.TRANSFER.value,)),
     "RETURN": ("Return", (MovementType.RETURN_FROM_SITE.value, MovementType.RETURN_TO_SUPPLIER.value)),
     "ADJUSTMENT": ("Adjustment", (MovementType.ADJUSTMENT_IN.value, MovementType.ADJUSTMENT_OUT.value,
-                                  MovementType.OPENING_BALANCE.value)),
+                                  MovementType.OPENING_BALANCE.value,
+                                  MovementType.STOCKTAKE_ADJUSTMENT.value)),
     "PRODUCTION": ("Production", (MovementType.PRODUCTION_OUTPUT.value, MovementType.PRODUCTION_CONSUME.value)),
+    # Reversals keep their original type in the ledger; this group selects them by their link.
+    "REVERSAL": ("Reversal", ()),
 }
 
 DATE_PRESETS = {
@@ -637,7 +640,10 @@ class SearchService(BaseService):
         movement ("sent to Surrey in the last 30 days" means one movement that did both)."""
         conds: list = []
         types = [t for g in c.movement_types for t in MOVEMENT_GROUPS.get(g, ("", ()))[1]]
-        if types:
+        if "REVERSAL" in c.movement_types:
+            conds.append(or_(m.movement_type.in_(types), m.reversal_of_id.is_not(None)) if types
+                         else m.reversal_of_id.is_not(None))
+        elif types:
             conds.append(m.movement_type.in_(types))
         d_from, d_to = c.date_range()
         if d_from:

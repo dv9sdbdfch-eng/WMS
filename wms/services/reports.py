@@ -243,7 +243,7 @@ class ReportService(BaseService):
             out = m.from_bin_id is not None  # stock left the store -> to site
             qty = m.quantity if out else -m.quantity
             is_issue = m.movement_type == MovementType.GOODS_OUT.value
-            label = MovementType(m.movement_type).label + (" (reversal)" if m.reversal_of_id else "")
+            label = m.type_label
             data.append([m.occurred_at, m.site_label, m.doc_number or "", label,
                          m.product_code, m.product_name, qty if is_issue else None,
                          None if is_issue else -qty, m.product.unit.code,
@@ -380,12 +380,13 @@ class ReportService(BaseService):
     def adjustments(self, f: ReportFilters) -> ReportResult:
         rows = StockOpsService(self.ctx).adjustments(text=f.text, date_from=f.date_from, date_to=f.date_to,
                                                      limit=None)
-        from wms.core.enums import AdjustmentReason
+        from wms.services.reasons import ReasonCodeService
+        labels = {r.code: r.label for r in ReasonCodeService(self.ctx).list(include_inactive=True)}
         cols = [Column("Date / Time", DATETIME), Column("Adjustment No."), Column("Code"), Column("Product"),
                 Column("Bin"), Column("Previous Qty", QTY), Column("New Qty", QTY), Column("Difference", QTY),
                 Column("Unit"), Column("Reason"), Column("Details"), Column("User")]
         data = [[a.created_at, a.adjustment_number, a.product_code, a.product_name, a.bin_code,
-                 a.previous_qty, a.new_qty, a.difference, a.product.unit.code, AdjustmentReason(a.reason_code).label,
+                 a.previous_qty, a.new_qty, a.difference, a.product.unit.code, labels.get(a.reason_code, a.reason_code),
                  a.reason, a.user.full_name] for a in rows if not f.product_id or a.product_id == f.product_id]
         return ReportResult("Stock Adjustments", cols, data)
 

@@ -13,7 +13,7 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import Boolean, CheckConstraint, Index, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, CheckConstraint, Index, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from wms.core.numbers import utcnow
@@ -38,6 +38,10 @@ class StockMovement(IdMixin, Base):
     __tablename__ = "stock_movements"
     __table_args__ = (
         CheckConstraint("quantity > 0", name="qty_positive"),
+        # A movement can be reversed once only (migration 0005).
+        Index("uq_stock_movements_reversal_of", "reversal_of_id", unique=True,
+              sqlite_where=text("reversal_of_id IS NOT NULL"),
+              postgresql_where=text("reversal_of_id IS NOT NULL")),
         CheckConstraint("from_bin_id IS NOT NULL OR to_bin_id IS NOT NULL", name="has_bin"),
         Index("ix_stock_movements_product_time", "product_id", "occurred_at"),
         Index("ix_stock_movements_doc", "doc_type", "doc_id"),
@@ -81,6 +85,13 @@ class StockMovement(IdMixin, Base):
     user = relationship("User", lazy="joined")
 
     # -- historical display values: the snapshot, or the live record for rows that have none ----
+    @property
+    def type_label(self) -> str:
+        """e.g. "Goods Out", or "Reversal of Goods Out" for the mirror movement of a reversal."""
+        from wms.core.enums import MovementType
+        label = MovementType(self.movement_type).label
+        return f"Reversal of {label}" if self.reversal_of_id else label
+
     @property
     def product_code(self) -> str:
         return self.product_code_snapshot or self.product.internal_code
@@ -137,3 +148,31 @@ class StockMovement(IdMixin, Base):
 
 def site_label(number: str | None, name: str | None) -> str:
     return " - ".join(x for x in (number, name) if x)
+
+
+class MovementReversal(IdMixin, Base):
+    """Links a ledger movement to the movement that reversed it, with who, when and why.
+
+    Append-only like the ledger itself. One original can be reversed once (UNIQUE), and a
+    reversal is never reversed again - post a new movement instead.
+    """
+
+    __tablename__ = "movement_reversals"
+
+    original_movement_id: Mapped[int] = fk("stock_movements.id", nullable=False, index=False)
+    reversal_movement_id: Mapped[int] = fk("stock_movements.id", nullable=False, index=False)
+    reason_code: Mapped[str] = fk("reason_codes.code", nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    reversed_by_id: Mapped[int] = fk("users.id", nullable=False)
+    reversed_by_name_snapshot: Mapped[str | None] = mapped_column(String(120))
+    reversed_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False, default=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("original_movement_id"),
+        UniqueConstraint("reversal_movement_id"),
+        CheckConstraint("original_movement_id <> reversal_movement_id", name="not_self"),
+    )
+
+    original = relationship("StockMovement", foreign_keys=[original_movement_id], lazy="joined")
+    reversal = relationship("StockMovement", foreign_keys=[reversal_movement_id], lazy="joined")
+    reversed_by = relationship("User", lazy="joined")

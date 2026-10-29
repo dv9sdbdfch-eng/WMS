@@ -358,6 +358,9 @@ def test_quick_filters(w):
 def test_transaction_type_filter(w):
     for group, (_label, types) in MOVEMENT_GROUPS.items():
         res = M(w, movement_types=[group])
+        if group == "REVERSAL":
+            assert all(m.reversal_of_id for m in res.rows)
+            continue
         assert all(m.movement_type in types for m in res.rows), group
     assert M(w, movement_types=["GOODS_IN"]).total == 6
     assert M(w, movement_types=["GOODS_IN", "GOODS_OUT"]).total == 8
@@ -572,7 +575,8 @@ class Oracle:
 
     def move_ok(self, c, m) -> bool:
         types = [t for g in c.movement_types for t in MOVEMENT_GROUPS[g][1]]
-        if types and m.movement_type not in types:
+        is_rev = "REVERSAL" in c.movement_types and m.reversal_of_id is not None
+        if (types or "REVERSAL" in c.movement_types) and m.movement_type not in types and not is_rev:
             return False
         lo, hi = c.date_range()
         day = m.occurred_at.astimezone().date()

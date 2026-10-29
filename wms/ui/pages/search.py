@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from wms.core.enums import EntityType, MovementType
+from wms.core.enums import EntityType
 from wms.core.exceptions import WMSError
 from wms.core.permissions import P
 from wms.services.search import (
@@ -92,7 +92,7 @@ def _status_text(r) -> str:
 def movement_result_columns() -> list[Col]:
     return [
         Col("Date / Time", lambda m: m.occurred_at, DATETIME, 130, sort="date"),
-        Col("Type", lambda m: MovementType(m.movement_type).label + (" (reversal)" if m.reversal_of_id else ""),
+        Col("Type", lambda m: m.type_label,
             width=150, sort="type"),
         Col("Code", lambda m: m.product_code, width=110, sort="code"),
         Col("Product", lambda m: m.product_name, width=200, sort="product"),

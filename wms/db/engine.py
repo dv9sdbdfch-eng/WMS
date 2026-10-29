@@ -111,6 +111,47 @@ def integrity_trigger_sql(dialect_name: str) -> list[str]:
     return []
 
 
+# Added by migration 0005. Kept apart from integrity_trigger_sql(), which older migrations call
+# before these tables exist; all_trigger_sql() is the complete set for a new database.
+LEDGER_APPEND_ONLY_TABLES = ("movement_reversals",)
+
+
+def ledger_trigger_sql(dialect_name: str) -> list[str]:
+    """Reversal rules enforced by the database itself (migration 0005)."""
+    if dialect_name == "sqlite":
+        stmts = []
+        for table in LEDGER_APPEND_ONLY_TABLES:
+            for ev in ("UPDATE", "DELETE"):
+                stmts.append(
+                    f"CREATE TRIGGER IF NOT EXISTS trg_{table}_no_{ev.lower()} BEFORE {ev} ON {table} "
+                    f"BEGIN SELECT RAISE(ABORT, '{table} is append-only: records cannot be changed'); END;")
+        stmts.append(
+            "CREATE TRIGGER IF NOT EXISTS trg_stock_movements_reversal_of_reversal BEFORE INSERT ON stock_movements "
+            "WHEN NEW.reversal_of_id IS NOT NULL AND EXISTS (SELECT 1 FROM stock_movements o "
+            "WHERE o.id = NEW.reversal_of_id AND o.reversal_of_id IS NOT NULL) "
+            "BEGIN SELECT RAISE(ABORT, 'stock_movements: a reversal cannot itself be reversed'); END;")
+        stmts.append(
+            "CREATE TRIGGER IF NOT EXISTS trg_stock_movements_reversal_mirror BEFORE INSERT ON stock_movements "
+            "WHEN NEW.reversal_of_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM stock_movements o "
+            "WHERE o.id = NEW.reversal_of_id AND o.product_id = NEW.product_id AND o.quantity = NEW.quantity "
+            "AND o.from_bin_id IS NEW.to_bin_id AND o.to_bin_id IS NEW.from_bin_id) "
+            "BEGIN SELECT RAISE(ABORT, 'stock_movements: a reversal must mirror the original movement'); END;")
+        return stmts
+    if dialect_name == "postgresql":
+        stmts = []
+        for table in LEDGER_APPEND_ONLY_TABLES:
+            stmts.append(f"DROP TRIGGER IF EXISTS trg_{table}_append_only ON {table};")
+            stmts.append(f"CREATE TRIGGER trg_{table}_append_only BEFORE UPDATE OR DELETE ON {table} "
+                         f"FOR EACH ROW EXECUTE FUNCTION wms_append_only();")
+        return stmts
+    return []
+
+
+def all_trigger_sql(dialect_name: str) -> list[str]:
+    """Every database-level guard, for a newly created database."""
+    return integrity_trigger_sql(dialect_name) + ledger_trigger_sql(dialect_name)
+
+
 def append_only_trigger_sql(dialect_name: str) -> list[str]:
     """Ledger and audit triggers only (what migration 0001 installs)."""
     if dialect_name == "sqlite":
@@ -215,7 +256,7 @@ class Database:
             if not tables:
                 log.info("Creating new database schema")
                 Base.metadata.create_all(conn)
-                for stmt in integrity_trigger_sql(self.dialect):
+                for stmt in all_trigger_sql(self.dialect):
                     conn.execute(text(stmt))
                 command.stamp(cfg, "head")
             else:

@@ -84,6 +84,34 @@ def ask_text(parent: QWidget | None, title: str, label: str, required: bool = Tr
         QMessageBox.warning(parent, title, "Please enter a reason.")
 
 
+def ask_reason(parent: QWidget | None, title: str, prompt: str, choices: Sequence[tuple[str, str]]
+               ) -> tuple[str, str] | None:
+    """Pick a reason code and write a short explanation. Returns (code, text) or None if cancelled."""
+    from PySide6.QtWidgets import QDialog, QFormLayout, QPlainTextEdit
+    dlg = QDialog(parent)
+    dlg.setWindowTitle(title)
+    dlg.setMinimumWidth(460)
+    lay = QVBoxLayout(dlg)
+    lay.addWidget(label(prompt, wrap=True))
+    combo = QComboBox()
+    combo.addItem("Choose a reason...", None)
+    for code, text in choices:
+        combo.addItem(text, code)
+    notes = QPlainTextEdit()
+    notes.setPlaceholderText("What happened? (required)")
+    notes.setFixedHeight(90)
+    form = QFormLayout()
+    form.addRow("Reason *", combo)
+    form.addRow("Details *", notes)
+    lay.addLayout(form)
+    lay.addLayout(h(None, button("Cancel", dlg.reject), button("OK", dlg.accept, primary=True)))
+    while dlg.exec() == QDialog.DialogCode.Accepted:
+        if combo.currentData() and notes.toPlainText().strip():
+            return combo.currentData(), notes.toPlainText().strip()
+        QMessageBox.warning(dlg, title, "Choose a reason and describe what happened.")
+    return None
+
+
 def run(parent: QWidget | None, fn: Callable, *args, **kwargs):
     """Call a service; show any error. Returns the result, or None on failure."""
     try:

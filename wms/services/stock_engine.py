@@ -20,13 +20,14 @@ from decimal import Decimal
 from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
-from wms.core.enums import CLOSED_SITE_STATUSES, MovementType, SiteStatus
+from wms.core.enums import CLOSED_SITE_STATUSES, MovementType, ReasonUse, SiteStatus
 from wms.core.exceptions import InsufficientStockError, ValidationError
 from wms.core.numbers import ZERO, to_qty, utcnow
 from wms.core.permissions import P
-from wms.db.models import Bin, Product, Site, StockLevel, StockMovement, Supplier
+from wms.db.models import Bin, MovementReversal, Product, Site, StockLevel, StockMovement, Supplier
 from wms.services import audit
 from wms.services.base import AppContext
+from wms.services.reasons import require_reason
 
 
 @dataclass
@@ -183,17 +184,25 @@ class StockEngine:
                                   f"reopen it before posting to it.", "site_id")
 
     def reverse(self, mv: StockMovement, reason: str, occurred_at: datetime | None = None,
-                override_reason: str | None = None) -> StockMovement:
-        """Post the mirror image of ``mv`` (swap From/To).
+                override_reason: str | None = None, reason_code: str = "OTHER") -> StockMovement:
+        """Post the mirror image of ``mv`` (swap From/To) and record who reversed it and why.
 
-        A reversal may take stock out of any bin, but it never puts stock back into a bin that has
-        been removed from active use: such a bin must stay empty, so it is restored first."""
+        A movement is reversed once only, and a reversal is never reversed again (also enforced
+        by the database). A reversal may take stock out of any bin, but it never puts stock back
+        into a bin that has been removed from active use: such a bin must stay empty, so it is
+        restored first."""
+        if mv.reversal_of_id is not None:
+            raise ValidationError("This movement is itself a reversal and cannot be reversed. "
+                                  "Post a new movement instead.")
+        if self.s.scalar(select(MovementReversal.id).where(MovementReversal.original_movement_id == mv.id)):
+            raise ValidationError("This movement has already been reversed.")
+        code = require_reason(self.s, reason_code, ReasonUse.REVERSAL)
         product = self.s.get(Product, mv.product_id)
         to_bin = self.s.get(Bin, mv.from_bin_id) if mv.from_bin_id else None
         if to_bin is not None and not to_bin.is_active:
             raise ValidationError(f"Bin {to_bin.full_code} has been removed from active use. Restore the bin "
                                   f"first, then reverse this document.")
-        return self.post(
+        rev = self.post(
             movement_type=MovementType(mv.movement_type),
             product=product,
             quantity=mv.quantity,
@@ -212,30 +221,25 @@ class StockEngine:
             override_reason=override_reason,
             allow_inactive=True,
         )
+        self.s.add(MovementReversal(original_movement_id=mv.id, reversal_movement_id=rev.id,
+                                    reason_code=code.code, reason=reason, reversed_by_id=self.ctx.user.id,
+                                    reversed_by_name_snapshot=self.ctx.user.full_name, reversed_at=rev.recorded_at))
+        self.s.flush()
+        return rev
 
     # -- integrity ----------------------------------------------------------
     def ledger_balances(self) -> dict[tuple[int, int], Decimal]:
         """Recalculate every product/bin balance from the movement ledger."""
-        totals: dict[tuple[int, int], Decimal] = {}
-        for bin_col, sign in ((StockMovement.to_bin_id, 1), (StockMovement.from_bin_id, -1)):
-            rows = self.s.execute(
-                select(StockMovement.product_id, bin_col, func.sum(StockMovement.quantity))
-                .where(bin_col.is_not(None))
-                .group_by(StockMovement.product_id, bin_col)
-            )
-            for product_id, bin_id, total in rows:
-                key = (product_id, bin_id)
-                totals[key] = totals.get(key, ZERO) + sign * (total or ZERO)
-        return totals
+        from wms.services.integrity import ledger_bin_balances
+        return ledger_bin_balances(self.s)
 
     def find_discrepancies(self) -> list[Discrepancy]:
+        from wms.services.integrity import stored_bin_balances
         ledger = self.ledger_balances()
-        levels = {(l.product_id, l.bin_id): l for l in self.s.scalars(select(StockLevel))}
+        levels = stored_bin_balances(self.s)
         out: list[Discrepancy] = []
         for key in set(ledger) | set(levels):
-            lq = ledger.get(key, ZERO)
-            lvl = levels.get(key)
-            sq = lvl.quantity if lvl else ZERO
+            lq, sq = ledger.get(key, ZERO), levels.get(key, ZERO)
             if lq != sq:
                 product = self.s.get(Product, key[0])
                 b = self.s.get(Bin, key[1])

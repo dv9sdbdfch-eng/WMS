@@ -16,9 +16,9 @@ from wms.db.models.documents import (
 )
 from wms.db.models.locations import Bin, Location
 from wms.db.models.products import BomItem, FinishedProductInfo, Product
-from wms.db.models.reference import Category, Supplier, Unit
+from wms.db.models.reference import Category, ReasonCode, Supplier, Unit
 from wms.db.models.sites import Site
-from wms.db.models.stock import StockLevel, StockMovement
+from wms.db.models.stock import MovementReversal, StockLevel, StockMovement
 from wms.db.models.system import Attachment, AuditLog, NumberSequence, RecentSearch, SavedSearch, Setting
 from wms.db.models.users import Role, RolePermission, User
 
@@ -34,10 +34,12 @@ __all__ = [
     "GoodsIssue",
     "GoodsIssueLine",
     "Location",
+    "MovementReversal",
     "NumberSequence",
     "Product",
     "ProductionLine",
     "ProductionOrder",
+    "ReasonCode",
     "RecentSearch",
     "ReturnLine",
     "Role",

@@ -27,6 +27,7 @@ from wms.db.models import StockLevel
 from wms.services import audit
 from wms.services.attachments import AttachmentService
 from wms.services.base import BaseService
+from wms.services.integrity import run_checks
 from wms.services.stock_engine import Discrepancy, StockEngine
 
 MANIFEST = "manifest.json"
@@ -50,11 +51,17 @@ class IntegrityReport:
     stock_discrepancies: list[Discrepancy] = field(default_factory=list)
     negative_levels: list[StockLevel] = field(default_factory=list)
     missing_files: list[str] = field(default_factory=list)
+    # Ledger reconciliation: bin / product / warehouse balances, reversal links, document links.
+    ledger_issues: list = field(default_factory=list)
+
+    @property
+    def critical_ledger_issues(self) -> list:
+        return [i for i in self.ledger_issues if i.severity == "CRITICAL"]
 
     @property
     def ok(self) -> bool:
         return (self.database_ok and not self.foreign_key_problems and not self.stock_discrepancies
-                and not self.missing_files)
+                and not self.critical_ledger_issues and not self.missing_files)
 
 
 def _check_sqlite_file(path: Path) -> list[str]:
@@ -228,6 +235,7 @@ class BackupService(BaseService):
                 rep.foreign_key_problems = len(list(s.execute(text("PRAGMA foreign_key_check"))))
             rep.stock_discrepancies = StockEngine(s, self.ctx).find_discrepancies()
             rep.negative_levels = list(s.scalars(select(StockLevel).where(StockLevel.quantity < 0)))
+            rep.ledger_issues = run_checks(s)
         rep.missing_files = [a.original_name for a in AttachmentService(self.ctx).missing_files()]
         return rep
 
