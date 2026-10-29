@@ -60,7 +60,7 @@ class StocktakeService(BaseService):
 
     # -- workflow -----------------------------------------------------------
     def create(self, location_id: int | None = None, description: str | None = None,
-               include_zero_bins: bool = False) -> StockCount:
+               include_zero_bins: bool = False, bin_id: int | None = None) -> StockCount:
         """Start a count. ``include_zero_bins`` also lists each product's default bin in the area
         when it shows no stock (useful to confirm a bin really is empty)."""
         self.require(P.STOCKTAKE_COUNT)
@@ -69,7 +69,13 @@ class StocktakeService(BaseService):
             if location_id and loc is None:
                 raise ValidationError("Location not found.", "location_id")
             in_area = Bin.is_active.is_(True)
-            if loc is not None:
+            one_bin = s.get(Bin, bin_id) if bin_id else None
+            if bin_id and (one_bin is None or not one_bin.is_active):
+                raise ValidationError("Bin not found or removed from active use.", "bin_id")
+            if one_bin is not None:  # count just this bin (from the bin screen)
+                in_area = in_area & (Bin.id == one_bin.id)
+                loc = loc or one_bin.location
+            elif loc is not None:
                 in_area = in_area & Bin.full_code.like(prefix_pattern(loc.path), escape="\\")
             levels = list(s.execute(
                 select(StockLevel.product_id, StockLevel.bin_id, StockLevel.quantity)
@@ -96,7 +102,8 @@ class StocktakeService(BaseService):
             for i, (pid, bid, qty) in enumerate(levels, start=1):
                 s.add(StockCountLine(count_id=count.id, line_no=i, product_id=pid, bin_id=bid, system_qty=qty))
             audit.record(s, self.ctx, "STOCK_COUNT_STARTED", EntityType.STOCK_COUNT.value, count.id,
-                         count.count_number, f"{len(levels)} line(s) in {loc.path if loc else 'whole warehouse'}.")
+                         count.count_number, f"{len(levels)} line(s) in "
+                         f"{one_bin.full_code if one_bin else loc.path if loc else 'whole warehouse'}.")
             count_id = count.id
         return self.get(count_id)
 

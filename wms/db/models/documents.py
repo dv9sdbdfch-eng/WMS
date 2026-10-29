@@ -179,6 +179,8 @@ class StockReturn(IdMixin, _SiteSnapshot, _PostedDocument, Base):
     supplier_id: Mapped[int | None] = fk("suppliers.id")
     reference: Mapped[str | None] = mapped_column(String(80), index=True)
     reason: Mapped[str | None] = mapped_column(Text)
+    # Reason code (reason_codes.code, "Returned from Project", "Damaged"...). Empty on returns before 1.5.
+    reason_code: Mapped[str | None] = mapped_column(String(30))
     user_id: Mapped[int] = fk("users.id", nullable=False)
     reversed_by_id: Mapped[int | None] = fk("users.id")
     supplier_name_snapshot: Mapped[str | None] = mapped_column(String(200))

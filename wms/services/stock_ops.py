@@ -91,6 +91,8 @@ class StockOpsService(BaseService):
                 if supplier is None:
                     raise ValidationError("Choose the supplier the goods are going back to.", "supplier_id")
                 seq, mtype = "RETURN_TO_SUPPLIER", MovementType.RETURN_TO_SUPPLIER
+            default_code = "RETURNED_FROM_PROJECT" if rtype is ReturnType.FROM_SITE else "SUPPLIER_RETURN"
+            reason_code = require_reason(s, header.get("reason_code") or default_code, ReasonUse.RETURN).code
             ret = StockReturn(
                 return_number=next_number(s, seq), return_type=rtype.value, return_date=rdate,
                 site_id=site.id if site else None, supplier_id=supplier.id if supplier else None,
@@ -98,6 +100,7 @@ class StockOpsService(BaseService):
                 site_name_snapshot=site.name if site else None,
                 supplier_name_snapshot=supplier.name if supplier else None,
                 reference=clean_str(header.get("reference"), max_len=80), reason=clean_str(header.get("reason")),
+                reason_code=reason_code,
                 notes=clean_str(header.get("notes")), user_id=self.user.id, status=DocumentStatus.POSTED.value,
                 client_token=header.get("client_token") or None,
             )

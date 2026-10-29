@@ -63,6 +63,36 @@ class LocationService(BaseService):
                     q = q.where(Bin.location_id == location_id)
             return list(s.scalars(q))
 
+    def find_bin(self, scan: str | None, include_inactive: bool = False) -> Bin | None:
+        """The bin a scanned label or typed code refers to: its barcode, its full code
+        ("MAIN / A / R03 / S02 / B04", any case) or its short code ("B04") when only one bin has it.
+        Used by every screen and by barcode scanners alike."""
+        text = (scan or "").strip()
+        if not text:
+            return None
+        with self.db.read_session() as s:
+            q = select(Bin)
+            if not include_inactive:
+                q = q.where(Bin.is_active.is_(True))
+            for cond in (Bin.barcode == text, func.upper(Bin.full_code) == text.upper(),
+                         func.upper(Bin.code) == text.upper()):
+                found = list(s.scalars(q.where(cond).limit(2)))
+                if len(found) == 1:
+                    return found[0]
+                if found:
+                    return None  # the short code is ambiguous: scan the label or pick from the list
+            return None
+
+    def bin_labels(self, bin_ids: list[int], path, layout: str = "A4_SHEET"):
+        """Write printable labels (QR + Code 128 + bin code) for these bins to a PDF; returns the path."""
+        from wms.exporters.labels import BinLabel, bin_labels_pdf
+        if not bin_ids:
+            raise ValidationError("Choose at least one bin.")
+        with self.db.read_session() as s:
+            bins = sorted((b for b in (s.get(Bin, i) for i in bin_ids) if b is not None), key=lambda b: b.full_code)
+            labels = [BinLabel(b.code, b.location.path, b.scan_code) for b in bins]
+        return bin_labels_pdf(labels, path, layout)
+
     def bin_contents(self, bin_id: int) -> list[StockLevel]:
         with self.db.read_session() as s:
             return list(
@@ -176,6 +206,12 @@ class LocationService(BaseService):
                                          f"active use. Restore it instead of creating it again - its history "
                                          f"stays with it.")
                 raise DuplicateError(f"Bin '{code}' already exists in {loc.path}.")
+            barcode = clean_str(data.get("barcode"), "barcode", max_len=80)
+            if barcode:
+                clash = s.scalar(select(Bin).where(or_(Bin.barcode == barcode, func.upper(Bin.full_code) ==
+                                                       barcode.upper()), Bin.id != (bin_id or 0)))
+                if clash is not None:
+                    raise DuplicateError(f"Barcode '{barcode}' is already used by bin {clash.full_code}.")
             archiving = restoring = False
             plan = None
             if bin_id:
@@ -194,7 +230,8 @@ class LocationService(BaseService):
             else:
                 b = Bin()
                 s.add(b)
-            old = {"full_code": b.full_code, "is_available": b.is_available, "is_active": b.is_active}
+            old = {"full_code": b.full_code, "is_available": b.is_available, "is_active": b.is_active,
+                   "barcode": b.barcode}
             b.location = loc
             b.code = code
             b.full_code = f"{loc.path} / {code}"
@@ -202,8 +239,11 @@ class LocationService(BaseService):
             b.is_available = bool(data.get("is_available", True))
             b.is_active = bool(data.get("is_active", True))
             b.notes = clean_str(data.get("notes"))
+            if "barcode" in data:  # screens that do not show the barcode leave it as it is
+                b.barcode = barcode
             s.flush()
-            o, n = audit.diff(old, {"full_code": b.full_code, "is_available": b.is_available, "is_active": b.is_active})
+            o, n = audit.diff(old, {"full_code": b.full_code, "is_available": b.is_available, "is_active": b.is_active,
+                                    "barcode": b.barcode})
             if n:
                 audit.record(s, self.ctx, "BIN_SAVED", "BIN", b.id, b.full_code, old=o, new=n)
             if archiving:

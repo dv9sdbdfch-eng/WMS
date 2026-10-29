@@ -6,7 +6,7 @@ warehouse with bins directly under it.
 
 from __future__ import annotations
 
-from sqlalchemy import Boolean, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Index, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from wms.db.base import ActiveMixin, Base, IdMixin, TimestampMixin, fk
@@ -31,7 +31,8 @@ class Location(IdMixin, TimestampMixin, ActiveMixin, Base):
 
 class Bin(IdMixin, TimestampMixin, ActiveMixin, Base):
     __tablename__ = "bins"
-    __table_args__ = (UniqueConstraint("location_id", "code"),)
+    __table_args__ = (UniqueConstraint("location_id", "code"),
+                      Index("uq_bins_barcode", "barcode", unique=True))
 
     location_id: Mapped[int] = fk("locations.id", nullable=False)
     code: Mapped[str] = mapped_column(String(30), nullable=False)
@@ -41,8 +42,15 @@ class Bin(IdMixin, TimestampMixin, ActiveMixin, Base):
     # Full display path, e.g. "MAIN / A / R03 / S02 / B04". Unique across the warehouse.
     full_code: Mapped[str] = mapped_column(String(450), nullable=False, unique=True)
     notes: Mapped[str | None] = mapped_column(Text)
+    # What a scanner reads from the bin label. Empty = the label carries the full code instead.
+    barcode: Mapped[str | None] = mapped_column(String(80))
 
     location: Mapped[Location] = relationship(back_populates="bins", lazy="joined")
+
+    @property
+    def scan_code(self) -> str:
+        """The value printed on the bin label (QR + Code 128) and matched when it is scanned."""
+        return self.barcode or self.full_code
 
     def __repr__(self) -> str:
         return f"<Bin {self.full_code}>"

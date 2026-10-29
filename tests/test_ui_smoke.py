@@ -462,3 +462,22 @@ def test_reason_codes_tab_lists_defaults(ui):
     codes = {r.code for r in page.reason_table.items()}
     assert {"DAMAGED", "MISSING", "STOCK_COUNT", "SCRAP", "OTHER"} <= codes
     assert not _errors(msgs), msgs
+
+
+def test_bin_screen_shows_location_levels_and_prints_a_label(ui, sample, monkeypatch):
+    app, win, msgs, _ = ui
+    sample.receive(sample.mdf, 6, sample.bin1)
+    from PySide6.QtGui import QDesktopServices
+
+    from wms.ui.dialogs import documents
+    opened = []
+    monkeypatch.setattr(QDesktopServices, "openUrl", lambda url: opened.append(url.toLocalFile()))
+    dlg = documents.BinContentsDialog(app, sample.bin1.id)
+    text = dlg.where.text()
+    assert "Zone: Zone A" in text and "Rack: R03" in text and "Status: Active" in text
+    assert f"Barcode: {sample.bin1.full_code}" in text
+    documents.print_bin_labels(dlg, app, [sample.bin1.id])
+    assert opened and opened[0].endswith(".pdf")
+    dlg.stocktake()
+    assert app.services.stocktake.list()[0].lines[0].bin_id == sample.bin1.id
+    assert not _errors(msgs), msgs

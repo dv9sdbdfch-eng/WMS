@@ -70,10 +70,23 @@ def _print(parent, result):
     QDesktopServices.openUrl(QUrl.fromLocalFile(str(out)))
 
 
+def print_bin_labels(parent, app, bin_ids: list[int]) -> Path | None:
+    """Make the label PDF for these bins and open it (print from the PDF viewer)."""
+    out = Path(tempfile.gettempdir()) / f"Bin_labels_{len(bin_ids)}.pdf"
+    try:
+        path = run(parent, app.services.locations.bin_labels, bin_ids, out)
+    except PermissionError:
+        info(parent, "Print labels", f"Close the open PDF '{out.name}' first and try again.")
+        return None
+    if path:
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+    return path
+
 
 def _ask_reversal_reason(dlg, prompt: str) -> tuple[str, str] | None:
     """Reason code + explanation for a reversal; stored with the reversal record."""
     return ask_reason(dlg, "Reverse", prompt, dlg.app.services.reasons.choices("REVERSAL"))
+
 
 class DeliveryNoteDialog(QDialog):
     def __init__(self, app, dn_id: int, parent=None):
@@ -263,7 +276,7 @@ class ReturnDialog(QDialog):
         if banner:
             lay.addWidget(banner)
         lay.addLayout(_form([("Date", fmt_date(r.return_date)), ("Reference", r.reference or ""),
-                             ("Reason", r.reason or ""), ("Entered by", f"{r.user.full_name}, "
+                             ("Reason", " - ".join(x for x in (app.services.reasons.label(r.reason_code), r.reason or "") if x)), ("Entered by", f"{r.user.full_name}, "
                                                                         f"{fmt_datetime(r.created_at)}")]))
         t = DataTable([Col("Code", lambda l: l.product_code, width=110),
                        Col("Product", lambda l: l.product_name, width=260), Col("Qty", lambda l: l.quantity, QTY, 90),
@@ -367,8 +380,13 @@ class BinContentsDialog(QDialog):
         lay.addWidget(tabs, 1)
         buttons = [button("View product", lambda: self._open_product())]
         if app.can(P.STOCK_TRANSFER):
-            self.transfer_btn = button("Transfer selected...", self.transfer)
+            self.transfer_btn = button("Transfer stock...", self.transfer)
             buttons.append(self.transfer_btn)
+        if app.can(P.STOCKTAKE_COUNT):
+            self.count_btn = button("Stocktake this bin", self.stocktake)
+            buttons.append(self.count_btn)
+        buttons.append(button("Movement history", lambda: self.tabs.setCurrentIndex(self.history_index)))
+        buttons.append(button("Print label", lambda: print_bin_labels(self, self.app, [self.bin_id])))
         if app.can(P.LOCATIONS_EDIT):
             self.delete_btn = button("Delete bin", self.delete_bin, danger=True)
             self.restore_btn = button("Restore bin", self.restore_bin)
@@ -381,7 +399,11 @@ class BinContentsDialog(QDialog):
         b = v.bin
         self.setWindowTitle(f"Bin {b.code}")
         self.title.setText(f"BIN {b.code}" + ("" if b.is_active else "  —  Archived"))
-        self.where.setText(f"Location: {v.path_text}")
+        levels = dict(v.path)
+        status = ("Archived" if not b.is_active else "Quarantine (cannot issue)" if not b.is_available else "Active")
+        self.where.setText("   ·   ".join(f"{k}: {levels.get(k, '-')}" for k in ("Warehouse", "Zone", "Rack", "Shelf"))
+                           + f"   ·   Status: {status}   ·   Barcode: {b.scan_code}")
+        self._code = b.code
         from wms.core.numbers import fmt_qty
         self.summary.setText(f"Current stock: {fmt_qty(v.current_stock)}   ·   "
                              f"{v.product_count} different product(s)   ·   "
@@ -399,6 +421,8 @@ class BinContentsDialog(QDialog):
             self.restore_btn.setVisible(not b.is_active)
         if hasattr(self, "transfer_btn"):
             self.transfer_btn.setVisible(b.is_active)
+        if hasattr(self, "count_btn"):
+            self.count_btn.setVisible(b.is_active and v.product_count > 0)
         self.table.set_items(v.contents)
         self.moved_in.set_items(v.recent_in)
         self.moved_out.set_items(v.recent_out)
@@ -421,6 +445,14 @@ class BinContentsDialog(QDialog):
         if TransferDialog(self.app, lvl.product_id if lvl else None, self, from_bin_id=self.bin_id).exec():
             self.app.changed()
             self.refresh()
+
+    def stocktake(self):
+        count = run(self, self.app.services.stocktake.create, None, f"Bin {self._code}",
+                    bin_id=self.bin_id)
+        if count is not None:
+            self.app.changed()
+            info(self, "Stocktake", f"Count {count.count_number} started for this bin. Enter the counted "
+                                    f"quantities on the Stocktake screen; stock changes only when it is approved.")
 
     def delete_bin(self):
         from wms.core.exceptions import NotFoundError
