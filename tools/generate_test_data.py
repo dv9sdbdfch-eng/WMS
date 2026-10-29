@@ -32,6 +32,8 @@ from wms.db.models import (
     Location,
     NumberSequence,
     Product,
+    PurchaseOrder,
+    PurchaseOrderLine,
     Site,
     StockLevel,
     StockMovement,
@@ -48,7 +50,7 @@ WORDS = ["MDF", "Oak", "Birch Ply", "Melamine", "Walnut", "Hinge", "Runner", "Ha
 
 def generate(data_dir: Path, products: int = 10_000, deliveries: int = 5_000, issues: int = 4_000,
              transfers: int = 10_500, sites: int = 300, suppliers: int = 50, lines_per_doc: int = 10,
-             seed: int = 42) -> dict:
+             purchase_orders: int = 2_000, seed: int = 42) -> dict:
     rnd = random.Random(seed)
     cfg = AppConfig(data_dir=Path(data_dir))
     cfg.ensure_dirs()
@@ -192,6 +194,26 @@ def generate(data_dir: Path, products: int = 10_000, deliveries: int = 5_000, is
                      from_bin_name_snapshot=bnames.get(m["from_bin_id"]), to_bin_name_snapshot=bnames.get(m["to_bin_id"]),
                      site_number_snapshot=site[0], site_name_snapshot=site[1],
                      supplier_name_snapshot=supnames.get(m["supplier_id"]), user_name_snapshot=uname)
+        # Purchase orders: mostly finished (closed short or cancelled), the newest still open (incoming).
+        # Not linked to delivery notes, so nothing here changes stock or the ledger.
+        po_lines = []
+        for n in range(purchase_orders):
+            day = start + timedelta(days=n * 730 // max(purchase_orders, 1))
+            left = purchase_orders - n
+            status = ("DRAFT" if left <= 50 else "ORDERED" if left <= 300 else
+                      "CANCELLED" if n % 6 == 0 else "RECEIVED")
+            sup = rnd.choice(sup_ids)
+            closed = when(day + timedelta(days=14)) if status in ("RECEIVED", "CANCELLED") else None
+            po_id = c.execute(insert(PurchaseOrder).values(
+                po_number=f"PO-{n + 1:06d}", supplier_id=sup, supplier_name_snapshot=supnames.get(sup),
+                order_date=day, expected_date=day + timedelta(days=10), status=status, created_by_id=admin,
+                created_at=when(day), ordered_at=None if status == "DRAFT" else when(day), closed_at=closed,
+                closed_by_id=admin if closed else None,
+                close_reason="Volume test data" if closed else None)).inserted_primary_key[0]
+            for ln in range(1, 6):
+                po_lines.append(dict(purchase_order_id=po_id, line_no=ln, product_id=rnd.choice(prod)[0],
+                                     quantity=Decimal(rnd.randint(10, 300)), unit_cost=Decimal(rnd.randint(100, 9000)) / 100))
+        c.execute(insert(PurchaseOrderLine), po_lines)
         c.execute(insert(StockMovement), movements)
         c.execute(insert(DeliveryNoteLine), dn_lines)
         c.execute(insert(GoodsIssueLine), gi_lines)
@@ -199,11 +221,11 @@ def generate(data_dir: Path, products: int = 10_000, deliveries: int = 5_000, is
         c.execute(insert(StockLevel), [dict(product_id=p, bin_id=b, quantity=q, updated_at=now, version=1)
                                        for (p, b), q in levels.items()])
         c.execute(insert(AuditLog), audit)
-        for name, used in (("GOODS_ISSUE", issues), ("TRANSFER", transfers)):
+        for name, used in (("GOODS_ISSUE", issues), ("TRANSFER", transfers), ("PURCHASE_ORDER", purchase_orders)):
             c.execute(update(NumberSequence).where(NumberSequence.name == name).values(next_value=used + 1))
     db.dispose()
     return {"products": products, "bins": len(bins), "sites": sites, "delivery_notes": deliveries,
-            "goods_out": issues, "movements": len(movements), "stock_levels": len(levels),
+            "goods_out": issues, "purchase_orders": purchase_orders, "movements": len(movements), "stock_levels": len(levels),
             "seconds": round(time.perf_counter() - t0, 1)}
 
 
@@ -215,8 +237,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--issues", type=int, default=4_000)
     ap.add_argument("--transfers", type=int, default=10_500)
     ap.add_argument("--sites", type=int, default=300)
+    ap.add_argument("--purchase-orders", type=int, default=2_000)
     a = ap.parse_args(argv)
-    print(generate(a.data_dir, a.products, a.deliveries, a.issues, a.transfers, a.sites))
+    print(generate(a.data_dir, a.products, a.deliveries, a.issues, a.transfers, a.sites,
+                   purchase_orders=a.purchase_orders))
     return 0
 
 

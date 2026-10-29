@@ -625,18 +625,23 @@ def test_reversed_documents_do_not_count_in_report_totals(svc, sample):
 
 
 def test_reports_are_not_truncated(svc, sample, monkeypatch):
+    """Reports read every movement: the history screen stops at 5,000 rows, reports never do."""
+    import inspect
+
     from wms.services import stock_ops
-    seen = {}
-    real = stock_ops.StockOpsService.movements
+    seen = []
+    real = stock_ops.StockOpsService.movement_lines
 
     def spy(self, *a, **k):
-        seen.setdefault("limits", []).append(k.get("limit"))
+        seen.append(k)
         return real(self, *a, **k)
 
-    monkeypatch.setattr(stock_ops.StockOpsService, "movements", spy)
+    monkeypatch.setattr(stock_ops.StockOpsService, "movement_lines", spy)
     svc.reports.run("movements", ReportFilters())
     svc.reports.run("stock_by_site", ReportFilters())
-    assert seen["limits"] == [None, None]
+    svc.reports.run("project_history", ReportFilters())
+    assert len(seen) == 3
+    assert "limit" not in inspect.signature(real).parameters
 
 
 # --- 18. stocktake --------------------------------------------------------------------------

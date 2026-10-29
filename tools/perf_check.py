@@ -60,6 +60,9 @@ def run(data_dir: Path, ui: bool = False) -> dict:
     timed("movement history one product", lambda: svc.stock.movements(product_id=1234), results=res)
     timed("where is product (stock by bin)", lambda: svc.products.stock_by_bin(1234), results=res)
     timed("site material summary", lambda: svc.sites.material_summary(1), results=res)
+    timed("project movement history", lambda: svc.sites.movements(1), results=res)
+    timed("purchase orders list", lambda: svc.purchasing.list(), results=res)
+    timed("incoming (open purchase orders)", lambda: svc.purchasing.incoming(), results=res)
     timed("dashboard", lambda: [svc.dashboard.load()], results=res)
     timed("low stock", lambda: svc.products.low_stock(), results=res)
     for r in REPORTS:
@@ -74,6 +77,16 @@ def run(data_dir: Path, ui: bool = False) -> dict:
         app = App(svc.ctx)
         editor = timed("UI: open lines editor", lambda: LinesEditor(app, show_bin=True), repeat=1, results=res)
         timed("UI: add one line", lambda: [editor.add_row()], repeat=3, results=res)
+        from wms.ui.dialogs.product_dialog import ProductDialog
+        from wms.ui.main_window import MainWindow
+
+        def startup():
+            w = MainWindow(App(svc.ctx))  # opens on the Dashboard
+            w.close()
+            return [w]
+
+        timed("UI: start-up (main window + Dashboard)", startup, repeat=1, results=res)
+        timed("UI: open product (Product screen)", lambda: [ProductDialog(app, 1234)], repeat=3, results=res)
     db.dispose()
     return res
 

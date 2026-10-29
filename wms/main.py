@@ -54,6 +54,39 @@ def _start_database(cfg: AppConfig):
     return db
 
 
+def _recover_database(cfg: AppConfig, exc: BaseException):
+    """The database cannot be opened (damaged file, failed disk): offer to restore the newest good
+    backup straight away - nobody can log in to do it from Settings. Returns the opened database or None."""
+    from PySide6.QtWidgets import QMessageBox
+
+    from wms.services.backup import emergency_restore, latest_backup
+    backup = latest_backup(cfg) if cfg.is_sqlite else None
+    text = (f"The database could not be opened:\n\n{exc}\n\nData folder: {cfg.data_dir}")
+    if backup is None:
+        QMessageBox.critical(None, APP_NAME, text + f"\n\nNo usable backup was found in {cfg.backup_path}. "
+                             f"Contact support with the log file from {cfg.logs_path}.")
+        return None
+    box = QMessageBox(QMessageBox.Icon.Critical, APP_NAME,
+                      text + f"\n\nThe newest good backup is:\n{backup.name}\n\nRestore it now? Anything entered "
+                      f"after that backup will be missing. The damaged database is kept, not deleted.")
+    yes = box.addButton("Restore backup", QMessageBox.ButtonRole.AcceptRole)
+    box.addButton("Close", QMessageBox.ButtonRole.RejectRole)
+    box.exec()
+    if box.clickedButton() is not yes:
+        return None
+    try:
+        damaged = emergency_restore(cfg, backup)
+        db = _start_database(cfg)
+    except Exception as exc2:  # noqa: BLE001
+        log.exception("Start-up recovery failed")
+        QMessageBox.critical(None, APP_NAME, f"The backup could not be restored:\n\n{exc2}\n\n"
+                             f"Contact support with the log file from {cfg.logs_path}.")
+        return None
+    QMessageBox.information(None, APP_NAME, f"Backup {backup.name} restored."
+                            + (f"\nThe damaged database was kept as {damaged}." if damaged else ""))
+    return db
+
+
 def self_test(cfg: AppConfig) -> int:
     """``StoreWMS.exe --self-test``: open/upgrade the database and run the data check, without the window."""
     from wms.services import Services
@@ -77,7 +110,7 @@ def self_test(cfg: AppConfig) -> int:
 def run() -> int:
     from PySide6.QtCore import Qt
     from PySide6.QtGui import QIcon
-    from PySide6.QtWidgets import QApplication, QMessageBox
+    from PySide6.QtWidgets import QApplication
 
     cfg = AppConfig.load()
     cfg.ensure_dirs()
@@ -104,13 +137,18 @@ def run() -> int:
         db = _start_database(cfg)
     except Exception as exc:  # noqa: BLE001
         log.exception("Database start-up failed")
-        QMessageBox.critical(None, APP_NAME, f"The database could not be opened:\n\n{exc}\n\n"
-                                             f"Data folder: {cfg.data_dir}\nIf this persists, restore the latest "
-                                             f"backup or contact support with the log file from {cfg.logs_path}.")
-        return 1
+        db = _recover_database(cfg, exc)
+        if db is None:
+            return 1
 
     from wms.services import Services
     from wms.services.base import AppContext
+    try:
+        restored = Services(AppContext(db=db, config=cfg)).backup.finish_restore()
+        if restored:
+            log.info("%s", restored)
+    except Exception:  # noqa: BLE001 - the restore itself worked; only its audit line is missing
+        log.exception("Could not record the completed restore")
     from wms.ui.app import App
     from wms.ui.login import ChangePasswordDialog, LoginDialog
     from wms.ui.main_window import MainWindow
@@ -133,7 +171,13 @@ def run() -> int:
         window = MainWindow(app, on_logout=on_logout)
         state.update(logout=False, window=window, app=app)
         window.showMaximized()
+        window.start_backup_schedule()
         qt_app.exec()
+        if not getattr(app, "restart_required", False):  # after a restore the old session is gone
+            try:
+                services.auth.logout(closing=not state["logout"])
+            except Exception:  # noqa: BLE001 - never stop the program closing
+                log.exception("Could not record the log-out")
         if getattr(app, "restart_required", False):
             log.info("Restarting after restore")
             _restart()

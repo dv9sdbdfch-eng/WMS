@@ -192,7 +192,7 @@ class GoodsOutService(BaseService):
     def search(self, text: str | None = None, site_id: int | None = None, date_from: date | None = None,
                date_to: date | None = None, status: str | None = None, product_id: int | None = None,
                limit: int = 1000) -> list[GoodsIssue]:
-        q = (select(GoodsIssue).options(selectinload(GoodsIssue.lines))
+        q = (select(GoodsIssue).options(selectinload(GoodsIssue.lines).lazyload(GoodsIssueLine.product))
              .order_by(GoodsIssue.issue_date.desc(), GoodsIssue.id.desc()).limit(limit))
         if site_id:
             q = q.where(GoodsIssue.site_id == site_id)

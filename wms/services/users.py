@@ -36,6 +36,16 @@ class AuthService(BaseService):
             _ = user.role.permission_set  # load before session closes
             return user
 
+    def logout(self, closing: bool = False) -> None:
+        """End the session (Log out, or the program was closed)."""
+        user = self.ctx.user
+        if user is None:
+            return
+        with self.db.session() as s:
+            audit.record(s, self.ctx, "LOGOUT", "USER", user.id, user.username,
+                         "Program closed" if closing else "Logged out")
+        self.ctx.user = None
+
     def change_own_password(self, current: str, new: str) -> None:
         _check_password(new)
         with self.db.session() as s:
