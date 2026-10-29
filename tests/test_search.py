@@ -522,8 +522,35 @@ def big(tmp_path_factory):
     db.migrate()
     svc = Services(AppContext(db=db, config=cfg))
     svc.auth.login("admin", "admin")
+    _reserve_and_set_reorder_levels(svc)
     yield svc
     db.dispose()
+
+
+def _reserve_and_set_reorder_levels(svc) -> None:
+    """Reorder levels on some products, reservations (some partly issued) on others, so the stock
+    status filters are checked against Available = usable - reserved, not just on hand."""
+    from sqlalchemy import update
+
+    from wms.db.models import Product
+    from wms.services.goods_out import IssueLine
+    rnd = random.Random(7)
+    rows = [r for r in svc.products.list() if r.available >= 4]
+    sites = svc.sites.list(statuses=["ACTIVE"])
+    with svc.ctx.db.session() as s:
+        for r in rnd.sample(rows, 80):
+            s.execute(update(Product).where(Product.id == r.product.id).values(
+                reorder_level=r.available + D(rnd.choice([-3, 0, 2, 50]))))
+    for r in rnd.sample(rows, 60):
+        site_id = rnd.choice(sites).id
+        qty = (r.available * D(rnd.choice(["0.3", "0.6", "1"]))).to_integral_value()
+        if qty <= 0:
+            continue
+        res = svc.reservations.reserve({"product_id": r.product.id, "site_id": site_id, "quantity": qty})
+        if rnd.random() < 0.4:
+            svc.goods_out.post({"site_id": site_id, "issue_date": TODAY},
+                               [IssueLine(r.product.id, max(D(1), (qty / 2).to_integral_value()))])
+        assert res.reservation.number.startswith("RES-")
 
 
 def test_large_result_sets_are_counted_in_full_and_shown_in_part(big):
@@ -561,6 +588,15 @@ class Oracle:
             self.on_hand[pid] = self.on_hand.get(pid, D(0)) + q
             if self.bins[bid].is_available:
                 self.available[pid] = self.available.get(pid, D(0)) + q
+        # Reserved the Python way (row by row), to check the SQL used by search.
+        from wms.services.reservations import reserved_by_product
+        with svc.ctx.db.read_session() as s:
+            self.reserved = reserved_by_product(s)
+
+    def is_low(self, p) -> bool:
+        from wms.services.products import ProductRow
+        return ProductRow(p, self.on_hand.get(p.id, D(0)), self.available.get(p.id, D(0)),
+                          self.reserved.get(p.id, D(0))).is_low
 
     def bin_ok(self, c, bid) -> bool:
         if c.bin_id and bid != c.bin_id:
@@ -585,14 +621,14 @@ class Oracle:
         return not (c.site_id and m.site_id != c.site_id)
 
     def product_ok(self, c, p) -> bool:
-        oh, av = self.on_hand.get(p.id, D(0)), self.available.get(p.id, D(0))
+        oh = self.on_hand.get(p.id, D(0))
         if c.text and c.text.upper() not in p.internal_code:
             return False
         if c.stock_status == "IN_STOCK" and not oh > 0:
             return False
         if c.stock_status == "OUT_OF_STOCK" and not oh <= 0:
             return False
-        if c.stock_status == "LOW_STOCK" and not (p.min_stock and p.min_stock > 0 and av <= p.min_stock):
+        if c.stock_status == "LOW_STOCK" and not self.is_low(p):
             return False
         if c.qty_gt is not None and not oh > c.qty_gt:
             return False
@@ -680,6 +716,9 @@ def test_random_filter_combinations_match_brute_force(big):
         assert got.total == len(got.rows)
         checked += 1
     assert checked == 120
+    low = big.search.products(SearchCriteria(stock_status="LOW_STOCK"), limit=5000)
+    assert {r.product.id for r in low.rows} == {r.product.id for r in big.products.low_stock()}
+    assert any(r.reserved > 0 for r in low.rows)  # the reservations really are part of the check
 
 
 def test_product_totals_and_bins_in_results_are_exact(big):

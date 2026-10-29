@@ -83,6 +83,21 @@ def reserved_by_product(s: Session, product_ids: list[int] | None = None,
     return out
 
 
+def reserved_query():
+    """(product_id, reserved) for every product with stock still reserved - the same figure as
+    reserved_by_product, as SQL, so search can filter and sort on Available without loading rows."""
+    issued = (select(GoodsIssueLine.reservation_id.label("rid"), func.sum(GoodsIssueLine.quantity).label("issued"))
+              .join(GoodsIssue, GoodsIssue.id == GoodsIssueLine.issue_id)
+              .where(GoodsIssue.status == DocumentStatus.POSTED.value, GoodsIssueLine.reservation_id.is_not(None))
+              .group_by(GoodsIssueLine.reservation_id).subquery())
+    left = StockReservation.quantity - func.coalesce(issued.c.issued, 0)
+    return (select(StockReservation.product_id.label("product_id"),
+                   func.sum(case((left > 0, left), else_=0)).label("reserved"))
+            .outerjoin(issued, issued.c.rid == StockReservation.id)
+            .where(StockReservation.status == ReservationStatus.ACTIVE.value)
+            .group_by(StockReservation.product_id))
+
+
 def usable_stock(s: Session, product_ids: list[int]) -> dict[int, Decimal]:
     """On hand in bins stock can be issued from (quarantine excluded), per product."""
     rows = s.execute(

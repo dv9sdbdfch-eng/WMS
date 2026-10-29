@@ -22,6 +22,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QBrush, QColor, QGuiApplication, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QComboBox,
     QCompleter,
     QDateEdit,
@@ -493,9 +494,15 @@ class PickCombo(QComboBox):
     """Editable combo with contains-search over (label, value) items.
 
     Typing filters the list; ``value()`` returns the chosen value or None.
+
+    Enter (what a barcode scanner sends after each scan) resolves the typed text: an exact code
+    ("B04", "P-1001", "MDF-18" - the part of a label before " - ") or, through ``resolver``, a
+    barcode / any lookup the screen supplies. ``entered`` then fires so the screen can move the
+    cursor to the next field; unknown text beeps and is selected, ready for the next scan.
     """
 
     picked = Signal(object)
+    entered = Signal(object)
 
     def __init__(self, placeholder: str = "", allow_empty: bool = True, parent=None):
         super().__init__(parent)
@@ -511,6 +518,36 @@ class PickCombo(QComboBox):
         self.setMinimumContentsLength(18)
         self.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.currentIndexChanged.connect(lambda _: self.picked.emit(self.value()))
+        self.resolver: Callable[[str], Any] | None = None
+        self.lineEdit().returnPressed.connect(self._return_pressed)
+
+    def _return_pressed(self) -> None:
+        if self.resolve_text():
+            self.entered.emit(self.value())
+
+    def resolve_text(self) -> bool:
+        """Pick the item the typed / scanned text names. False (with a beep) when nothing matches."""
+        text = self.currentText().strip()
+        if not text:
+            return True  # empty: "none" / "automatic" - the screen decides whether that is allowed
+        if self.value() is not None:
+            return True
+        val = self.resolver(text) if self.resolver is not None else None
+        if val is None:
+            val = self._value_by_code(text)
+        if val is not None and self.findData(val) >= 0:
+            self.set_value(val)
+            return True
+        QApplication.beep()
+        self.lineEdit().selectAll()
+        return False
+
+    def _value_by_code(self, text: str):
+        want = text.upper()
+        found = [self.itemData(i) for i in range(self.count()) if self.itemData(i) is not None
+                 and (self.itemText(i).upper() == want or self.itemText(i).split(" - ")[0].strip().upper() == want
+                      or self.itemText(i).split("  [")[0].split(" / ")[-1].strip().upper() == want)]
+        return found[0] if len(found) == 1 else None
 
     def set_options(self, options: Iterable[tuple[str, Any]], keep: bool = True) -> None:
         old = self.value() if keep else None
