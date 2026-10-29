@@ -74,3 +74,27 @@ class Sample:
 @pytest.fixture
 def sample(svc) -> Sample:
     return Sample(svc)
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """Destroy every window while Qt is still running.
+
+    Screens left open by the UI tests were otherwise destroyed during Python's own shutdown, after
+    the QApplication, which now and then crashed the process (exit code 139 / 0xC0000005) after
+    all tests had passed - and that fails the CI step.
+    """
+    import gc
+    import sys
+    if "PySide6.QtWidgets" not in sys.modules:
+        return
+    from PySide6.QtCore import QCoreApplication, QEvent
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance()
+    if app is None:
+        return
+    for w in app.topLevelWidgets():
+        w.close()
+        w.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    app.processEvents()
+    gc.collect()

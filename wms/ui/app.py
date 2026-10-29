@@ -86,6 +86,12 @@ class App(QObject):
         elif entity_type == EntityType.SUPPLIER.value:
             from wms.ui.dialogs.reference_dialogs import SupplierDialog
             SupplierDialog(self, entity_id, parent, tab=tab).exec()
+        elif entity_type == EntityType.PURCHASE_ORDER.value:
+            from wms.ui.dialogs.purchasing import PurchaseOrderDialog
+            PurchaseOrderDialog(self, entity_id, parent).exec()
+        elif entity_type == EntityType.DISCREPANCY.value:
+            from wms.ui.dialogs.purchasing import DiscrepancyDialog
+            DiscrepancyDialog(self, entity_id, parent).exec()
         elif entity_type == EntityType.PRODUCTION.value:
             from wms.ui.dialogs.documents import ProductionDialog
             ProductionDialog(self, entity_id, parent).exec()

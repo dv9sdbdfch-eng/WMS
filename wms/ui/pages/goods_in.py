@@ -35,7 +35,9 @@ class GoodsInPage(Page):
         ll.setContentsMargins(0, 0, 0, 0)
         form = QFormLayout()
         self.supplier = PickCombo("Choose supplier...")
-        self.supplier.picked.connect(lambda _: self._check_duplicate())
+        self.supplier.picked.connect(lambda _: self._supplier_picked())
+        self.order = PickCombo("No purchase order")
+        self.order.picked.connect(self._order_picked)
         self.dn_number = QLineEdit()
         self.dn_number.setPlaceholderText("Number printed on the supplier's delivery note")
         self.dn_number.editingFinished.connect(self._check_duplicate)
@@ -44,6 +46,7 @@ class GoodsInPage(Page):
         self.po.setPlaceholderText("Optional purchase order number")
         self.notes = QLineEdit()
         form.addRow("Supplier *", self.supplier)
+        form.addRow("Purchase order", self.order)
         form.addRow("Delivery note no. *", self.dn_number)
         form.addRow("Delivery date *", self.date)
         form.addRow("PO / reference", self.po)
@@ -81,7 +84,44 @@ class GoodsInPage(Page):
 
     def refresh(self):
         self.supplier.set_options(self.app.supplier_options())
+        self._order_options()
         self.lines.reload_options()
+
+    # -- purchase orders -----------------------------------------------------
+    def _order_options(self):
+        sup = self.supplier.value()
+        self.order.set_options([(f"{po.po_number} - {po.supplier_label}"
+                                 + (f" - {po.site_label}" if po.site_id else "")
+                                 + (f" (expected {po.expected_date:%d/%m/%Y})" if po.expected_date else ""), po.id)
+                                for po in self.app.services.purchasing.open_orders(sup)])
+
+    def _supplier_picked(self):
+        self._order_options()  # keeps the chosen order if it is with this supplier
+        self._check_duplicate()
+
+    def _order_picked(self, po_id):
+        if po_id and po_id != getattr(self, "_loaded_po", None):
+            self.load_purchase_order(po_id)
+
+    def load_purchase_order(self, po_id: int) -> None:
+        """Fill the form with what is still to come on this order; change the quantities to what arrived."""
+        v = self.app.services.purchasing.get(po_id)
+        self._loaded_po = po_id
+        self.supplier.set_value(v.po.supplier_id)
+        self._order_options()
+        self.order.set_value(po_id)
+        if not self.po.text().strip():
+            self.po.setText(v.po.po_number)
+        self.lines.clear()
+        for lv in v.lines:
+            if lv.outstanding > 0:
+                self.lines.add_row(lv.line.product_id, lv.outstanding)
+                if lv.line.unit_cost is not None:
+                    r = self.lines.table.rowCount() - 1
+                    self.lines.table.cellWidget(r, self.lines._col("Unit Cost")).set_value(lv.line.unit_cost)
+        if not self.lines.table.rowCount():
+            self.lines.add_row()
+        self._check_duplicate()
 
     def add_product(self, product_id: int, supplier_id: int | None = None) -> None:
         """Start receiving a product found in search."""
@@ -128,6 +168,8 @@ class GoodsInPage(Page):
 
     # -- posting -------------------------------------------------------------
     def clear(self):
+        self._loaded_po = None
+        self.order.set_value(None)
         self.dn_number.clear()
         self.po.clear()
         self.notes.clear()
@@ -180,12 +222,22 @@ class GoodsInPage(Page):
                                            "No scan of the delivery note is attached. Post without it? "
                                            "You can attach it later from Delivery Notes."):
             return
-        header = {"supplier_id": self.supplier.value(), "dn_number": self.dn_number.text(), "delivery_date": d,
+        header = {"supplier_id": self.supplier.value(), "purchase_order_id": self.order.value(),
+                  "dn_number": self.dn_number.text(), "delivery_date": d,
                   "po_reference": self.po.text(), "notes": self.notes.text(), "client_token": self._token}
         lines = [ReceiptLine(v.product_id, v.quantity, v.bin_id, v.unit_cost, v.notes) for v in values]
         dn = run(self, self.app.services.goods_in.post, header, lines, list(self._paths))
         if dn:
             self.app.changed()
-            info(self, "Delivery posted", f"Delivery note {dn.dn_number} has been posted: {len(dn.lines)} line(s) "
-                                          f"added to stock.")
+            text = f"Delivery note {dn.dn_number} has been posted: {len(dn.lines)} line(s) added to stock."
+            if dn.purchase_order_id:
+                v = self.app.services.purchasing.get(dn.purchase_order_id)
+                text += f"\n\nPurchase order {v.po.po_number} is now {v.po.status.replace('_', ' ').lower()}."
+                problems = self.app.services.purchasing.discrepancies(delivery_note_id=dn.id)
+                if problems:
+                    text += "\n\nRecorded as delivery problems:\n" + "\n".join(
+                        f"  {d.number}: {d.kind_label} - {d.product.internal_code if d.product else ''} "
+                        f"{d.quantity.normalize():f}" for d in problems)
+            info(self, "Delivery posted", text)
             self.clear()
+            self._order_options()

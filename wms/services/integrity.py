@@ -98,6 +98,7 @@ def run_checks(s: Session) -> list[IntegrityIssue]:
     issues += _balance_checks(ledger, stored, codes, bins, warehouse_of_bins(s))
     issues += _reversal_checks(s)
     issues += _document_checks(s)
+    issues += _purchase_order_checks(s)
     for (pid, bid), q in sorted(stored.items()):
         if q < ZERO:
             issues.append(IntegrityIssue(WARNING, "Negative stock",
@@ -225,4 +226,32 @@ def _document_checks(s: Session) -> list[IntegrityIssue]:
             out.append(IntegrityIssue(CRITICAL, "Document link",
                                       f"Adjustment {number}: difference {_fmt(diff)} does not match its stock "
                                       f"movement #{mid} ({_fmt(mqty)})."))
+    return out
+
+
+def _purchase_order_checks(s: Session) -> list[IntegrityIssue]:
+    """Deliveries point at lines of their own order for the same product; order status agrees with
+    what has been received."""
+    from wms.db.models import DeliveryNote, DeliveryNoteLine, PurchaseOrder, PurchaseOrderLine
+    from wms.services.purchasing import received_by_line, status_from_receipts
+    out: list[IntegrityIssue] = []
+    bad = s.execute(
+        select(DeliveryNote.dn_number, DeliveryNoteLine.line_no, PurchaseOrder.po_number)
+        .join(DeliveryNote, DeliveryNote.id == DeliveryNoteLine.delivery_note_id)
+        .join(PurchaseOrderLine, PurchaseOrderLine.id == DeliveryNoteLine.purchase_order_line_id)
+        .join(PurchaseOrder, PurchaseOrder.id == PurchaseOrderLine.purchase_order_id)
+        .where((PurchaseOrderLine.product_id != DeliveryNoteLine.product_id)
+               | (DeliveryNote.purchase_order_id.is_(None))
+               | (DeliveryNote.purchase_order_id != PurchaseOrderLine.purchase_order_id))).all()
+    for dn_number, line_no, po_number in bad:
+        out.append(IntegrityIssue(CRITICAL, "Purchase order link",
+                                  f"Delivery note {dn_number} line {line_no} points at a line of {po_number} that "
+                                  f"is for another product or another order."))
+    received = received_by_line(s, None)
+    for po in s.scalars(select(PurchaseOrder).where(PurchaseOrder.status.notin_(("DRAFT", "CANCELLED")))):
+        expected = status_from_receipts(po, received)
+        if expected != po.status:
+            out.append(IntegrityIssue(WARNING, "Purchase order status",
+                                      f"{po.po_number} is {po.status.replace('_', ' ').lower()} but its deliveries "
+                                      f"say {expected.replace('_', ' ').lower()}."))
     return out

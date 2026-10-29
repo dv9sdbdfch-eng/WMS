@@ -64,7 +64,7 @@ def test_every_page_opens(ui, sample):
     app, win, msgs, _ = ui
     sample.receive(sample.mdf, 40)
     keys = list(win.factories)
-    assert len(keys) == 17
+    assert len(keys) == 19
     for key in keys:
         win.go(key)
         page = win.page(key)
@@ -480,4 +480,60 @@ def test_bin_screen_shows_location_levels_and_prints_a_label(ui, sample, monkeyp
     assert app.services.stocktake.list()[0].lines[0].bin_id == sample.bin1.id
     dlg.close()
     dlg.deleteLater()
+    assert not _errors(msgs), msgs
+
+
+def test_purchase_order_to_partial_delivery_and_problem(ui, sample, qtbot):
+    app, win, msgs, opened = ui
+    from wms.ui.dialogs.purchasing import DiscrepancyDialog, NewDiscrepancyDialog, PurchaseOrderDialog
+    dlg = PurchaseOrderDialog(app, None)
+    qtbot.addWidget(dlg)
+    dlg.supplier.set_value(sample.supplier.id)
+    dlg.lines.clear()
+    dlg.lines.add_row(sample.mdf.id, Decimal("10"))
+    assert dlg.save(), msgs
+    po_id = dlg.po_id
+    dlg.mark_ordered()
+    assert app.services.purchasing.get(po_id).po.status == "ORDERED"
+    win.go("purchase_orders")
+    page = win.page("purchase_orders")
+    page.refresh()
+    assert [r.po.id for r in page.table.items()] == [po_id]
+
+    page.receive(po_id)  # Goods In opens with the outstanding lines
+    gin = win.page("goods_in")
+    assert gin.order.value() == po_id and gin.supplier.value() == sample.supplier.id
+    assert [(v.product_id, v.quantity) for v in gin.lines.values()] == [(sample.mdf.id, Decimal("10"))]
+    gin.lines.table.cellWidget(0, 1).set_value(Decimal("6"))  # only 6 arrived
+    gin.dn_number.setText("DN-500")
+    gin.post()
+    assert not _errors(msgs), msgs
+    assert "partially received" in msgs[-1][2]
+    v = app.services.purchasing.get(po_id)
+    assert v.po.status == "PARTIALLY_RECEIVED" and v.lines[0].outstanding == Decimal("4")
+    dn_id = v.deliveries[0].id
+
+    new = NewDiscrepancyDialog(app, None, delivery_note_id=dn_id)
+    qtbot.addWidget(new)
+    new.kind.setCurrentIndex(new.kind.findData("DAMAGED"))
+    new.product.set_value(sample.mdf.id)
+    new.qty.set_value(Decimal("1"))
+    new.save()
+    d = new.created
+    assert d.purchase_order_id == po_id and d.reason_code == "DAMAGED"
+    resolve = DiscrepancyDialog(app, d.id)
+    qtbot.addWidget(resolve)
+    resolve.resolve()
+    assert app.services.purchasing.get_discrepancy(d.id).status == "RESOLVED"
+
+    for kind, oid in (("PURCHASE_ORDER", po_id), ("DISCREPANCY", d.id), ("DELIVERY_NOTE", dn_id)):
+        app.open_entity(kind, oid)
+    closing = PurchaseOrderDialog(app, po_id)
+    qtbot.addWidget(closing)
+    closing.close_short()
+    assert app.services.purchasing.get(po_id).po.closed_short
+    win.go("discrepancies")
+    win.page("discrepancies").refresh()
+    win.go("low_stock")
+    win.page("low_stock").refresh()
     assert not _errors(msgs), msgs

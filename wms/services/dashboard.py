@@ -8,12 +8,22 @@ from decimal import Decimal
 
 from sqlalchemy import exists, func, select
 
-from wms.core.enums import CountStatus, DocumentStatus, EntityType, SiteStatus, StockStatus
+from wms.core.enums import (
+    OPEN_PO_STATUSES,
+    CountStatus,
+    DiscrepancyStatus,
+    DocumentStatus,
+    EntityType,
+    SiteStatus,
+    StockStatus,
+)
 from wms.core.numbers import ZERO
 from wms.db.models import (
     Attachment,
+    DeliveryDiscrepancy,
     DeliveryNote,
     GoodsIssue,
+    PurchaseOrder,
     Site,
     StockCount,
     StockLevel,
@@ -97,6 +107,16 @@ class DashboardService(BaseService):
         if no_scan:
             out.append(Alert("warn", f"{no_scan} delivery note(s) from the last 30 days have no scan attached.",
                              "delivery_notes"))
+        problems = s.scalar(select(func.count(DeliveryDiscrepancy.id)).where(
+            DeliveryDiscrepancy.status == DiscrepancyStatus.OPEN.value)) or 0
+        if problems:
+            out.append(Alert("warn", f"{problems} delivery problem(s) (short, over, damaged, rejected or wrong goods) "
+                                     f"are still open.", "discrepancies"))
+        overdue = s.scalar(select(func.count(PurchaseOrder.id)).where(
+            PurchaseOrder.status.in_(OPEN_PO_STATUSES), PurchaseOrder.expected_date < date.today())) or 0
+        if overdue:
+            out.append(Alert("warn", f"{overdue} purchase order(s) are past their expected delivery date.",
+                             "purchase_orders"))
         week = datetime.combine(date.today() - timedelta(days=7), datetime.min.time()).astimezone()
         overrides = s.scalar(select(func.count(StockMovement.id)).where(
             StockMovement.is_override.is_(True), StockMovement.recorded_at >= week)) or 0

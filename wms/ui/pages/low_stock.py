@@ -19,6 +19,9 @@ class LowStockPage(Page):
         cols = product_columns()
         cols.insert(6, Col("Shortfall", lambda r: r.shortfall, QTY, 90))
         cols.insert(7, Col("Reorder Qty", lambda r: r.product.reorder_qty, QTY, 90))
+        # Already on open purchase orders: check before ordering again.
+        cols.insert(8, Col("On Order", lambda r: self._incoming.get(r.product.id), QTY, 85))
+        self._incoming = {}
         self.table = DataTable(cols)
         self.table.set_row_style(lambda r: "low" if r.status.value == "OUT" else None)
         self.table.activated_item.connect(self.open)
@@ -28,12 +31,15 @@ class LowStockPage(Page):
 
     def refresh(self):
         rows = self.app.services.products.low_stock()
+        self._incoming = self.app.services.purchasing.incoming([r.product.id for r in rows])
         rows.sort(key=lambda r: (r.status.value != "OUT", r.product.supplier.name if r.product.supplier else "~",
                                  r.product.internal_code))
         self.table.set_items(rows)
         out = sum(1 for r in rows if r.status.value == "OUT")
-        self.count.setText(f"{len(rows)} product(s) need reordering ({out} out of stock). Grouped by supplier - "
-                           f"double-click a product to open it." if rows else "Nothing is below minimum level.")
+        ordered = sum(1 for r in rows if r.product.id in self._incoming)
+        self.count.setText(f"{len(rows)} product(s) need reordering ({out} out of stock, {ordered} already on order). "
+                           f"Grouped by supplier - double-click a product to open it."
+                           if rows else "Nothing is below minimum level.")
 
     def open(self, row):
         if row is not None:

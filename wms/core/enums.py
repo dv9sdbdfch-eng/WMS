@@ -66,6 +66,23 @@ class DocumentStatus(LabelledEnum):
     REVERSED = "REVERSED"
 
 
+class POStatus(LabelledEnum):
+    DRAFT = "DRAFT"
+    ORDERED = "ORDERED"
+    PARTIALLY_RECEIVED = "PARTIALLY_RECEIVED"
+    RECEIVED = "RECEIVED"
+    CANCELLED = "CANCELLED"
+
+
+# Purchase orders goods can still arrive against (they count as incoming stock).
+OPEN_PO_STATUSES = (POStatus.ORDERED.value, POStatus.PARTIALLY_RECEIVED.value)
+
+
+class DiscrepancyStatus(LabelledEnum):
+    OPEN = "OPEN"
+    RESOLVED = "RESOLVED"
+
+
 class CountStatus(LabelledEnum):
     OPEN = "OPEN"
     SUBMITTED = "SUBMITTED"
@@ -146,6 +163,8 @@ class EntityType(LabelledEnum):
     TRANSFER = "TRANSFER"
     PRODUCTION = "PRODUCTION"
     STOCK_COUNT = "STOCK_COUNT"
+    PURCHASE_ORDER = "PURCHASE_ORDER"
+    DISCREPANCY = "DISCREPANCY"
     SUPPLIER = "SUPPLIER"
     CATEGORY = "CATEGORY"
     UNIT = "UNIT"

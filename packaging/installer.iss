@@ -2,7 +2,7 @@
 ; Creates dist\StoreWMS-Setup-<version>.exe
 
 #define AppName "Store WMS"
-#define AppVersion "1.5.0"
+#define AppVersion "1.6.0"
 #define AppExe "StoreWMS.exe"
 
 [Setup]
