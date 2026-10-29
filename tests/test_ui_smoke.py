@@ -423,3 +423,42 @@ def test_archived_records_open_with_their_history_and_restore(ui, sample, monkey
     dlg.refresh()
     assert "Archived" not in dlg.title.text()
     assert not _errors(msgs), msgs
+
+
+def test_reverse_a_transfer_from_the_movement_screen(ui, sample, monkeypatch):
+    """Movement detail -> Reverse... -> pick a reason -> mirror movement posted and shown as linked."""
+    app, win, msgs, _ = ui
+    sample.receive(sample.mdf, 10, sample.bin1)
+    tr = app.services.stock.transfer(sample.mdf.id, sample.bin1.id, sample.bin2.id, "4")
+    from wms.ui.pages import movements
+    asked = []
+
+    def pick(parent, title, prompt, choices):
+        asked.append([c for c, _ in choices])
+        return "DATA_ENTRY_ERROR", "Scanned the wrong bin"
+
+    monkeypatch.setattr(movements, "ask_reason", pick)
+    dlg = movements.MovementDetailDialog(app, app.services.stock.get_movement(tr.movement_id))
+    dlg.reverse()
+    assert "DATA_ENTRY_ERROR" in asked[0] and "SCRAP" not in asked[0]  # only reversal reasons offered
+    rec = app.services.ledger.reversal_of(tr.movement_id)
+    assert rec.reason == "Scanned the wrong bin"
+    again = movements.MovementDetailDialog(app, app.services.stock.get_movement(rec.reversal_movement_id))
+    assert again.mv.type_label == "Reversal of Bin Transfer"
+    win.go("movements")
+    page = win.page("movements")
+    idx = page.mtype.findData("REVERSAL")
+    page.mtype.setCurrentIndex(idx)
+    page.refresh()
+    assert [m.id for m in page.table.items()] == [rec.reversal_movement_id]
+    assert not _errors(msgs), msgs
+
+
+def test_reason_codes_tab_lists_defaults(ui):
+    app, win, msgs, _ = ui
+    win.go("settings")
+    page = win.page("settings")
+    page.refresh()
+    codes = {r.code for r in page.reason_table.items()}
+    assert {"DAMAGED", "MISSING", "STOCK_COUNT", "SCRAP", "OTHER"} <= codes
+    assert not _errors(msgs), msgs

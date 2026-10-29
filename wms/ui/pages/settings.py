@@ -43,6 +43,7 @@ class SettingsPage(Page):
             self._add(self._suppliers(), "Suppliers", self._load_suppliers)
             self._add(self._categories(), "Categories", self._load_categories)
             self._add(self._units(), "Units of measure", self._load_units)
+            self._add(self._reasons(), "Reason codes", self._load_reasons)
         if app.can(P.BACKUP_RUN) or app.can(P.BACKUP_RESTORE):
             self._add(self._backups(), "Backup and restore", self._load_backups)
         if app.can(P.SETTINGS_MANAGE) or app.can(P.AUDIT_VIEW):
@@ -185,6 +186,37 @@ class SettingsPage(Page):
             self._load_units()
             self.app.changed()
 
+    # -- reason codes -------------------------------------------------------
+    def _reasons(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.addWidget(label("Reasons offered when adjusting stock, reversing a transaction, recording a return or "
+                            "a delivery discrepancy. Retired reasons stay on the records that used them.",
+                            "Muted", wrap=True))
+        yes = lambda v: "Yes" if v else ""  # noqa: E731
+        self.reason_table = DataTable([
+            Col("Code", lambda r: r.code, width=170), Col("Name", lambda r: r.label, width=200),
+            Col("Adjustments", lambda r: yes(r.for_adjustment), width=95),
+            Col("Reversals", lambda r: yes(r.for_reversal), width=85),
+            Col("Returns", lambda r: yes(r.for_return), width=75),
+            Col("Discrepancies", lambda r: yes(r.for_discrepancy), width=100),
+            Col("System", lambda r: yes(r.is_system), width=65),
+            Col("Active", lambda r: "Yes" if r.is_active else "Retired")])
+        self.reason_table.activated_item.connect(self._edit_reason)
+        lay.addWidget(self.reason_table, 1)
+        if self.app.can(P.SETTINGS_MANAGE):
+            lay.addLayout(h(button("New reason", lambda: self._edit_reason(None, True), primary=True),
+                            button("Edit", lambda: self._edit_reason(self.reason_table.current())), None))
+        return w
+
+    def _load_reasons(self):
+        self.reason_table.set_items(self.app.services.reasons.list(include_inactive=True))
+
+    def _edit_reason(self, rc, new=False):
+        from wms.ui.dialogs.reference_dialogs import ReasonCodeDialog
+        if (rc or new) and self.app.can(P.SETTINGS_MANAGE) and ReasonCodeDialog(self.app, rc, self).exec():
+            self._load_reasons()
+
     # -- backup / restore ---------------------------------------------------
     def _backups(self) -> QWidget:
         w = QWidget()
@@ -264,8 +296,9 @@ class SettingsPage(Page):
     def _integrity(self) -> QWidget:
         w = QWidget()
         lay = QVBoxLayout(w)
-        lay.addWidget(label("Checks the database file, links between records, that every bin quantity matches the "
-                            "movement history, and that every attached file is present.", "Muted", wrap=True))
+        lay.addWidget(label("Checks the database file, links between records, that every bin, product and warehouse "
+                            "quantity matches the movement history, that every document and reversal is linked to "
+                            "its movements, and that every attached file is present.", "Muted", wrap=True))
         self.check_out = QPlainTextEdit()
         self.check_out.setReadOnly(True)
         lay.addWidget(self.check_out, 1)
@@ -290,6 +323,9 @@ class SettingsPage(Page):
         lines.append(f"Negative stock (after overrides): {len(rep.negative_levels)}")
         for lv in rep.negative_levels[:50]:
             lines.append(f"   {lv.product.internal_code} in {lv.bin.full_code}: {fmt_qty(lv.quantity)}")
+        crit = rep.critical_ledger_issues
+        lines.append(f"CRITICAL ledger problems (stock not explained by movement history): {len(crit)}")
+        lines += [f"   {i.check}: {i.message}" for i in crit[:50]]
         lines.append(f"Missing attachment files: {len(rep.missing_files)}")
         lines += [f"   {n}" for n in rep.missing_files[:50]]
         lines.append("")

@@ -99,6 +99,16 @@ class Services:
         return StocktakeService(self.ctx)
 
     @cached_property
+    def ledger(self):
+        from wms.services.ledger import LedgerService
+        return LedgerService(self.ctx)
+
+    @cached_property
+    def reasons(self):
+        from wms.services.reasons import ReasonCodeService
+        return ReasonCodeService(self.ctx)
+
+    @cached_property
     def backup(self):
         from wms.services.backup import BackupService
         return BackupService(self.ctx)

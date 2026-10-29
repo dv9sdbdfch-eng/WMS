@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from wms.core.enums import AttachmentKind, EntityType, FinishedStatus, ItemType, MovementType
+from wms.core.enums import AttachmentKind, EntityType, FinishedStatus, ItemType
 from wms.core.numbers import fmt_datetime, fmt_qty
 from wms.core.permissions import P
 from wms.services.search import location_of, movement_reference, movement_route, signed_qty
@@ -385,8 +385,7 @@ def product_history_columns() -> list[Col]:
     """Movement history as a warehouse user reads it: 25/10/2026 | Goods In | +50 | Egger -> Bin B01."""
     return [
         Col("Date / Time", lambda m: m.occurred_at, DATETIME, 130),
-        Col("Movement Type", lambda m: MovementType(m.movement_type).label + (" (reversal)" if m.reversal_of_id
-                                                                              else ""), width=160),
+        Col("Movement Type", lambda m: m.type_label, width=160),
         Col("Quantity", signed_qty, QTY, 85),
         Col("From", lambda m: movement_route(m)[0], width=220),
         Col("To", lambda m: movement_route(m)[1], width=220),

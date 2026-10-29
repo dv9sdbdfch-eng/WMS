@@ -42,3 +42,22 @@ class Supplier(IdMixin, TimestampMixin, ActiveMixin, Base):
     address: Mapped[str | None] = mapped_column(Text)
     account_number: Mapped[str | None] = mapped_column(String(50))
     notes: Mapped[str | None] = mapped_column(Text)
+
+
+class ReasonCode(IdMixin, ActiveMixin, Base):
+    """Configurable reasons for adjustments, reversals, returns and delivery discrepancies.
+
+    ``code`` is what documents store; it never changes once created. System codes are used by
+    the application itself (e.g. STOCK_COUNT for stocktake approvals) and cannot be retired.
+    """
+
+    __tablename__ = "reason_codes"
+
+    code: Mapped[str] = mapped_column(String(30), unique=True, nullable=False)
+    label: Mapped[str] = mapped_column(String(100), nullable=False)
+    for_adjustment: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    for_reversal: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    for_return: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    for_discrepancy: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_system: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    sort_order: Mapped[int] = mapped_column(default=100, nullable=False)

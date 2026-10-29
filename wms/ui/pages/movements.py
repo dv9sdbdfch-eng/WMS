@@ -8,7 +8,18 @@ from wms.core.enums import EntityType, MovementType
 from wms.core.numbers import fmt_datetime, fmt_money, fmt_qty
 from wms.core.permissions import P
 from wms.ui.pages.base import ListPage
-from wms.ui.widgets.common import DATETIME, MONEY, QTY, Col, PickCombo, button, h, label
+from wms.ui.widgets.common import (
+    DATETIME,
+    MONEY,
+    QTY,
+    Col,
+    PickCombo,
+    ask_reason,
+    button,
+    h,
+    label,
+    run_with_override,
+)
 
 # Documents that can be opened from a movement.
 _OPENABLE = {EntityType.DELIVERY_NOTE.value, EntityType.GOODS_ISSUE.value, EntityType.RETURN.value,
@@ -30,7 +41,7 @@ class MovementDetailDialog(QDialog):
         lay = QVBoxLayout(self)
         from wms.ui.dialogs.documents import _form
         unit = mv.product.unit.code
-        rows = [("Type", MovementType(mv.movement_type).label + ("  (reversal)" if mv.reversal_of_id else "")),
+        rows = [("Type", mv.type_label),
                 ("Product", f"{mv.product_code} - {mv.product_name}"),
                 ("Quantity", f"{fmt_qty(mv.quantity)} {unit}  ({_direction(mv)})"),
                 ("From bin", mv.from_bin_code),
@@ -43,14 +54,40 @@ class MovementDetailDialog(QDialog):
                 ("User", mv.user_label), ("Notes", mv.notes or "")]
         if mv.is_override:
             rows.append(("Negative stock override", mv.override_reason or "Yes"))
+        rec = app.services.ledger.reversal_of(mv.id)
+        if rec is not None:
+            other = rec.original_movement_id if rec.reversal_movement_id == mv.id else rec.reversal_movement_id
+            rows += [("Reversal", f"{'Reverses' if rec.reversal_movement_id == mv.id else 'Reversed by'} "
+                                  f"movement #{other}"),
+                     ("Reversal reason", f"{app.services.reasons.label(rec.reason_code)}: {rec.reason}"),
+                     ("Reversed by", f"{rec.reversed_by_name_snapshot or rec.reversed_by.full_name}, "
+                                     f"{fmt_datetime(rec.reversed_at)}")]
         lay.addLayout(_form(rows))
-        lay.addWidget(label("Movements cannot be edited or deleted. To correct a mistake, reverse the document "
-                            "it belongs to or post an adjustment.", "Muted", wrap=True))
+        lay.addWidget(label("Movements cannot be edited or deleted. To correct a mistake, reverse it: transfers and "
+                            "adjustments here, everything else on the document it belongs to.", "Muted", wrap=True))
         btns = []
+        if rec is None and app.can(P.STOCK_ADJUST) and app.services.ledger.can_reverse_alone(mv):
+            btns.append(button("Reverse...", self.reverse, danger=True))
+        if rec is not None:
+            btns.append(button(f"Open movement #{other}", lambda: self._open(other)))
         if mv.doc_type in _OPENABLE and mv.doc_id:
             btns.append(button("Open document", lambda: app.open_entity(mv.doc_type, mv.doc_id, self)))
         btns.append(button("Open product", lambda: app.open_entity("PRODUCT", mv.product_id, self)))
         lay.addLayout(h(*btns, None, button("Close", self.accept)))
+
+    def _open(self, movement_id: int):
+        MovementDetailDialog(self.app, self.app.services.stock.get_movement(movement_id), self).exec()
+
+    def reverse(self):
+        picked = ask_reason(self, "Reverse movement",
+                            f"Reverse this {self.mv.type_label.lower()} of {fmt_qty(self.mv.quantity)} "
+                            f"{self.mv.product_code}? A mirror movement is posted and both stay in the history.",
+                            self.app.services.reasons.choices("REVERSAL"))
+        if picked and run_with_override(self, self.app.can(P.STOCK_OVERRIDE_NEGATIVE),
+                                        self.app.services.ledger.reverse_movement, movement_id=self.mv.id,
+                                        reason_code=picked[0], reason=picked[1]):
+            self.app.changed()
+            self.accept()
 
 
 class MovementsPage(ListPage):
@@ -78,7 +115,7 @@ class MovementsPage(ListPage):
 
     def columns(self):
         return [Col("Date / Time", lambda m: m.occurred_at, DATETIME, 130),
-                Col("Type", lambda m: MovementType(m.movement_type).label, width=150),
+                Col("Type", lambda m: m.type_label, width=170),
                 Col("Code", lambda m: m.product_code, width=110),
                 Col("Product", lambda m: m.product_name, width=200),
                 Col("Qty", lambda m: m.quantity, QTY, 80),

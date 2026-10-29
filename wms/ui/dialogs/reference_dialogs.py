@@ -173,3 +173,45 @@ class UnitDialog(QDialog):
         if run(self, self.app.services.reference.save_unit, self.unit.id if self.unit else None, self.code.text(),
                self.name.text(), self.decimal.isChecked(), self.active.isChecked()):
             self.accept()
+
+
+class ReasonCodeDialog(QDialog):
+    """Create or edit a reason code. The code itself never changes once created (history stores it)."""
+
+    def __init__(self, app, rc=None, parent=None):
+        super().__init__(parent)
+        self.app, self.rc = app, rc
+        self.setWindowTitle("Edit reason" if rc else "New reason")
+        self.setMinimumWidth(460)
+        lay = QVBoxLayout(self)
+        form = QFormLayout()
+        self.code = QLineEdit(rc.code if rc else "")
+        self.code.setPlaceholderText("Optional - made from the name, e.g. WATER_DAMAGE")
+        self.code.setEnabled(rc is None)
+        self.label_ = QLineEdit(rc.label if rc else "")
+        self.uses = {}
+        for col, text in (("for_adjustment", "Stock adjustments"), ("for_reversal", "Reversals"),
+                          ("for_return", "Returns"), ("for_discrepancy", "Delivery discrepancies")):
+            cb = QCheckBox(text)
+            cb.setChecked(bool(getattr(rc, col)) if rc else col == "for_adjustment")
+            self.uses[col] = cb
+        self.active = QCheckBox("Active (shown in pickers)")
+        self.active.setChecked(rc.is_active if rc else True)
+        self.active.setEnabled(not (rc and rc.is_system))
+        form.addRow("Code", self.code)
+        form.addRow("Name *", self.label_)
+        for i, cb in enumerate(self.uses.values()):
+            form.addRow("Used for" if i == 0 else "", cb)
+        form.addRow("", self.active)
+        lay.addLayout(form)
+        if rc and rc.is_system:
+            lay.addWidget(label("Used by the system - it can be renamed but not retired.", "Muted", wrap=True))
+        lay.addLayout(h(None, button("Cancel", self.reject), button("Save", self.save, primary=True)))
+
+    def save(self):
+        data = {"code": self.code.text(), "label": self.label_.text(), "is_active": self.active.isChecked(),
+                **{col: cb.isChecked() for col, cb in self.uses.items()}}
+        if self.rc:
+            data["sort_order"] = self.rc.sort_order
+        if run(self, self.app.services.reasons.save, self.rc.id if self.rc else None, data):
+            self.accept()

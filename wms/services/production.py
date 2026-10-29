@@ -102,7 +102,8 @@ class ProductionService(BaseService):
             order_id = order.id
         return self.get(order_id)
 
-    def reverse(self, order_id: int, reason: str, override_reason: str | None = None) -> ProductionOrder:
+    def reverse(self, order_id: int, reason: str, override_reason: str | None = None,
+                reason_code: str = "OTHER") -> ProductionOrder:
         self.require(P.PRODUCTION_POST)
         self.require(P.STOCK_ADJUST)
         reason = clean_str(reason, "reason", required=True)
@@ -114,9 +115,10 @@ class ProductionService(BaseService):
                 raise ValidationError("This production record has already been reversed.")
             engine = StockEngine(s, self.ctx)
             engine.reverse(s.get(StockMovement, order.output_movement_id), f"{order.order_number} reversed: {reason}",
-                           override_reason=override_reason)
+                           override_reason=override_reason, reason_code=reason_code)
             for line in order.lines:
-                engine.reverse(s.get(StockMovement, line.movement_id), f"{order.order_number} reversed: {reason}")
+                engine.reverse(s.get(StockMovement, line.movement_id), f"{order.order_number} reversed: {reason}",
+                               reason_code=reason_code)
             order.status = DocumentStatus.REVERSED.value
             order.reversed_at = utcnow()
             order.reversed_by_id = self.user.id

@@ -154,7 +154,8 @@ class GoodsInService(BaseService):
                 att_service.attach_staged(s, EntityType.DELIVERY_NOTE.value, dn.id, f)
             return dn.id
 
-    def reverse(self, dn_id: int, reason: str, override_reason: str | None = None) -> DeliveryNote:
+    def reverse(self, dn_id: int, reason: str, override_reason: str | None = None,
+                reason_code: str = "OTHER") -> DeliveryNote:
         self.require(P.GOODS_IN_REVERSE)
         reason = clean_str(reason, "reason", required=True)
         with self.db.session() as s:
@@ -166,7 +167,8 @@ class GoodsInService(BaseService):
             engine = StockEngine(s, self.ctx)
             for line in dn.lines:
                 mv = s.get(StockMovement, line.movement_id)
-                engine.reverse(mv, f"Delivery note {dn.dn_number} reversed: {reason}", override_reason=override_reason)
+                engine.reverse(mv, f"Delivery note {dn.dn_number} reversed: {reason}", override_reason=override_reason,
+                               reason_code=reason_code)
             dn.status = DocumentStatus.REVERSED.value
             dn.reversed_at = utcnow()
             dn.reversed_by_id = self.user.id

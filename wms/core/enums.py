@@ -44,6 +44,21 @@ class MovementType(LabelledEnum):
     PRODUCTION_OUTPUT = "PRODUCTION_OUTPUT"
     PRODUCTION_CONSUME = "PRODUCTION_CONSUME"
     OPENING_BALANCE = "OPENING_BALANCE"
+    STOCKTAKE_ADJUSTMENT = "STOCKTAKE_ADJUSTMENT"
+    # Never stored: a reversal keeps the type of the movement it reverses (so every "Goods Out"
+    # total nets off automatically) and is marked by reversal_of_id + a movement_reversals row.
+    # Used as a filter / display value only. See docs/STOCK_LEDGER.md.
+    REVERSAL = "REVERSAL"
+
+
+# Names used in the Phase 1 specification for the stored movement types above. Stored values
+# never change once data exists, so the specification names are aliases.
+MOVEMENT_TYPE_ALIASES = {
+    "BIN_TRANSFER": MovementType.TRANSFER,
+    "SITE_RETURN": MovementType.RETURN_FROM_SITE,
+    "SUPPLIER_RETURN": MovementType.RETURN_TO_SUPPLIER,
+    "PRODUCTION_CONSUMPTION": MovementType.PRODUCTION_CONSUME,
+}
 
 
 class DocumentStatus(LabelledEnum):
@@ -108,6 +123,14 @@ class AdjustmentReason(LabelledEnum):
     OTHER = "OTHER"
 
 
+class ReasonUse(LabelledEnum):
+    """Where a reason code may be chosen."""
+    ADJUSTMENT = "ADJUSTMENT"
+    REVERSAL = "REVERSAL"
+    RETURN = "RETURN"
+    DISCREPANCY = "DISCREPANCY"
+
+
 class AttachmentKind(LabelledEnum):
     PHOTO = "PHOTO"
     DOCUMENT = "DOCUMENT"
@@ -163,6 +186,8 @@ _LABELS = {
     MovementType.PRODUCTION_OUTPUT: "Finished Product Added",
     MovementType.PRODUCTION_CONSUME: "Consumed in Production",
     MovementType.OPENING_BALANCE: "Opening Balance",
+    MovementType.STOCKTAKE_ADJUSTMENT: "Stocktake Adjustment",
+    MovementType.REVERSAL: "Reversal",
     SiteStatus.ON_HOLD: "On Hold",
     FinishedStatus.IN_PRODUCTION: "In Production",
     FinishedStatus.ON_HOLD: "On Hold",

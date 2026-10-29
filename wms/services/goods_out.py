@@ -152,7 +152,7 @@ class GoodsOutService(BaseService):
             issue_id = issue.id
         return self.get(issue_id)
 
-    def reverse(self, issue_id: int, reason: str) -> GoodsIssue:
+    def reverse(self, issue_id: int, reason: str, reason_code: str = "OTHER") -> GoodsIssue:
         """Cancel an issue posted by mistake (material never left). Use Returns for material coming back."""
         self.require(P.GOODS_OUT_REVERSE)
         reason = clean_str(reason, "reason", required=True)
@@ -164,7 +164,8 @@ class GoodsOutService(BaseService):
                 raise ValidationError("This Goods Out has already been reversed.")
             engine = StockEngine(s, self.ctx)
             for line in issue.lines:
-                engine.reverse(s.get(StockMovement, line.movement_id), f"{issue.issue_number} reversed: {reason}")
+                engine.reverse(s.get(StockMovement, line.movement_id), f"{issue.issue_number} reversed: {reason}",
+                               reason_code=reason_code)
             issue.status = DocumentStatus.REVERSED.value
             issue.reversed_at = utcnow()
             issue.reversed_by_id = self.user.id

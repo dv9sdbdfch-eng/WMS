@@ -9,7 +9,15 @@ from decimal import Decimal
 from sqlalchemy import or_, select
 from sqlalchemy.orm import selectinload
 
-from wms.core.enums import AdjustmentReason, DocumentStatus, EntityType, MovementType, ReturnCondition, ReturnType
+from wms.core.enums import (
+    AdjustmentReason,
+    DocumentStatus,
+    EntityType,
+    MovementType,
+    ReasonUse,
+    ReturnCondition,
+    ReturnType,
+)
 from wms.core.exceptions import NotFoundError, ReturnExceedsIssuedError, ValidationError
 from wms.core.numbers import ZERO, to_qty, utcnow
 from wms.core.permissions import P
@@ -28,6 +36,7 @@ from wms.services import audit
 from wms.services.base import BaseService, check_client_token, clean_str, like_pattern
 from wms.services.goods_in import doc_datetime, validate_doc_date
 from wms.services.numbering import next_number
+from wms.services.reasons import require_reason
 from wms.services.stock_engine import StockEngine
 
 
@@ -127,7 +136,8 @@ class StockOpsService(BaseService):
             ret_id = ret.id
         return self.get_return(ret_id)
 
-    def reverse_return(self, return_id: int, reason: str, override_reason: str | None = None) -> StockReturn:
+    def reverse_return(self, return_id: int, reason: str, override_reason: str | None = None,
+                       reason_code: str = "OTHER") -> StockReturn:
         self.require(P.RETURNS_POST)
         self.require(P.STOCK_ADJUST)
         reason = clean_str(reason, "reason", required=True)
@@ -140,7 +150,7 @@ class StockOpsService(BaseService):
             engine = StockEngine(s, self.ctx)
             for line in ret.lines:
                 engine.reverse(s.get(StockMovement, line.movement_id), f"{ret.return_number} reversed: {reason}",
-                               override_reason=override_reason)
+                               override_reason=override_reason, reason_code=reason_code)
             ret.status = DocumentStatus.REVERSED.value
             ret.reversed_at = utcnow()
             ret.reversed_by_id = self.user.id
@@ -181,10 +191,7 @@ class StockOpsService(BaseService):
                expected_previous: Decimal | None = None, client_token: str | None = None) -> StockAdjustment:
         """Set the quantity of a product in a bin to what was physically counted."""
         self.require(P.STOCK_ADJUST)
-        try:
-            code = AdjustmentReason(reason_code).value
-        except ValueError:
-            raise ValidationError("Choose an adjustment reason.", "reason_code") from None
+        code = (reason_code or "").strip().upper()
         reason = clean_str(reason, "reason", required=True)
         new_qty = to_qty(new_qty, "new_quantity")
         if new_qty < ZERO:
@@ -197,8 +204,11 @@ class StockOpsService(BaseService):
 
     def adjust_in_session(self, s, product_id: int, bin_id: int, new_qty: Decimal, code: str, reason: str,
                           expected_previous: Decimal | None = None, client_token: str | None = None,
-                          ) -> StockAdjustment:
-        """Post one adjustment inside the caller's transaction (also used by stocktake approval)."""
+                          from_stocktake: bool = False) -> StockAdjustment:
+        """Post one adjustment inside the caller's transaction (also used by stocktake approval).
+
+        Stocktake approvals post STOCKTAKE_ADJUSTMENT movements; manual ones ADJUSTMENT_IN / _OUT."""
+        label = require_reason(s, code, ReasonUse.ADJUSTMENT).label
         check_client_token(s, StockAdjustment, client_token, "adjustment_number",
                            EntityType.ADJUSTMENT.value, "adjustment")
         product = s.get(Product, product_id)
@@ -222,20 +232,22 @@ class StockOpsService(BaseService):
         s.add(adj)
         s.flush()
         if diff > ZERO:
-            mtype = (MovementType.OPENING_BALANCE if code == AdjustmentReason.OPENING_BALANCE.value
+            mtype = (MovementType.STOCKTAKE_ADJUSTMENT if from_stocktake
+                     else MovementType.OPENING_BALANCE if code == AdjustmentReason.OPENING_BALANCE.value
                      else MovementType.ADJUSTMENT_IN)
             mv = engine.post(movement_type=mtype, product=product, quantity=diff, to_bin=b,
                              doc_type=EntityType.ADJUSTMENT.value, doc_id=adj.id, doc_number=number,
-                             notes=f"{AdjustmentReason(code).label}: {reason}")
+                             notes=f"{label}: {reason}")
         else:
             # Taking the bin down to new_qty >= 0 never goes negative, but the
             # balance may already be negative from an override - allow that path.
-            mv = engine.post(movement_type=MovementType.ADJUSTMENT_OUT, product=product, quantity=-diff,
+            mtype = MovementType.STOCKTAKE_ADJUSTMENT if from_stocktake else MovementType.ADJUSTMENT_OUT
+            mv = engine.post(movement_type=mtype, product=product, quantity=-diff,
                              from_bin=b, doc_type=EntityType.ADJUSTMENT.value, doc_id=adj.id, doc_number=number,
-                             notes=f"{AdjustmentReason(code).label}: {reason}")
+                             notes=f"{label}: {reason}")
         adj.movement_id = mv.id
         audit.record(s, self.ctx, "STOCK_ADJUSTED", "PRODUCT", product.id, f"{product.internal_code} @ {b.full_code}",
-                     f"{number}: {AdjustmentReason(code).label} - {reason}",
+                     f"{number}: {label} - {reason}",
                      old={"quantity": previous}, new={"quantity": new_qty, "difference": diff})
         return adj
 
@@ -300,7 +312,11 @@ class StockOpsService(BaseService):
                       selectinload(StockMovement.to_bin), selectinload(StockMovement.site),
                       selectinload(StockMovement.supplier), selectinload(StockMovement.user)))
         if movement_types:
-            q = q.where(StockMovement.movement_type.in_(movement_types))
+            types = [t for t in movement_types if t != MovementType.REVERSAL.value]
+            if MovementType.REVERSAL.value in movement_types:  # reversals keep their original type
+                q = q.where(or_(StockMovement.reversal_of_id.is_not(None), StockMovement.movement_type.in_(types)))
+            else:
+                q = q.where(StockMovement.movement_type.in_(types))
         if product_id:
             q = q.where(StockMovement.product_id == product_id)
         if site_id:

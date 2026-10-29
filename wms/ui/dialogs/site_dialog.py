@@ -114,7 +114,7 @@ class SiteDialog(QDialog):
         issued_by = {g.id: g.issued_by for g in app.services.goods_out.search(site_id=sid, limit=100000)}
         self.movements = DataTable([
             Col("Date", lambda m: m.occurred_at, DATETIME, 130),
-            Col("Type", lambda m: MovementType(m.movement_type).label + (" (reversal)" if m.reversal_of_id else ""),
+            Col("Type", lambda m: m.type_label,
                 width=170),
             Col("Code", lambda m: m.product_code, width=110),
             Col("Material", lambda m: m.product_name, width=220),

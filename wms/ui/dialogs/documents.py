@@ -19,7 +19,7 @@ from wms.ui.widgets.common import (
     QTY,
     Col,
     DataTable,
-    ask_text,
+    ask_reason,
     button,
     confirm,
     h,
@@ -69,6 +69,11 @@ def _print(parent, result):
         return
     QDesktopServices.openUrl(QUrl.fromLocalFile(str(out)))
 
+
+
+def _ask_reversal_reason(dlg, prompt: str) -> tuple[str, str] | None:
+    """Reason code + explanation for a reversal; stored with the reversal record."""
+    return ask_reason(dlg, "Reverse", prompt, dlg.app.services.reasons.choices("REVERSAL"))
 
 class DeliveryNoteDialog(QDialog):
     def __init__(self, app, dn_id: int, parent=None):
@@ -181,11 +186,11 @@ class DeliveryNoteDialog(QDialog):
                        f"Reverse delivery note {self.dn.dn_number}?\n\nAll {len(self.dn.lines)} line(s) will be taken "
                        f"back out of stock. The note stays on record marked REVERSED.", yes="Reverse", danger=True):
             return
-        reason = ask_text(self, "Reason", "Why is this delivery note being reversed?")
-        if not reason:
+        picked = _ask_reversal_reason(self, "Why is this delivery note being reversed?")
+        if not picked:
             return
         if run_with_override(self, self.app.can(P.STOCK_OVERRIDE_NEGATIVE), self.app.services.goods_in.reverse,
-                             dn_id=self.dn.id, reason=reason):
+                             dn_id=self.dn.id, reason_code=picked[0], reason=picked[1]):
             self.app.changed()
             self.accept()
 
@@ -238,8 +243,8 @@ class GoodsIssueDialog(QDialog):
                        "If material came back from site, record a Return instead.\n\nReverse it?",
                        yes="Reverse", danger=True):
             return
-        reason = ask_text(self, "Reason", "Why is this Goods Out being reversed?")
-        if reason and run(self, self.app.services.goods_out.reverse, self.gi.id, reason):
+        picked = _ask_reversal_reason(self, "Why is this Goods Out being reversed?")
+        if picked and run(self, self.app.services.goods_out.reverse, self.gi.id, picked[1], reason_code=picked[0]):
             self.app.changed()
             self.accept()
 
@@ -273,9 +278,10 @@ class ReturnDialog(QDialog):
         lay.addLayout(h(*buttons, None, button("Close", self.accept)))
 
     def reverse(self):
-        reason = ask_text(self, "Reverse return", "Why is this return being reversed?")
-        if reason and run_with_override(self, self.app.can(P.STOCK_OVERRIDE_NEGATIVE),
-                                        self.app.services.stock.reverse_return, return_id=self.r.id, reason=reason):
+        picked = _ask_reversal_reason(self, "Why is this return being reversed?")
+        if picked and run_with_override(self, self.app.can(P.STOCK_OVERRIDE_NEGATIVE),
+                                        self.app.services.stock.reverse_return, return_id=self.r.id,
+                                        reason_code=picked[0], reason=picked[1]):
             self.app.changed()
             self.accept()
 
@@ -311,9 +317,10 @@ class ProductionDialog(QDialog):
         lay.addLayout(h(*buttons, None, button("Close", self.accept)))
 
     def reverse(self):
-        reason = ask_text(self, "Reverse production", "Why is this production record being reversed?")
-        if reason and run_with_override(self, self.app.can(P.STOCK_OVERRIDE_NEGATIVE),
-                                        self.app.services.production.reverse, order_id=self.o.id, reason=reason):
+        picked = _ask_reversal_reason(self, "Why is this production record being reversed?")
+        if picked and run_with_override(self, self.app.can(P.STOCK_OVERRIDE_NEGATIVE),
+                                        self.app.services.production.reverse, order_id=self.o.id,
+                                        reason_code=picked[0], reason=picked[1]):
             self.app.changed()
             self.accept()
 
@@ -439,8 +446,7 @@ def _bin_history_columns() -> list[Col]:
     from wms.services.search import movement_reference
     return [Col("Date", lambda m: m.occurred_at, DATETIME, 130),
             Col("Product", lambda m: f"{m.product_code} - {m.product_name}", width=240),
-            Col("Movement", lambda m: MovementType(m.movement_type).label + (" (reversal)" if m.reversal_of_id
-                                                                              else ""), width=150),
+            Col("Movement", lambda m: m.type_label, width=150),
             Col("Qty", lambda m: m.quantity, QTY, 80),
             Col("From", lambda m: m.from_bin_code or m.supplier_label or m.site_label, width=200),
             Col("To", lambda m: m.to_bin_code or m.site_label or m.supplier_label, width=200),
