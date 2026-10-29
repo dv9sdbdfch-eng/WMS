@@ -54,6 +54,7 @@ class DashboardData:
     active_sites: list[Site] = field(default_factory=list)
     alerts: list[Alert] = field(default_factory=list)
     all_rows: list[ProductRow] = field(default_factory=list)
+    backup: object = None  # BackupHealth (SQLite only)
 
 
 class DashboardService(BaseService):
@@ -82,6 +83,12 @@ class DashboardService(BaseService):
             d.active_sites = list(s.scalars(select(Site).where(Site.status == SiteStatus.ACTIVE.value)
                                             .order_by(Site.project_number)))
             d.alerts = self._alerts(s, d)
+        if self.ctx.config.is_sqlite:
+            from wms.services.backup import BackupService
+            d.backup = BackupService(self.ctx).health()
+            if not d.backup.ok:  # spec 31: backup failure must never be silent
+                d.alerts.insert(0 if d.backup.state in ("FAILED", "NEVER", "STALE") else len(d.alerts),
+                                Alert("danger" if d.backup.state != "OK" else "warn", d.backup.message, "settings"))
         return d
 
     def _alerts(self, s, d: DashboardData) -> list[Alert]:

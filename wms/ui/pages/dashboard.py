@@ -37,6 +37,8 @@ class DashboardPage(Page):
         self.t_alerts.activated_item.connect(lambda a: self.main_window.go(a.page))
         self.t_alerts.setMaximumHeight(150)
         self.body.addWidget(self.t_alerts)
+        self.backup_line = label("", "Muted")
+        self.body.addWidget(self.backup_line)
 
         grid = QGridLayout()
         grid.setSpacing(14)
@@ -93,6 +95,10 @@ class DashboardPage(Page):
         self.t_low.set_items(d.low_stock)
         self.t_alerts.set_items(d.alerts)
         self.t_alerts.setVisible(bool(d.alerts))
+        if d.backup is not None:
+            self.backup_line.setText(f"Last successful backup: {d.backup.last_success_text}")
+            self.backup_line.setStyleSheet("" if d.backup.ok else "color: #B3261E; font-weight: bold;")
+        self.backup_line.setVisible(d.backup is not None)
         self.t_dn.set_items(d.recent_deliveries)
         self.t_go.set_items(d.recent_issues)
         self.t_mv.set_items(d.recent_movements)

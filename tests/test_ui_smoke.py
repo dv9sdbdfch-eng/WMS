@@ -741,3 +741,46 @@ def test_excel_import_wizard_and_exports(ui, sample, qtbot, tmp_path):
     ws = load_workbook(out).active
     assert ws.title == "History MDF-18" and ws["A5"].value == "Date / Time" and ws["C6"].value == "MDF-18"
     assert not _errors(msgs), msgs
+
+
+def test_backup_health_schedule_and_test_restore_on_screen(ui, sample, cfg, tmp_path):
+    """Stage 7 on screen: the Dashboard says when the last good backup was, the schedule makes one,
+    a failure is shown (never silent), and Settings can test-restore a backup."""
+    app, win, msgs, _ = ui
+    win.go("dashboard")
+    dash = win.page("dashboard")
+    dash.refresh()
+    assert dash.backup_line.text() == "Last successful backup: Never"
+    assert "No backup has been made yet" in dash.t_alerts.items()[0].text
+    path = win.scheduled_backup()
+    assert path is not None and path.name.endswith("_auto.zip")
+    dash.refresh()
+    assert dash.backup_line.text().startswith("Last successful backup: Today")
+    assert win.scheduled_backup() is None  # not due again yet
+
+    cfg.backup_dir = str(tmp_path / "file-in-the-way" / "x")
+    (tmp_path / "file-in-the-way").write_text("x")
+    import json
+    st = json.loads(app.services.backup.status_path.read_text())
+    st["last_success_at"] = "2020-01-01T00:00:00"
+    app.services.backup.status_path.write_text(json.dumps(st))
+    assert win.scheduled_backup() is None
+    assert any(title == "Automatic backup failed" for kind, title, _ in msgs if kind == "warning")
+    msgs.clear()
+    dash.refresh()
+    assert "FAILED" in dash.t_alerts.items()[0].text
+
+    cfg.backup_dir = str(tmp_path / "backups")
+    win.go("settings")
+    page = win.page("settings")
+    page.refresh()
+    assert "FAILED" in page.bk_health.text()
+    good = app.services.backup.create(note="for the test restore")
+    page.refresh()
+    assert page.bk_health.text().startswith("Last successful backup: Today")
+    page.bk_table.selectRow(0)
+    assert page.bk_table.current().path == good
+    result = page._test_restore()
+    assert result is not None and result.ok
+    assert any(title == "Test restore" and "OK - restorable" in text for _, title, text in msgs)
+    assert not _errors(msgs), msgs

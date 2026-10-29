@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMessageBox,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -222,12 +223,53 @@ class MainWindow(QMainWindow):
         if self.on_logout:
             self.on_logout(self)
 
+    # -- automatic backups ----------------------------------------------------
+    def start_backup_schedule(self) -> None:
+        """Backup at start-up if the last good one is older than the interval, then check every hour."""
+        if not self.app.ctx.config.auto_backup_hours or not self.app.ctx.config.is_sqlite:
+            return
+        self._backup_timer = QTimer(self)
+        self._backup_timer.setInterval(60 * 60 * 1000)
+        self._backup_timer.timeout.connect(self.scheduled_backup)
+        self._backup_timer.start()
+        QTimer.singleShot(5000, self.scheduled_backup)
+
+    def scheduled_backup(self):
+        """Never silent: a failure shows a warning (and stays on the Dashboard until a backup works)."""
+        svc = self.app.services.backup
+        try:
+            if not svc.is_due():
+                return None
+            self.statusBar().showMessage("Making the scheduled automatic backup...")
+            from PySide6.QtGui import QGuiApplication
+            QGuiApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            try:
+                path = svc.backup_if_due()
+            finally:
+                QGuiApplication.restoreOverrideCursor()
+        except Exception as exc:  # noqa: BLE001
+            self.statusBar().showMessage("Automatic backup FAILED")
+            QMessageBox.warning(self, "Automatic backup failed",
+                                f"The automatic backup did not work:\n\n{getattr(exc, 'message', exc)}\n\n"
+                                f"Your data is not damaged, but it is not protected either. Check the backup "
+                                f"folder in Settings > Backup and restore, then press 'Back up now'.")
+            self.app.changed()
+            return None
+        if path is not None:
+            self.statusBar().showMessage(f"Automatic backup made: {path.name}  -  {datetime.now():%H:%M}")
+            self.app.changed()
+        return path
+
     def closeEvent(self, event):  # noqa: N802
         cfg = self.app.ctx.config
         if cfg.auto_backup_on_exit and cfg.is_sqlite and not self.app.restart_required:
             try:
                 path = self.app.services.backup.create(note="Automatic backup on exit", automatic=True)
                 log.info("Automatic backup written to %s", path)
-            except Exception:  # noqa: BLE001 - never block closing the app
+            except Exception as exc:  # noqa: BLE001 - never block closing the app, but never hide it either
                 log.exception("Automatic backup failed")
+                QMessageBox.warning(self, "Automatic backup failed",
+                                    f"The backup made when the program closes did not work:\n\n"
+                                    f"{getattr(exc, 'message', exc)}\n\nThe program will still close. Next time, "
+                                    f"check Settings > Backup and restore.")
         super().closeEvent(event)

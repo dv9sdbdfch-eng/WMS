@@ -74,14 +74,24 @@ class SettingsPage(Page):
         self.keep.setValue(int(cfg.backups_to_keep))
         self.keep.setMaximumWidth(100)
         self.backup_dir = QLineEdit(str(cfg.backup_path))
+        self.auto_hours = QSpinBox()
+        self.auto_hours.setRange(0, 168)
+        self.auto_hours.setSuffix(" hours")
+        self.auto_hours.setSpecialValueText("Off")
+        self.auto_hours.setValue(int(cfg.auto_backup_hours or 0))
+        self.auto_hours.setMaximumWidth(120)
+        self.copy_dir = QLineEdit(cfg.backup_copy_dir or "")
+        self.copy_dir.setPlaceholderText("Optional: USB stick, network drive or OneDrive folder")
         self.max_mb = QSpinBox()
         self.max_mb.setRange(1, 200)
         self.max_mb.setValue(int(cfg.max_attachment_mb))
         self.max_mb.setMaximumWidth(100)
         form.addRow("Company name (shown on reports)", self.company)
         form.addRow("", self.auto_backup)
+        form.addRow("Automatic backup every", self.auto_hours)
         form.addRow("Automatic backups to keep", self.keep)
         form.addRow("Backup folder", h(self.backup_dir, button("Browse...", self._browse_backup)))
+        form.addRow("Second copy of every backup", h(self.copy_dir, button("Browse...", self._browse_copy)))
         form.addRow("Largest attachment (MB)", self.max_mb)
         form.addRow("Data folder", label(str(cfg.data_dir), "Muted"))
         form.addRow("Database", label(cfg.resolved_database_url if not cfg.is_sqlite else str(cfg.db_path), "Muted"))
@@ -100,9 +110,15 @@ class SettingsPage(Page):
         if d:
             self.backup_dir.setText(d)
 
+    def _browse_copy(self):
+        d = QFileDialog.getExistingDirectory(self, "Second backup folder", self.copy_dir.text())
+        if d:
+            self.copy_dir.setText(d)
+
     def _save_general(self):
         changes = {"company_name": self.company.text(), "auto_backup_on_exit": self.auto_backup.isChecked(),
-                   "backups_to_keep": self.keep.value(), "backup_dir": self.backup_dir.text().strip(),
+                   "auto_backup_hours": self.auto_hours.value(), "backups_to_keep": self.keep.value(),
+                   "backup_dir": self.backup_dir.text().strip(), "backup_copy_dir": self.copy_dir.text().strip(),
                    "max_attachment_mb": self.max_mb.value()}
         if run(self, self.app.services.settings.save_general, changes) is not None:
             info(self, "Settings", "Settings saved.")
@@ -222,8 +238,11 @@ class SettingsPage(Page):
         w = QWidget()
         lay = QVBoxLayout(w)
         lay.addWidget(label("A backup is one .zip file holding the database and every photo and scan. Automatic "
-                            "backups are made when the program closes; manual backups are never deleted.",
-                            "InfoBanner", wrap=True))
+                            "backups are made on the interval set under General and when the program closes; "
+                            "only the oldest automatic ones are removed. Manual backups and the copies made before "
+                            "an Excel import or a restore are never deleted.", "InfoBanner", wrap=True))
+        self.bk_health = label("", wrap=True)
+        lay.addWidget(self.bk_health)
         self.bk_table = DataTable([Col("Created", lambda b: b.created, DATETIME, 140),
                                    Col("File", lambda b: b.path.name, width=330),
                                    Col("Size", lambda b: _size(b.size_bytes), width=80),
@@ -233,7 +252,10 @@ class SettingsPage(Page):
         btns = []
         if self.app.can(P.BACKUP_RUN):
             btns += [button("Back up now", self._backup_now, primary=True),
-                     button("Back up to another folder...", self._backup_to)]
+                     button("Back up to another folder...", self._backup_to),
+                     button("Test restore selected", self._test_restore,
+                            tooltip="Restores the backup into a temporary folder and checks it - live data is "
+                                    "not touched")]
         btns.append(button("Open backup folder", lambda: _open_folder(self.app.ctx.config.backup_path)))
         btns.append(None)
         if self.app.can(P.BACKUP_RESTORE):
@@ -243,7 +265,23 @@ class SettingsPage(Page):
         return w
 
     def _load_backups(self):
-        self.bk_table.set_items(self.app.services.backup.list_backups())
+        svc = self.app.services.backup
+        self.bk_table.set_items(svc.list_backups())
+        if self.app.ctx.config.is_sqlite:
+            health = svc.health()
+            self.bk_health.setText(health.message if not health.ok
+                                   else f"Last successful backup: {health.last_success_text}  ({health.last_file})")
+            self.bk_health.setStyleSheet("" if health.ok else "color: #B3261E; font-weight: bold;")
+
+    def _test_restore(self):
+        b = self.bk_table.current()
+        if b is None:
+            info(self, "Test restore", "Select a backup in the list first.")
+            return None
+        result = run(self, self.app.services.backup.test_restore, b.path)
+        if result is not None:
+            info(self, "Test restore", result.summary)
+        return result
 
     def _backup_now(self, destination=None):
         from wms.ui.widgets.common import ask_text
@@ -251,8 +289,8 @@ class SettingsPage(Page):
         if note is None:
             return
         path = run(self, self.app.services.backup.create, note, destination)
+        self._load_backups()  # also after a failure: the warning shows here and on the Dashboard
         if path:
-            self._load_backups()
             info(self, "Backup complete", f"Backup saved:\n{path}")
 
     def _backup_to(self):

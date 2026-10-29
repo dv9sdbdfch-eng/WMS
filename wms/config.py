@@ -51,7 +51,11 @@ class AppConfig:
     attachments_dir: str = ""
     backup_dir: str = ""
     auto_backup_on_exit: bool = True
+    # Automatic backup while the program is open / when it starts, if the last good one is older (0 = off).
+    auto_backup_hours: int = 24
     backups_to_keep: int = 30
+    # Optional second folder (USB stick, network drive, OneDrive) that gets a copy of every backup.
+    backup_copy_dir: str = ""
     company_name: str = "My Company Ltd"
     max_attachment_mb: int = 25
     extra: dict = field(default_factory=dict)

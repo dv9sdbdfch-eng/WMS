@@ -29,10 +29,15 @@ from wms.db.models import (
     GoodsIssue,
     GoodsIssueLine,
     Product,
+    Site,
     StockLevel,
+    StockMovement,
     StockReturn,
     Supplier,
+    Unit,
+    User,
 )
+from wms.db.models.stock import site_label
 from wms.services.base import BaseService, prefix_pattern
 from wms.services.products import ProductService
 from wms.services.sites import SITE_MOVEMENTS
@@ -96,11 +101,25 @@ def _in_range(d: date | None, f: ReportFilters) -> bool:
     return True
 
 
-def _line_value(line, status: str) -> Decimal | None:
-    """Value of a document line; reversed documents count as nothing so totals match stock."""
+def _value(quantity: Decimal, unit_cost: Decimal | None, status: str) -> Decimal | None:
     if status != DocumentStatus.POSTED.value:
         return None
-    return ((line.unit_cost or ZERO) * line.quantity).quantize(Decimal("0.01"))
+    return ((unit_cost or ZERO) * quantity).quantize(Decimal("0.01"))
+
+
+def _line_history_columns(line, movement) -> tuple:
+    """Columns ``_line_history`` needs: the line's live product and bin, and its movement's snapshot."""
+    return (line.bin_id, movement.id, movement.product_code_snapshot, Product.internal_code,
+            movement.product_name_snapshot, Product.name, movement.from_bin_id, movement.from_bin_name_snapshot,
+            movement.to_bin_id, movement.to_bin_name_snapshot, Bin.full_code)
+
+
+def _line_history(bin_id, movement_id, pc_s, pc, pn_s, pn, fb_id, fb_s, tb_id, tb_s, bin_code) -> tuple:
+    """Code, name and bin of a document line as recorded when it was posted (same rule as _LineHistory)."""
+    if movement_id is None:
+        return pc, pn, bin_code
+    snap = fb_s if bin_id == fb_id else tb_s if bin_id == tb_id else None
+    return pc_s or pc, pn_s or pn, snap or bin_code
 
 
 def _local_date(dt) -> date:
@@ -186,72 +205,89 @@ class ReportService(BaseService):
         return ReportResult("Products", cols, data, f"{scope} - {len(data)} product(s)")
 
     def goods_in(self, f: ReportFilters) -> ReportResult:
-        q = (select(DeliveryNoteLine, DeliveryNote).join(DeliveryNote)
-             .order_by(DeliveryNote.delivery_date.desc(), DeliveryNote.id.desc(), DeliveryNoteLine.line_no))
+        # Plain columns, not database objects: 50,000 lines in about a second instead of ten.
+        dn, ln, mv = DeliveryNote, DeliveryNoteLine, StockMovement
+        q = (select(dn.delivery_date, dn.dn_number, dn.supplier_name_snapshot, Supplier.name, dn.status,
+                    User.full_name, ln.quantity, ln.unit_cost, Unit.code, *_line_history_columns(ln, mv))
+             .join(dn, dn.id == ln.delivery_note_id).join(Supplier, Supplier.id == dn.supplier_id)
+             .join(User, User.id == dn.received_by_id)
+             .join(Product, Product.id == ln.product_id).join(Unit, Unit.id == Product.unit_id)
+             .join(Bin, Bin.id == ln.bin_id).outerjoin(mv, mv.id == ln.movement_id)
+             .order_by(dn.delivery_date.desc(), dn.id.desc(), ln.line_no))
         if f.supplier_id:
-            q = q.where(DeliveryNote.supplier_id == f.supplier_id)
+            q = q.where(dn.supplier_id == f.supplier_id)
         if f.product_id:
-            q = q.where(DeliveryNoteLine.product_id == f.product_id)
+            q = q.where(ln.product_id == f.product_id)
         if f.date_from:
-            q = q.where(DeliveryNote.delivery_date >= f.date_from)
+            q = q.where(dn.delivery_date >= f.date_from)
         if f.date_to:
-            q = q.where(DeliveryNote.delivery_date <= f.date_to)
+            q = q.where(dn.delivery_date <= f.date_to)
         cols = [Column("Date", DATE), Column("Delivery Note"), Column("Supplier"), Column("Code"), Column("Product"),
                 Column("Quantity", QTY), Column("Unit"), Column("Bin"), Column("Unit Cost", MONEY),
                 Column("Value", MONEY, True), Column("Status"), Column("Received By")]
+        data = []
         with self.db.read_session() as s:
-            data = [[dn.delivery_date, dn.dn_number, dn.supplier_label, l.product_code, l.product_name,
-                     l.quantity, l.product.unit.code, l.bin_code, l.unit_cost,
-                     _line_value(l, dn.status), dn.status.title(),
-                     dn.received_by.full_name] for l, dn in s.execute(q)]
+            for when, number, sup_s, sup, status, user, qty, cost, unit, *hist in s.execute(q):
+                code, name, bin_code = _line_history(*hist)
+                data.append([when, number, sup_s or sup, code, name, qty, unit, bin_code, cost,
+                             _value(qty, cost, status), status.title(), user])
         return ReportResult("Goods In", cols, data)
 
     def goods_out(self, f: ReportFilters) -> ReportResult:
-        q = (select(GoodsIssueLine, GoodsIssue).join(GoodsIssue)
-             .order_by(GoodsIssue.issue_date.desc(), GoodsIssue.id.desc(), GoodsIssueLine.line_no))
+        gi, ln, mv = GoodsIssue, GoodsIssueLine, StockMovement
+        q = (select(gi.issue_date, gi.issue_number, gi.site_number_snapshot, gi.site_name_snapshot,
+                    Site.project_number, Site.name, gi.reference, gi.requested_by, gi.issued_by, gi.status,
+                    ln.quantity, ln.unit_cost, Unit.code, *_line_history_columns(ln, mv))
+             .join(gi, gi.id == ln.issue_id).join(Site, Site.id == gi.site_id)
+             .join(Product, Product.id == ln.product_id).join(Unit, Unit.id == Product.unit_id)
+             .join(Bin, Bin.id == ln.bin_id).outerjoin(mv, mv.id == ln.movement_id)
+             .order_by(gi.issue_date.desc(), gi.id.desc(), ln.line_no))
         if f.site_id:
-            q = q.where(GoodsIssue.site_id == f.site_id)
+            q = q.where(gi.site_id == f.site_id)
         if f.product_id:
-            q = q.where(GoodsIssueLine.product_id == f.product_id)
+            q = q.where(ln.product_id == f.product_id)
         if f.date_from:
-            q = q.where(GoodsIssue.issue_date >= f.date_from)
+            q = q.where(gi.issue_date >= f.date_from)
         if f.date_to:
-            q = q.where(GoodsIssue.issue_date <= f.date_to)
+            q = q.where(gi.issue_date <= f.date_to)
         cols = [Column("Date", DATE), Column("Goods Out No."), Column("Site / Project"), Column("Reference"),
                 Column("Code"), Column("Product"), Column("Quantity", QTY), Column("Unit"), Column("From Bin"),
                 Column("Value", MONEY, True), Column("Requested By"), Column("Issued By"), Column("Status")]
+        data = []
         with self.db.read_session() as s:
-            data = [[gi.issue_date, gi.issue_number, gi.site_label, gi.reference or "", l.product_code,
-                     l.product_name, l.quantity, l.product.unit.code, l.bin_code,
-                     _line_value(l, gi.status), gi.requested_by or "",
-                     gi.issued_by, gi.status.title()] for l, gi in s.execute(q)]
+            for (when, number, sn_s, sname_s, sn, sname, ref, requested, issued, status, qty, cost, unit,
+                 *hist) in s.execute(q):
+                site = site_label(sn_s, sname_s) if (sn_s or sname_s) else f"{sn} - {sname}"
+                code, name, bin_code = _line_history(*hist)
+                data.append([when, number, site, ref or "", code, name, qty, unit, bin_code,
+                             _value(qty, cost, status), requested or "", issued, status.title()])
         return ReportResult("Goods Out", cols, data)
 
     def movements(self, f: ReportFilters) -> ReportResult:
-        rows = StockOpsService(self.ctx).movements(text=f.text, product_id=f.product_id, site_id=f.site_id,
-                                                   supplier_id=f.supplier_id, date_from=f.date_from,
-                                                   date_to=f.date_to, limit=None)
+        rows = StockOpsService(self.ctx).movement_lines(text=f.text, product_id=f.product_id, site_id=f.site_id,
+                                                        supplier_id=f.supplier_id, date_from=f.date_from,
+                                                        date_to=f.date_to)
         cols = [Column("Date / Time", DATETIME), Column("Type"), Column("Code"), Column("Product"),
                 Column("Quantity", QTY), Column("Unit"), Column("From"), Column("To"), Column("Site / Project"),
                 Column("Supplier"), Column("Document"), Column("Reference"), Column("User"), Column("Notes")]
         # Names as recorded at the time: bins, projects and products removed or renamed since still show.
-        data = [[m.occurred_at, MovementType(m.movement_type).label, m.product_code, m.product_name,
-                 m.quantity, m.product.unit.code, m.from_bin_code, m.to_bin_code, m.site_label,
+        data = [[m.occurred_at, m.type_label, m.product_code, m.product_name,
+                 m.quantity, m.unit_code, m.from_bin_code, m.to_bin_code, m.site_label,
                  m.supplier_label, m.doc_number or "", m.reference or "", m.user_label, m.notes or ""]
                 for m in rows]
         return ReportResult("Stock Movement History", cols, data)
 
     def stock_by_site(self, f: ReportFilters) -> ReportResult:
-        rows = StockOpsService(self.ctx).movements(site_id=f.site_id, product_id=f.product_id,
-                                                   movement_types=list(SITE_MOVEMENTS), date_from=f.date_from,
-                                                   date_to=f.date_to, limit=None)
+        rows = StockOpsService(self.ctx).movement_lines(site_id=f.site_id, product_id=f.product_id,
+                                                        movement_types=list(SITE_MOVEMENTS), date_from=f.date_from,
+                                                        date_to=f.date_to)
         agg: dict[tuple[int, int], list] = {}
         for m in rows:
             if m.site_id is None:
                 continue
             key = (m.site_id, m.product_id)
             r = agg.setdefault(key, [m.site_label, m.product_code, m.product_name, ZERO, ZERO,
-                                     m.product.unit.code, ZERO])
+                                     m.unit_code, ZERO])
             sign = 1 if m.from_bin_id else -1
             cost = m.unit_cost or ZERO
             if m.movement_type == MovementType.GOODS_OUT.value:
@@ -269,9 +305,9 @@ class ReportService(BaseService):
 
     def project_history(self, f: ReportFilters) -> ReportResult:
         """Every material movement to and from a site: what, how much, when, which document, who."""
-        rows = StockOpsService(self.ctx).movements(site_id=f.site_id, product_id=f.product_id,
-                                                   movement_types=list(SITE_MOVEMENTS), date_from=f.date_from,
-                                                   date_to=f.date_to, limit=None)
+        rows = StockOpsService(self.ctx).movement_lines(site_id=f.site_id, product_id=f.product_id,
+                                                        movement_types=list(SITE_MOVEMENTS), date_from=f.date_from,
+                                                        date_to=f.date_to)
         cols = [Column("Date", DATETIME), Column("Site / Project"), Column("Document"), Column("Type"),
                 Column("Code"), Column("Material"), Column("Issued", QTY, True), Column("Returned", QTY, True),
                 Column("Unit"), Column("Bin"), Column("Reference"), Column("User"), Column("Notes")]
@@ -283,7 +319,7 @@ class ReportService(BaseService):
             label = m.type_label
             data.append([m.occurred_at, m.site_label, m.doc_number or "", label,
                          m.product_code, m.product_name, qty if is_issue else None,
-                         None if is_issue else -qty, m.product.unit.code,
+                         None if is_issue else -qty, m.unit_code,
                          m.from_bin_code or m.to_bin_code, m.reference or "", m.user_label, m.notes or ""])
         return ReportResult("Project Material History", cols, data)
 

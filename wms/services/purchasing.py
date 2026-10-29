@@ -487,7 +487,7 @@ class PurchasingService(BaseService):
     def list(self, text: str | None = None, status: str | None = None, supplier_id: int | None = None,
              open_only: bool = False, date_from: date | None = None, date_to: date | None = None,
              limit: int = 2000) -> list[PORow]:
-        q = (select(PurchaseOrder).options(selectinload(PurchaseOrder.lines))
+        q = (select(PurchaseOrder).options(selectinload(PurchaseOrder.lines).lazyload(PurchaseOrderLine.product))
              .order_by(PurchaseOrder.order_date.desc(), PurchaseOrder.id.desc()).limit(limit))
         if status:
             q = q.where(PurchaseOrder.status == status)

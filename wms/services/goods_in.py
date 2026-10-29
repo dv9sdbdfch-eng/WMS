@@ -235,7 +235,8 @@ class GoodsInService(BaseService):
             .group_by(DeliveryNote.id)
             .order_by(DeliveryNote.delivery_date.desc(), DeliveryNote.id.desc())
             .limit(limit)
-            .options(selectinload(DeliveryNote.lines))
+            # Lines only for the count and value: not each line's product (10 joined tables per line).
+            .options(selectinload(DeliveryNote.lines).lazyload(DeliveryNoteLine.product))
         )
         if supplier_id:
             q = q.where(DeliveryNote.supplier_id == supplier_id)
