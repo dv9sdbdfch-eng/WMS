@@ -103,6 +103,8 @@ class GoodsOutService(BaseService):
             s.flush()
             engine = StockEngine(s, self.ctx)
             when = doc_datetime(issue_date)
+            from wms.services.reservations import Issuing, refresh_statuses
+            issuing = Issuing(s, site.id)
             line_no = 0
             for i, ln in enumerate(lines, start=1):
                 product = s.get(Product, ln.product_id)
@@ -141,14 +143,16 @@ class GoodsOutService(BaseService):
                     line_no += 1
                     issue.lines.append(GoodsIssueLine(line_no=line_no, product_id=product.id, quantity=take,
                                                       unit_cost=product.unit_cost, bin_id=b.id,
-                                                      notes=clean_str(ln.notes), movement_id=mv.id))
+                                                      notes=clean_str(ln.notes), movement_id=mv.id,
+                                                      reservation_id=issuing.reservation_for(product.id, take)))
             s.flush()
+            refresh_statuses(s, self.ctx, issuing.touched, f"Issued on {issue.issue_number}.")
             audit.record(s, self.ctx, "GOODS_OUT_POSTED", EntityType.GOODS_ISSUE.value, issue.id,
                          f"{issue.issue_number} to {site.project_number}", f"{line_no} line(s) issued.",
                          new={"site": site.display, "reference": issue.reference, "requested_by": issue.requested_by,
                               "issued_by": issued_by,
-                              "lines": [{"product_id": l.product_id, "qty": l.quantity, "bin_id": l.bin_id}
-                                        for l in issue.lines]})
+                              "lines": [{"product_id": l.product_id, "qty": l.quantity, "bin_id": l.bin_id,
+                                         "reservation_id": l.reservation_id} for l in issue.lines]})
             issue_id = issue.id
         return self.get(issue_id)
 
@@ -170,6 +174,9 @@ class GoodsOutService(BaseService):
             issue.reversed_at = utcnow()
             issue.reversed_by_id = self.user.id
             issue.reversal_reason = reason
+            from wms.services.reservations import refresh_statuses
+            refresh_statuses(s, self.ctx, sorted({l.reservation_id for l in issue.lines if l.reservation_id}),
+                             f"{issue.issue_number} reversed.")
             audit.record(s, self.ctx, "GOODS_OUT_REVERSED", EntityType.GOODS_ISSUE.value, issue.id,
                          issue.issue_number, reason, old={"status": "POSTED"}, new={"status": "REVERSED"})
         return self.get(issue_id)

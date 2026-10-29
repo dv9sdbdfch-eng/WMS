@@ -53,12 +53,14 @@ class DashboardData:
     recent_movements: list[StockMovement] = field(default_factory=list)
     active_sites: list[Site] = field(default_factory=list)
     alerts: list[Alert] = field(default_factory=list)
+    all_rows: list[ProductRow] = field(default_factory=list)
 
 
 class DashboardService(BaseService):
     def load(self) -> DashboardData:
         d = DashboardData()
         rows = ProductService(self.ctx).list()
+        d.all_rows = rows
         d.total_products = len(rows)
         d.products_in_stock = sum(1 for r in rows if r.on_hand > ZERO)
         d.stock_value = sum((r.stock_value for r in rows if r.on_hand > ZERO), ZERO)
@@ -93,8 +95,12 @@ class DashboardService(BaseService):
         if n_out:
             out.append(Alert("danger", f"{n_out} product(s) with a minimum level are out of stock.", "low_stock"))
         if len(d.low_stock) > n_out:
-            out.append(Alert("warn", f"{len(d.low_stock) - n_out} product(s) are at or below their minimum level.",
-                             "low_stock"))
+            out.append(Alert("warn", f"{len(d.low_stock) - n_out} product(s) need reordering (at or below their "
+                                     f"minimum or reorder level).", "low_stock"))
+        over = [r for r in d.all_rows if r.reserved > ZERO and r.available < ZERO]
+        if over:
+            out.append(Alert("danger", f"{len(over)} product(s) have more reserved for projects than is in stock - "
+                                       f"check the reservations.", "reservations"))
         waiting = s.scalar(select(func.count(StockCount.id)).where(
             StockCount.status == CountStatus.SUBMITTED.value)) or 0
         if waiting:

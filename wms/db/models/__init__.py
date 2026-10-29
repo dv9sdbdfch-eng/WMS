@@ -18,6 +18,7 @@ from wms.db.models.locations import Bin, Location
 from wms.db.models.products import BomItem, FinishedProductInfo, Product
 from wms.db.models.purchasing import DeliveryDiscrepancy, PurchaseOrder, PurchaseOrderLine
 from wms.db.models.reference import Category, ReasonCode, Supplier, Unit
+from wms.db.models.reservations import StockReservation
 from wms.db.models.sites import Site
 from wms.db.models.stock import MovementReversal, StockLevel, StockMovement
 from wms.db.models.system import Attachment, AuditLog, NumberSequence, RecentSearch, SavedSearch, Setting
@@ -56,6 +57,7 @@ __all__ = [
     "StockCountLine",
     "StockLevel",
     "StockMovement",
+    "StockReservation",
     "StockReturn",
     "StockTransfer",
     "Supplier",

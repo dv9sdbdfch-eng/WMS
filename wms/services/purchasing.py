@@ -562,6 +562,39 @@ class PurchasingService(BaseService):
                     out[product_id] = out.get(product_id, ZERO) + left
             return out
 
+    def draft_from_reorder(self, product_ids: list[int]) -> tuple[list[PurchaseOrder], list[str]]:
+        """Suggested orders for the Reorder Required list: one DRAFT purchase order per preferred
+        supplier with the suggested quantities. Nothing is sent - the drafts are checked and placed
+        by hand. Returns (drafts, products skipped with the reason)."""
+        self.require(P.PURCHASING_EDIT)
+        from wms.services.products import ProductService
+        rows = {r.product.id: r for r in ProductService(self.ctx).list() if r.product.id in set(product_ids)}
+        with self.db.read_session() as s:
+            in_draft = dict(s.execute(select(PurchaseOrderLine.product_id, PurchaseOrder.po_number)
+                                      .join(PurchaseOrder)
+                                      .where(PurchaseOrder.status == POStatus.DRAFT.value)).all())
+        by_supplier: dict[int, list[POLineInput]] = {}
+        skipped = []
+        for pid in product_ids:
+            r = rows.get(pid)
+            if r is None:
+                continue
+            code = r.product.internal_code
+            if not r.product.supplier_id:
+                skipped.append(f"{code}: no supplier set on the product")
+            elif pid in in_draft:
+                skipped.append(f"{code}: already on draft order {in_draft[pid]}")
+            elif r.shortfall <= ZERO:
+                skipped.append(f"{code}: enough already on order")
+            else:
+                qty = r.shortfall
+                if not r.product.unit.allow_decimal:
+                    qty = qty.to_integral_value(rounding="ROUND_CEILING")
+                by_supplier.setdefault(r.product.supplier_id, []).append(POLineInput(pid, qty))
+        drafts = [self.save(None, {"supplier_id": sid, "notes": "Suggested from the Reorder Required list."}, lines)
+                  for sid, lines in by_supplier.items()]
+        return drafts, skipped
+
     def overdue(self) -> list[PORow]:
         return [r for r in self.list(open_only=True) if r.is_overdue]
 

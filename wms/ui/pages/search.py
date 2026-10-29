@@ -85,7 +85,7 @@ def product_result_columns() -> list[Col]:
 def _status_text(r) -> str:
     if not r.product.is_active:
         return "Archived"
-    return {"OK": "In Stock", "LOW": "Low Stock", "OUT": "Out of Stock"}.get(
+    return {"OK": "In Stock", "LOW": "Low Stock", "REORDER": "Reorder", "OUT": "Out of Stock"}.get(
         r.status.value, "In Stock" if r.on_hand > 0 else "Out of Stock")
 
 

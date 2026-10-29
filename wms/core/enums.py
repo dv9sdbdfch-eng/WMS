@@ -78,6 +78,12 @@ class POStatus(LabelledEnum):
 OPEN_PO_STATUSES = (POStatus.ORDERED.value, POStatus.PARTIALLY_RECEIVED.value)
 
 
+class ReservationStatus(LabelledEnum):
+    ACTIVE = "ACTIVE"
+    FULFILLED = "FULFILLED"
+    RELEASED = "RELEASED"
+
+
 class DiscrepancyStatus(LabelledEnum):
     OPEN = "OPEN"
     RESOLVED = "RESOLVED"
@@ -94,6 +100,7 @@ class StockStatus(LabelledEnum):
     OK = "OK"
     LOW = "LOW"
     OUT = "OUT"
+    REORDER = "REORDER"  # at or below the reorder level, above the minimum
     NO_MINIMUM = "NO_MINIMUM"
 
 
@@ -165,6 +172,7 @@ class EntityType(LabelledEnum):
     STOCK_COUNT = "STOCK_COUNT"
     PURCHASE_ORDER = "PURCHASE_ORDER"
     DISCREPANCY = "DISCREPANCY"
+    RESERVATION = "RESERVATION"
     SUPPLIER = "SUPPLIER"
     CATEGORY = "CATEGORY"
     UNIT = "UNIT"
@@ -220,5 +228,6 @@ _LABELS = {
     CountStatus.SUBMITTED: "Awaiting Approval",
     StockStatus.OUT: "Out of Stock",
     StockStatus.NO_MINIMUM: "No Minimum Set",
+    StockStatus.REORDER: "Reorder Required",
     EntityType.DELIVERY_NOTE: "Delivery Note",
 }

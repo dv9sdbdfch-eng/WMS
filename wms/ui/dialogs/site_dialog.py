@@ -63,6 +63,8 @@ class SiteDialog(QDialog):
                 self.tabs.setCurrentWidget(self.summary_tab)
             elif tab == "history":
                 self.tabs.setCurrentWidget(self.history_tab)
+            elif tab == "reservations":
+                self.tabs.setCurrentWidget(self.reservations)
         self.btn_save = button("Save", self.save, primary=True, shortcut="Ctrl+S")
         self.btn_save.setVisible(self.can_edit)
         extra = []
@@ -154,6 +156,9 @@ class SiteDialog(QDialog):
                               lambda: self.tabs.setCurrentWidget(self.history_tab))))
         self.tabs.insertTab(1, sw, "Material Summary")
         self.summary_tab = sw
+        from wms.ui.dialogs.reservations import ReservationsPanel
+        self.reservations = ReservationsPanel(app, site_id=sid)
+        self.tabs.insertTab(2, self.reservations, "Reservations")
         if app.can(P.AUDIT_VIEW):
             at = DataTable([Col("When", lambda a: a.occurred_at, DATETIME, 130),
                             Col("User", lambda a: a.username, width=100),

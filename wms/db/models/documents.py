@@ -163,6 +163,7 @@ class GoodsIssueLine(_LineHistory, IdMixin, Base):
     bin_id: Mapped[int] = fk("bins.id", nullable=False)
     notes: Mapped[str | None] = mapped_column(Text)
     movement_id: Mapped[int | None] = fk("stock_movements.id")
+    reservation_id: Mapped[int | None] = fk("stock_reservations.id")  # reservation this line delivers (1.7)
 
     issue: Mapped[GoodsIssue] = relationship(back_populates="lines")
     product = relationship("Product", lazy="joined")

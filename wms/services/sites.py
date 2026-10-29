@@ -152,6 +152,9 @@ class SiteService(BaseService):
             site.status = status
             if status == SiteStatus.COMPLETED.value and site.end_date is None:
                 site.end_date = date.today()
+            if status not in OPEN_SITE_STATUSES:
+                from wms.services.reservations import release_for_closed_site
+                release_for_closed_site(s, self.ctx, site)
             s.flush()
             if status == SiteStatus.ARCHIVED.value:
                 plan = self._plan(s, site)
