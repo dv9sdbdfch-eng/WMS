@@ -62,12 +62,14 @@ Protected tables (database triggers, see `wms.db.engine`):
 | is_available | Boolean | no |  |
 | full_code | String(450) | no | UNIQUE |
 | notes | Text | yes |  |
+| barcode | String(80) | yes |  |
 | id | Integer | no | PK |
 | created_at | UTCDateTime | no |  |
 | updated_at | UTCDateTime | no |  |
 | is_active | Boolean | no |  |
 
 * UNIQUE (location_id, code)
+* UNIQUE INDEX uq_bins_barcode (barcode)
 
 ## bom_items
 
@@ -499,6 +501,7 @@ Protected tables (database triggers, see `wms.db.engine`):
 | supplier_id | Integer | yes | FK suppliers.id, indexed |
 | reference | String(80) | yes | indexed |
 | reason | Text | yes |  |
+| reason_code | String(30) | yes |  |
 | user_id | Integer | no | FK users.id, indexed |
 | reversed_by_id | Integer | yes | FK users.id, indexed |
 | supplier_name_snapshot | String(200) | yes |  |

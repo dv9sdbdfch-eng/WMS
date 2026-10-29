@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
 from wms.core.enums import LocationKind
 from wms.core.permissions import P
 from wms.ui.pages.base import Page
-from wms.ui.widgets.common import Col, DataTable, PickCombo, button, h, info, label, run
+from wms.ui.widgets.common import Col, DataTable, PickCombo, button, confirm, h, info, label, run
 
 
 class LocationDialog(QDialog):
@@ -88,6 +88,8 @@ class BinDialog(QDialog):
         self.code = QLineEdit()
         self.code.setPlaceholderText("e.g. B04")
         self.description = QLineEdit()
+        self.barcode = QLineEdit()
+        self.barcode.setPlaceholderText("Optional - scan an existing label; empty = the label uses the bin's full code")
         self.available = QCheckBox("Stock in this bin can be issued (untick for quarantine / damaged goods)")
         self.available.setChecked(True)
         self.active = QCheckBox("Active")
@@ -97,6 +99,7 @@ class BinDialog(QDialog):
         form.addRow("Location *", self.location)
         form.addRow("Bin code *", self.code)
         form.addRow("Description", self.description)
+        form.addRow("Barcode / QR", self.barcode)
         form.addRow("", self.available)
         form.addRow("", self.active)
         form.addRow("Notes", self.notes)
@@ -106,6 +109,7 @@ class BinDialog(QDialog):
             self.location.set_value(b.location_id)
             self.code.setText(b.code)
             self.description.setText(b.description or "")
+            self.barcode.setText(b.barcode or "")
             self.available.setChecked(b.is_available)
             self.active.setChecked(b.is_active)
             self.notes.setPlainText(b.notes or "")
@@ -114,7 +118,8 @@ class BinDialog(QDialog):
 
     def save(self):
         data = {"location_id": self.location.value(), "code": self.code.text(),
-                "description": self.description.text(), "is_available": self.available.isChecked(),
+                "description": self.description.text(), "barcode": self.barcode.text(),
+                "is_available": self.available.isChecked(),
                 "is_active": self.active.isChecked(), "notes": self.notes.toPlainText()}
         if run(self, self.app.services.locations.save_bin, self.b.id if self.b else None, data):
             self.accept()
@@ -204,13 +209,15 @@ class LocationsPage(Page):
         self.bins = DataTable([Col("Bin", lambda b: b.full_code, width=300),
                                Col("Code", lambda b: b.code, width=80),
                                Col("Description", lambda b: b.description or "", width=200),
+                               Col("Barcode", lambda b: b.barcode or "", width=120),
                                Col("Issuable", lambda b: "Yes" if b.is_available else "No - quarantine", width=120),
                                Col("Status", lambda b: "Active" if b.is_active else "Archived", width=80),
                                Col("Notes", lambda b: b.notes or "")])
         self.bins.set_row_style(lambda b: "muted" if not b.is_active else ("low" if not b.is_available else None))
         self.bins.activated_item.connect(self.open_bin)
         rl.addWidget(self.bins, 1)
-        rb = [label("", "Muted"), None, button("Contents", lambda: self.open_bin(self.bins.current()))]
+        rb = [label("", "Muted"), None, button("Contents", lambda: self.open_bin(self.bins.current())),
+              button("Print labels", self.print_labels)]
         self.bin_count = rb[0]
         if self.can_edit:
             rb.append(button("Edit bin", self.edit_bin))
@@ -253,6 +260,14 @@ class LocationsPage(Page):
         self.bins.set_items(bins)
         self.bins_title.setText(f"Bins in {self._locs[loc_id].path}" if loc_id in self._locs else "All bins")
         self.bin_count.setText(f"{len(bins)} bin(s)")
+
+    def print_labels(self):
+        """Labels for every bin in the list (choose a location on the left to narrow it)."""
+        from wms.ui.dialogs.documents import print_bin_labels
+        bins = [b for b in self.bins.items() if b.is_active]
+        if bins and confirm(self, "Print labels", f"Make labels for {len(bins)} bin(s) shown in the list?",
+                            yes="Make labels"):
+            print_bin_labels(self, self.app, [b.id for b in bins])
 
     def open_bin(self, b):
         if b is not None:

@@ -209,12 +209,16 @@ class ReturnEntryDialog(QDialog):
         self.supplier.set_options(app.supplier_options())
         self.reference = QLineEdit()
         self.reason = QLineEdit()
+        self.reason_code = QComboBox()
+        for val, text in app.services.reasons.choices("RETURN"):
+            self.reason_code.addItem(text, val)
         form.addRow("Return type *", self.rtype)
         form.addRow("Date *", self.date)
         form.addRow("From site / project *", self.site)
         form.addRow("To supplier *", self.supplier)
         form.addRow("Reference", self.reference)
-        form.addRow("Reason", self.reason)
+        form.addRow("Reason *", self.reason_code)
+        form.addRow("Details", self.reason)
         lay.addLayout(form)
         self.hint = label("", "InfoBanner", wrap=True)
         lay.addWidget(self.hint)
@@ -231,6 +235,10 @@ class ReturnEntryDialog(QDialog):
         self.hint.setText("Material coming back from site is added to the chosen bin. Put damaged material in the "
                           "QUARANTINE bin so it cannot be issued." if from_site else
                           "Goods going back to the supplier are taken out of the chosen bin.")
+        default = "RETURNED_FROM_PROJECT" if from_site else "SUPPLIER_RETURN"
+        idx = self.reason_code.findData(default)
+        if idx >= 0:
+            self.reason_code.setCurrentIndex(idx)
 
     def save(self):
         try:
@@ -243,7 +251,8 @@ class ReturnEntryDialog(QDialog):
             return
         header = {"return_type": self.rtype.currentData(), "return_date": self.date.value(),
                   "site_id": self.site.value(), "supplier_id": self.supplier.value(),
-                  "reference": self.reference.text(), "reason": self.reason.text(), "client_token": self._token}
+                  "reference": self.reference.text(), "reason": self.reason.text(),
+                  "reason_code": self.reason_code.currentData(), "client_token": self._token}
         inputs = [ReturnLineInput(v.product_id, v.quantity, v.bin_id, v.condition or "USABLE", v.notes) for v in lines]
 
         def post(header, lines, override_reason=None):
