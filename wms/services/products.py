@@ -33,33 +33,64 @@ from wms.services.stock_engine import product_totals_query
 
 PRODUCT_FIELDS = (
     "item_type", "internal_code", "supplier_code", "barcode", "name", "description", "brand", "category_id", "unit_id",
-    "supplier_id", "default_bin_id", "min_stock", "reorder_qty", "unit_cost", "notes", "is_active",
+    "supplier_id", "default_bin_id", "min_stock", "reorder_qty", "reorder_level", "unit_cost", "notes",
+    "is_active",
 )
 FINISHED_FIELDS = ("production_date", "site_id", "customer", "status")
 
 
 @dataclass
 class ProductRow:
+    """A product with its stock states.
+
+    * on_hand   - physically held, every bin (quarantine included).
+    * usable    - held in bins stock can be issued from (quarantine excluded).
+    * reserved  - set aside for projects, not issued yet.
+    * available - usable - reserved: what can still be promised or issued freely.
+    * incoming  - on open purchase orders, not delivered yet.
+    """
+
     product: Product
     on_hand: Decimal
-    available: Decimal
+    usable: Decimal
+    reserved: Decimal = ZERO
+    incoming: Decimal = ZERO
+
+    @property
+    def available(self) -> Decimal:
+        return self.usable - self.reserved
+
+    @property
+    def quarantine(self) -> Decimal:
+        return self.on_hand - self.usable
+
+    @property
+    def reorder_point(self) -> Decimal | None:
+        """Available level at which the product needs reordering: the reorder level, else the minimum."""
+        p = self.product
+        levels = [q for q in (p.reorder_level, p.min_stock) if q is not None and q > ZERO]
+        return max(levels) if levels else None
 
     @property
     def status(self) -> StockStatus:
-        """OUT / LOW / OK against the minimum level, judged on stock that can be issued
-        (quarantine stock does not count). Products without a minimum are never flagged."""
+        """OUT / LOW (at or below minimum) / REORDER (at or below reorder level) / OK, judged on
+        Available stock. Products without a minimum or reorder level are never flagged."""
         p = self.product
-        if p.min_stock is None or p.min_stock <= ZERO:
+        point = self.reorder_point
+        if point is None:
             return StockStatus.NO_MINIMUM
         if self.available <= ZERO:
             return StockStatus.OUT
-        if self.available <= p.min_stock:
+        if p.min_stock is not None and p.min_stock > ZERO and self.available <= p.min_stock:
             return StockStatus.LOW
+        if self.available <= point:
+            return StockStatus.REORDER
         return StockStatus.OK
 
     @property
     def is_low(self) -> bool:
-        return self.status in (StockStatus.LOW, StockStatus.OUT)
+        """Reorder required."""
+        return self.status in (StockStatus.LOW, StockStatus.OUT, StockStatus.REORDER)
 
     @property
     def stock_value(self) -> Decimal:
@@ -67,12 +98,12 @@ class ProductRow:
 
     @property
     def shortfall(self) -> Decimal:
-        """Suggested order: up to min + reorder qty (or min) - on hand."""
-        p = self.product
+        """Suggested order: up to reorder point + reorder qty, less what is available and already
+        on order. Never placed automatically."""
         if not self.is_low:
             return ZERO
-        target = (p.min_stock or ZERO) + (p.reorder_qty or ZERO)
-        return max(target - self.available, ZERO)
+        target = self.reorder_point + (self.product.reorder_qty or ZERO)
+        return max(target - self.available - self.incoming, ZERO)
 
 
 SEARCH_SEPARATORS = " -/._"
@@ -148,6 +179,21 @@ def text_filter(text: str):
     return or_(words, by_code)
 
 
+def add_reserved_and_incoming(ctx, rows: list[ProductRow]) -> None:
+    """Fill in reserved and incoming quantities (two queries for the whole list)."""
+    if not rows:
+        return
+    from wms.services.purchasing import PurchasingService
+    from wms.services.reservations import reserved_by_product
+    ids = [r.product.id for r in rows] if len(rows) <= 500 else None
+    with ctx.db.read_session() as s:
+        reserved = reserved_by_product(s, ids)
+    incoming = PurchasingService(ctx).incoming(ids)
+    for r in rows:
+        r.reserved = reserved.get(r.product.id, ZERO)
+        r.incoming = incoming.get(r.product.id, ZERO)
+
+
 class ProductService(BaseService):
     def list(
         self,
@@ -193,12 +239,26 @@ class ProductService(BaseService):
             q = q.limit(limit)
         with self.db.read_session() as s:
             rows = [ProductRow(p, Decimal(oh or 0), Decimal(av or 0)) for p, oh, av in s.execute(q).unique()]
+        add_reserved_and_incoming(self.ctx, rows)
         if low_only:
             rows = [r for r in rows if r.is_low]
         return rows
 
     def low_stock(self) -> list[ProductRow]:
+        """Reorder required: Available at or below the reorder level / minimum."""
         return self.list(low_only=True)
+
+    def row(self, product_id: int) -> ProductRow:
+        """One product with its stock states (On Hand, Reserved, Available, Incoming)."""
+        totals = product_totals_query().where(StockLevel.product_id == product_id).subquery()
+        with self.db.read_session() as s:
+            p = s.get(Product, product_id)
+            if p is None:
+                raise NotFoundError("Product not found.")
+            got = s.execute(select(totals.c.on_hand, totals.c.available)).first()
+            row = ProductRow(p, Decimal(got[0] or 0) if got else ZERO, Decimal(got[1] or 0) if got else ZERO)
+        add_reserved_and_incoming(self.ctx, [row])
+        return row
 
     def get(self, product_id: int) -> Product:
         with self.db.read_session() as s:
@@ -295,7 +355,9 @@ class ProductService(BaseService):
             if val and s.get(model, val) is None:
                 raise ValidationError(f"Selected {key.replace('_id', '').replace('_', ' ')} no longer exists.", key)
             v[key] = val
-        for key in ("min_stock", "reorder_qty"):
+        for key in ("min_stock", "reorder_qty", "reorder_level"):
+            if key == "reorder_level" and key not in data:
+                continue  # screens / imports from before 1.7 leave it as it is
             raw = data.get(key)
             if raw in (None, ""):
                 v[key] = None

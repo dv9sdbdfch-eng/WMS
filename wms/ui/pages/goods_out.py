@@ -184,6 +184,13 @@ class GoodsOutPage(Page):
                                 f"with exactly the same materials and quantities.\n\nIs this a separate, second "
                                 f"issue? Choose Cancel if it was already entered.", yes="Post again", danger=True):
             return
+        # Stock set aside for other projects: warn before it is taken (it has physically left anyway).
+        clash = self.app.services.reservations.conflicts(self.site.value(),
+                                                         [(v.product_id, v.quantity) for v in values])
+        if clash and not confirm(self, "Reserved for another project",
+                                 "\n".join(clash) + "\n\nThat project will be short. Post anyway?",
+                                 yes="Post anyway", danger=True):
+            return
         issue = run_with_override(self, self.app.can(P.STOCK_OVERRIDE_NEGATIVE), self.app.services.goods_out.post,
                                   header=header, lines=lines)
         if issue:

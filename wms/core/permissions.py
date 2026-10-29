@@ -27,6 +27,7 @@ class P:
     STOCK_VIEW = "stock.view"
     STOCK_TRANSFER = "stock.transfer"
     STOCK_ADJUST = "stock.adjust"
+    RESERVATIONS_EDIT = "reservations.edit"
     STOCK_OVERRIDE_NEGATIVE = "stock.override_negative"
     STOCKTAKE_COUNT = "stocktake.count"
     RETURNS_POST = "returns.post"
@@ -63,6 +64,7 @@ PERMISSION_LABELS = {
     P.STOCK_VIEW: "View stock and movements",
     P.STOCK_TRANSFER: "Transfer stock between bins",
     P.STOCK_ADJUST: "Stock adjustments",
+    P.RESERVATIONS_EDIT: "Reserve stock for projects and release reservations",
     P.STOCK_OVERRIDE_NEGATIVE: "Override negative stock",
     P.STOCKTAKE_COUNT: "Stocktake: create counts and enter quantities (approval needs Stock adjustments)",
     P.RETURNS_POST: "Post returns",

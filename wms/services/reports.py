@@ -297,15 +297,16 @@ class ReportService(BaseService):
                                              item_types=[f.item_type] if f.item_type else None)
         rows.sort(key=lambda r: (r.product.supplier.name if r.product.supplier else "~", r.product.internal_code))
         cols = [Column("Supplier"), Column("Supplier Code"), Column("Code"), Column("Name"), Column("Status"),
-                Column("Available", QTY), Column("On Hand", QTY), Column("Min Level", QTY), Column("Reorder Qty", QTY),
+                Column("Available", QTY), Column("On Hand", QTY), Column("Reserved", QTY), Column("On Order", QTY),
+                Column("Min Level", QTY), Column("Reorder Level", QTY), Column("Reorder Qty", QTY),
                 Column("Suggested Order", QTY), Column("Unit"), Column("Unit Cost", MONEY),
                 Column("Order Value", MONEY, True), Column("Default Bin")]
         data = [[r.product.supplier.name if r.product.supplier else "", r.product.supplier_code or "",
-                 r.product.internal_code, r.product.name, r.status.label, r.available, r.on_hand,
-                 r.product.min_stock, r.product.reorder_qty, r.shortfall, r.product.unit.code, r.product.unit_cost,
+                 r.product.internal_code, r.product.name, r.status.label, r.available, r.on_hand, r.reserved,
+                 r.incoming, r.product.min_stock, r.product.reorder_level, r.product.reorder_qty, r.shortfall, r.product.unit.code, r.product.unit_cost,
                  (r.shortfall * (r.product.unit_cost or ZERO)).quantize(Decimal("0.01")),
                  r.product.default_bin.full_code if r.product.default_bin else ""] for r in rows]
-        return ReportResult("Low Stock", cols, data)
+        return ReportResult("Reorder Required", cols, data)
 
     def finished_products(self, f: ReportFilters) -> ReportResult:
         rows = ProductService(self.ctx).list(text=f.text, item_types=[ItemType.FINISHED.value])
@@ -409,7 +410,7 @@ REPORTS: list[ReportDef] = [
               {"location", "product", "item_type"}, ReportService.stock_by_location),
     ReportDef("stock_by_bin", "Stock by Bin", "Current stock in every bin.",
               {"location", "product", "item_type"}, ReportService.stock_by_bin),
-    ReportDef("low_stock", "Low Stock / Reorder List",
+    ReportDef("low_stock", "Reorder Required",
               "Out-of-stock and low products by supplier, with suggested order quantity and value.",
               {"supplier", "item_type"}, ReportService.low_stock),
     ReportDef("finished_products", "Finished Products", "Finished products with status and stock.",

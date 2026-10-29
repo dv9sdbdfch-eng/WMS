@@ -6,6 +6,7 @@ from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import QWidget
 
 from wms.core.enums import EntityType
+from wms.core.permissions import P
 from wms.services import Services
 from wms.services.base import AppContext
 
@@ -92,6 +93,14 @@ class App(QObject):
         elif entity_type == EntityType.DISCREPANCY.value:
             from wms.ui.dialogs.purchasing import DiscrepancyDialog
             DiscrepancyDialog(self, entity_id, parent).exec()
+        elif entity_type == EntityType.RESERVATION.value:
+            v = self.services.reservations.get(entity_id)
+            if v.reservation.status == "ACTIVE" and self.can(P.RESERVATIONS_EDIT):
+                from wms.ui.dialogs.reservations import ReservationDialog
+                ReservationDialog(self, parent, reservation_id=entity_id).exec()
+            else:
+                from wms.ui.dialogs.site_dialog import SiteDialog
+                SiteDialog(self, v.reservation.site_id, parent, tab="reservations").exec()
         elif entity_type == EntityType.PRODUCTION.value:
             from wms.ui.dialogs.documents import ProductionDialog
             ProductionDialog(self, entity_id, parent).exec()

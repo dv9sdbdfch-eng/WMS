@@ -28,6 +28,8 @@ class Product(IdMixin, TimestampMixin, ActiveMixin, VersionMixin, Base):
     default_bin_id: Mapped[int | None] = fk("bins.id")
     min_stock: Mapped[Decimal | None] = mapped_column(Quantity)
     reorder_qty: Mapped[Decimal | None] = mapped_column(Quantity)
+    # Reorder when Available falls to this level (1.7). Empty: the minimum stock level is used.
+    reorder_level: Mapped[Decimal | None] = mapped_column(Quantity)
     unit_cost: Mapped[Decimal | None] = mapped_column(Money)
     notes: Mapped[str | None] = mapped_column(Text)
     created_by_id: Mapped[int | None] = fk("users.id")

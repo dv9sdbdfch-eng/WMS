@@ -64,7 +64,7 @@ def test_every_page_opens(ui, sample):
     app, win, msgs, _ = ui
     sample.receive(sample.mdf, 40)
     keys = list(win.factories)
-    assert len(keys) == 19
+    assert len(keys) == 20
     for key in keys:
         win.go(key)
         page = win.page(key)
@@ -536,4 +536,67 @@ def test_purchase_order_to_partial_delivery_and_problem(ui, sample, qtbot):
     win.page("discrepancies").refresh()
     win.go("low_stock")
     win.page("low_stock").refresh()
+    assert not _errors(msgs), msgs
+
+
+def test_reserve_for_project_then_reorder_required(ui, sample, qtbot):
+    """Stage 4 on screen: reserve on the product card, see the stock states, get warned when another
+    project's reservation is about to be issued, and turn the Reorder Required list into draft orders."""
+    app, win, msgs, opened = ui
+    from wms.ui.dialogs.product_dialog import ProductDialog
+    from wms.ui.dialogs.reservations import ReservationDialog
+    sample.receive(sample.mdf, 40)
+    other = app.services.sites.save(None, {"project_number": "P-2002", "name": "Hill House", "status": "ACTIVE"})
+
+    dlg = ReservationDialog(app, None, product_id=sample.mdf.id, site_id=sample.site.id)
+    qtbot.addWidget(dlg)
+    assert "available 40" in dlg.states.text()
+    dlg.qty.set_value(Decimal("35"))
+    dlg.save()
+    res = dlg.saved.reservation
+    assert res.number.startswith("RES-") and not _errors(msgs)
+
+    too_much = ReservationDialog(app, None, product_id=sample.mdf.id, site_id=other.id)
+    qtbot.addWidget(too_much)
+    too_much.qty.set_value(Decimal("10"))
+    too_much.save()
+    assert any("Only 5" in text for _, _, text in _errors(msgs))  # over-reservation refused
+    msgs.clear()
+
+    card = ProductDialog(app, sample.mdf.id)
+    qtbot.addWidget(card)
+    states = {k: w.text() for k, w in card.ov_states.items()}
+    assert states == {"on_hand": "40 SHEET", "reserved": "35 SHEET", "available": "5 SHEET",
+                      "incoming": "0 SHEET"}
+    assert "Reorder" in card.ov_reorder.text() or "Low" in card.ov_reorder.text()
+    assert [v.reservation.id for v in card.reservations.table.items()] == [res.id]
+    card.reorder_level.set_value(Decimal("12"))
+    card.save()
+    assert app.services.products.get(sample.mdf.id).reorder_level == Decimal("12")
+
+    # Goods Out to the other project would eat P-1001's reservation: warned first (auto-confirmed here).
+    win.go("goods_out")
+    page = win.page("goods_out")
+    page.site.set_value(other.id)
+    page.lines.clear()
+    page.lines.add_row(sample.mdf.id, Decimal("8"))
+    page.post()
+    warning = [text for _, title, text in msgs if title == "Reserved for another project"]
+    assert warning and "P-1001" in warning[0] and "uses 3" in warning[0]
+
+    win.go("reservations")
+    rp = win.page("reservations")
+    rp.refresh()
+    assert [v.reservation.id for v in rp.table.items()] == [res.id]
+    app.open_entity("RESERVATION", res.id)
+    app.open_entity("SITE", sample.site.id, tab="reservations")
+
+    win.go("low_stock")
+    low = win.page("low_stock")
+    low.refresh()
+    assert [r.product.id for r in low.table.items()] == [sample.mdf.id]
+    low.draft_orders()
+    drafts = app.services.purchasing.list()
+    assert len(drafts) == 1 and drafts[0].po.status == "DRAFT"
+    assert any(title == "Draft orders" and drafts[0].po.po_number in text for _, title, text in msgs)
     assert not _errors(msgs), msgs

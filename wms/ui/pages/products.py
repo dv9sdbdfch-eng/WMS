@@ -15,6 +15,7 @@ def product_columns():
         Col("Type", lambda r: ItemType(r.product.item_type).label, width=120),
         Col("Category", lambda r: r.product.category.full_name if r.product.category else "", width=150),
         Col("On Hand", lambda r: r.on_hand, QTY, 90),
+        Col("Reserved", lambda r: r.reserved, QTY, 85),
         Col("Available", lambda r: r.available, QTY, 90),
         Col("Unit", lambda r: r.product.unit.code, width=60),
         Col("Min", lambda r: r.product.min_stock, QTY, 70),

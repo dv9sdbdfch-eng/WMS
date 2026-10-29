@@ -54,6 +54,11 @@ class Services:
         return PurchasingService(self.ctx)
 
     @cached_property
+    def reservations(self):
+        from wms.services.reservations import ReservationService
+        return ReservationService(self.ctx)
+
+    @cached_property
     def goods_out(self):
         from wms.services.goods_out import GoodsOutService
         return GoodsOutService(self.ctx)

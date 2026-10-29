@@ -99,6 +99,7 @@ def run_checks(s: Session) -> list[IntegrityIssue]:
     issues += _reversal_checks(s)
     issues += _document_checks(s)
     issues += _purchase_order_checks(s)
+    issues += _reservation_checks(s)
     for (pid, bid), q in sorted(stored.items()):
         if q < ZERO:
             issues.append(IntegrityIssue(WARNING, "Negative stock",
@@ -254,4 +255,38 @@ def _purchase_order_checks(s: Session) -> list[IntegrityIssue]:
             out.append(IntegrityIssue(WARNING, "Purchase order status",
                                       f"{po.po_number} is {po.status.replace('_', ' ').lower()} but its deliveries "
                                       f"say {expected.replace('_', ' ').lower()}."))
+    return out
+
+
+def _reservation_checks(s: Session) -> list[IntegrityIssue]:
+    """Goods Out lines deliver reservations of their own product and project; reservation status
+    agrees with what was issued; nothing is reserved beyond the stock that is there."""
+    from wms.db.models import GoodsIssue, GoodsIssueLine, StockReservation
+    from wms.services.reservations import issued_by_reservation, reserved_by_product, status_from_issues, usable_stock
+    out: list[IntegrityIssue] = []
+    bad = s.execute(
+        select(GoodsIssue.issue_number, GoodsIssueLine.line_no, StockReservation.number)
+        .join(GoodsIssue, GoodsIssue.id == GoodsIssueLine.issue_id)
+        .join(StockReservation, StockReservation.id == GoodsIssueLine.reservation_id)
+        .where((StockReservation.product_id != GoodsIssueLine.product_id)
+               | (StockReservation.site_id != GoodsIssue.site_id))).all()
+    for number, line_no, res in bad:
+        out.append(IntegrityIssue(CRITICAL, "Reservation link",
+                                  f"Goods Out {number} line {line_no} fulfils reservation {res}, which is for another "
+                                  f"product or project."))
+    issued = issued_by_reservation(s)
+    for r in s.scalars(select(StockReservation).where(StockReservation.status != "RELEASED")):
+        expected = status_from_issues(r, issued.get(r.id, ZERO))
+        if expected != r.status:
+            out.append(IntegrityIssue(WARNING, "Reservation status",
+                                      f"{r.number} is {r.status.lower()} but its Goods Out says {expected.lower()}."))
+    reserved = reserved_by_product(s)
+    if reserved:
+        usable = usable_stock(s, list(reserved))
+        codes = dict(s.execute(select(Product.id, Product.internal_code).where(Product.id.in_(list(reserved)))).all())
+        for pid, q in sorted(reserved.items()):
+            if q > usable.get(pid, ZERO):
+                out.append(IntegrityIssue(WARNING, "Over-reserved",
+                                          f"{codes.get(pid, pid)}: {_fmt(q)} reserved but only "
+                                          f"{_fmt(usable.get(pid, ZERO))} in stock that can be issued."))
     return out

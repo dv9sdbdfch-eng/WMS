@@ -184,6 +184,7 @@ Protected tables (database triggers, see `wms.db.engine`):
 | bin_id | Integer | no | FK bins.id, indexed |
 | notes | Text | yes |  |
 | movement_id | Integer | yes | FK stock_movements.id, indexed |
+| reservation_id | Integer | yes | FK stock_reservations.id, indexed |
 | id | Integer | no | PK |
 
 ## goods_issues
@@ -307,6 +308,7 @@ Protected tables (database triggers, see `wms.db.engine`):
 | default_bin_id | Integer | yes | FK bins.id, indexed |
 | min_stock | Quantity | yes |  |
 | reorder_qty | Quantity | yes |  |
+| reorder_level | Quantity | yes |  |
 | unit_cost | Money | yes |  |
 | notes | Text | yes |  |
 | created_by_id | Integer | yes | FK users.id, indexed |
@@ -563,6 +565,31 @@ Protected tables (database triggers, see `wms.db.engine`):
 * INDEX ix_stock_movements_doc (doc_type, doc_id)
 * INDEX ix_stock_movements_product_time (product_id, occurred_at)
 * UNIQUE INDEX uq_stock_movements_reversal_of (reversal_of_id) WHERE reversal_of_id IS NOT NULL
+
+## stock_reservations
+
+| Column | Type | Null | Key / reference |
+|---|---|---|---|
+| number | String(30) | no | UNIQUE |
+| product_id | Integer | no | FK products.id, indexed |
+| site_id | Integer | no | FK sites.id, indexed |
+| quantity | Quantity | no |  |
+| required_by | Date | yes |  |
+| notes | Text | yes |  |
+| status | String(20) | no | indexed |
+| created_by_id | Integer | no | FK users.id, indexed |
+| created_at | UTCDateTime | no |  |
+| released_at | UTCDateTime | yes |  |
+| released_by_id | Integer | yes | FK users.id, indexed |
+| release_reason | Text | yes |  |
+| id | Integer | no | PK |
+| site_number_snapshot | String(50) | yes |  |
+| site_name_snapshot | String(200) | yes |  |
+| client_token | String(40) | yes | UNIQUE, indexed |
+
+* CHECK quantity > 0
+* CHECK status IN ('ACTIVE', 'FULFILLED', 'RELEASED')
+* UNIQUE INDEX ix_stock_reservations_client_token (client_token)
 
 ## stock_returns
 

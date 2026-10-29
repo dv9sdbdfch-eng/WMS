@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from wms.core.enums import AttachmentKind, EntityType, FinishedStatus, ItemType
+from wms.core.enums import AttachmentKind, EntityType, FinishedStatus, ItemType, StockStatus
 from wms.core.numbers import fmt_datetime, fmt_qty
 from wms.core.permissions import P
 from wms.services.search import location_of, movement_reference, movement_route, signed_qty
@@ -47,6 +47,7 @@ class ProductDialog(QDialog):
         self.product = app.services.products.get(product_id) if product_id else None
         self.saved = False
         self.can_edit = app.can(P.PRODUCTS_EDIT)
+        self.reservations = None
         self.setWindowTitle(f"Product {self.product.internal_code}" if self.product else "New product")
         self.resize(1100, 760)
         lay = QVBoxLayout(self)
@@ -134,6 +135,24 @@ class ProductDialog(QDialog):
         self.ov_total = label("", "CardValue")
         right.addWidget(label("Current stock", "SectionTitle"))
         right.addWidget(self.ov_total)
+        states = QGridLayout()
+        states.setHorizontalSpacing(18)
+        self.ov_states: dict[str, QLabel] = {}
+        for col, (key, text, tip) in enumerate((
+                ("on_hand", "On Hand", "Physically in the warehouse, in every bin"),
+                ("reserved", "Reserved", "Set aside for projects, not yet issued"),
+                ("available", "Available", "On Hand minus Reserved (quarantine bins excluded)"),
+                ("incoming", "Incoming", "Still to arrive on purchase orders"))):
+            head = label(text, "Muted")
+            head.setToolTip(tip)
+            val = label("", "SectionTitle")
+            val.setToolTip(tip)
+            states.addWidget(head, 0, col)
+            states.addWidget(val, 1, col)
+            self.ov_states[key] = val
+        right.addLayout(states)
+        self.ov_reorder = label("", "Muted", wrap=True)
+        right.addWidget(self.ov_reorder)
         right.addWidget(label("Stock locations", "SectionTitle"))
         self.bins_table = DataTable([
             Col("Location", lambda l: location_of(l.bin), width=260),
@@ -172,6 +191,16 @@ class ProductDialog(QDialog):
         self.ov_thumb.show_for(EntityType.PRODUCT.value, p.id)
         total = sum((l.quantity for l in levels), 0)
         self.ov_total.setText(f"{fmt_qty(total)} {p.unit.code}")
+        r = self.app.services.products.row(p.id)
+        u = p.unit.code
+        for key in ("on_hand", "reserved", "available", "incoming"):
+            self.ov_states[key].setText(f"{fmt_qty(getattr(r, key))} {u}")
+        notes = []
+        if r.quarantine > 0:
+            notes.append(f"{fmt_qty(r.quarantine)} {u} is in quarantine bins and cannot be issued or reserved.")
+        if r.status in (StockStatus.OUT, StockStatus.LOW, StockStatus.REORDER):
+            notes.append(f"{r.status.label}: suggested order {fmt_qty(r.shortfall)} {u}.")
+        self.ov_reorder.setText("  ".join(notes))
         self.bins_table.set_items(levels)
         self.bins_total.setText(f"Total = {fmt_qty(total)} {p.unit.code}  in {len(levels)} bin(s)")
 
@@ -202,6 +231,8 @@ class ProductDialog(QDialog):
         self.default_bin = PickCombo("None")
         self.min_stock = DecimalEdit()
         self.reorder = DecimalEdit()
+        self.reorder_level = DecimalEdit()
+        self.reorder_level.setToolTip("Reorder when Available falls to this level. Leave empty to use the minimum.")
         self.cost = DecimalEdit("0.0001")
         self.notes = QPlainTextEdit()
         self.notes.setFixedHeight(60)
@@ -219,6 +250,7 @@ class ProductDialog(QDialog):
         left.addRow("Barcode", self.barcode)
         right.addRow("Default storage bin", self.default_bin)
         right.addRow("Minimum stock level", self.min_stock)
+        right.addRow("Reorder level", self.reorder_level)
         right.addRow("Reorder quantity", self.reorder)
         right.addRow("Unit cost (£)", self.cost)
         right.addRow("Notes", self.notes)
@@ -253,7 +285,7 @@ class ProductDialog(QDialog):
         self.tabs.addTab(w, "Details")
         for wdg in (self.item_type, self.code, self.name, self.supplier_code, self.barcode, self.brand, self.description,
                     self.category, self.unit, self.supplier, self.default_bin, self.min_stock, self.reorder,
-                    self.cost, self.notes, self.active, self.f_status, self.f_site, self.f_customer, self.f_date):
+                    self.reorder_level, self.cost, self.notes, self.active, self.f_status, self.f_site, self.f_customer, self.f_date):
             wdg.setEnabled(self.can_edit)
 
     def _type_changed(self):
@@ -293,6 +325,7 @@ class ProductDialog(QDialog):
         self.default_bin.set_value(p.default_bin_id)
         self.min_stock.set_value(p.min_stock)
         self.reorder.set_value(p.reorder_qty)
+        self.reorder_level.set_value(p.reorder_level)
         self.cost.set_value(p.unit_cost)
         self.notes.setPlainText(p.notes or "")
         self.active.setChecked(p.is_active)
@@ -316,6 +349,12 @@ class ProductDialog(QDialog):
                                                             else ""))
         if app.can(P.AUDIT_VIEW):
             self.audit_table.set_items(app.services.audit.for_entity(EntityType.PRODUCT.value, p.id))
+        if self.reservations is None:
+            from wms.ui.dialogs.reservations import ReservationsPanel
+            self.reservations = ReservationsPanel(app, product_id=p.id)
+            self.tabs.insertTab(self.tabs.indexOf(self.history_tab), self.reservations, "Reservations")
+        else:
+            self.reservations.refresh()
 
     def _data(self) -> dict:
         return {
@@ -332,6 +371,7 @@ class ProductDialog(QDialog):
             "default_bin_id": self.default_bin.value(),
             "min_stock": self.min_stock.value(),
             "reorder_qty": self.reorder.value(),
+            "reorder_level": self.reorder_level.value(),
             "unit_cost": self.cost.value(),
             "notes": self.notes.toPlainText(),
             "is_active": self.active.isChecked(),
