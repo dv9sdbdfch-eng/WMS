@@ -11,7 +11,15 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
-from wms.core.enums import DocumentStatus, FinishedStatus, ItemType, MovementType, ReturnCondition, ReturnType
+from wms.core.enums import (
+    DocumentStatus,
+    FinishedStatus,
+    ItemType,
+    MovementType,
+    ReturnCondition,
+    ReturnType,
+    StockStatus,
+)
 from wms.core.numbers import ZERO
 from wms.core.permissions import P
 from wms.db.models import (
@@ -147,6 +155,35 @@ class ReportService(BaseService):
                  r.product.default_bin.full_code if r.product.default_bin else "", "LOW" if r.is_low else ""]
                 for r in rows]
         return ReportResult("Current Stock", cols, data)
+
+    def product_export(self, product_ids: list[int] | None = None, scope: str = "All products") -> ReportResult:
+        """The product master list for Excel (spec section 25): every product, or the given ones in the
+        given order (the current filtered list / the selected rows). The column titles are the ones the
+        Excel import understands, so an exported list can be corrected in Excel and imported back."""
+        self.require(P.REPORTS_EXPORT)
+        rows = ProductService(self.ctx).list(include_inactive=True)
+        if product_ids is not None:
+            by_id = {r.product.id: r for r in rows}
+            rows = [by_id[i] for i in product_ids if i in by_id]
+        cols = [Column("Code"), Column("Name"), Column("Type"), Column("Description"), Column("Product Number"),
+                Column("Supplier"), Column("Barcode"), Column("Brand"), Column("Category"), Column("Unit"),
+                Column("On Hand", QTY), Column("Reserved", QTY), Column("Available", QTY),
+                Column("Incoming", QTY), Column("Minimum Stock", QTY), Column("Reorder Level", QTY),
+                Column("Reorder Quantity", QTY), Column("Unit Cost", MONEY), Column("Stock Value", MONEY, True),
+                Column("Default Bin"), Column("Stock Status"), Column("Active"), Column("Notes"),
+                Column("Created", DATETIME), Column("Last Changed", DATETIME)]
+        data = []
+        for r in rows:
+            p = r.product
+            data.append([
+                p.internal_code, p.name, ItemType(p.item_type).label, p.description or "", p.supplier_code or "",
+                p.supplier.name if p.supplier else "", p.barcode or "", p.brand or "",
+                p.category.full_name if p.category else "", p.unit.code, r.on_hand, r.reserved, r.available,
+                r.incoming, p.min_stock, p.reorder_level, p.reorder_qty, p.unit_cost, r.stock_value,
+                p.default_bin.full_code if p.default_bin else "",
+                "" if r.status is StockStatus.NO_MINIMUM else r.status.label, "Yes" if p.is_active else "No",
+                p.notes or "", p.created_at, p.updated_at])
+        return ReportResult("Products", cols, data, f"{scope} - {len(data)} product(s)")
 
     def goods_in(self, f: ReportFilters) -> ReportResult:
         q = (select(DeliveryNoteLine, DeliveryNote).join(DeliveryNote)

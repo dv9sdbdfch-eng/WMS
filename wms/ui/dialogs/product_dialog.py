@@ -69,7 +69,10 @@ class ProductDialog(QDialog):
                            "warehouse, - left it. Double-click a line to open its document.", "Muted", wrap=True))
         ml.addWidget(self.mv_table, 1)
         self.mv_count = label("", "Muted")
-        ml.addWidget(self.mv_count)
+        if product_id and app.can(P.REPORTS_EXPORT):
+            ml.addLayout(h(self.mv_count, None, button("Export history to Excel...", self.export_history)))
+        else:
+            ml.addWidget(self.mv_count)
         self.tabs.addTab(mv_w, "Movement History")
         self.history_tab = mv_w
         self.audit_table = DataTable([Col("When", lambda a: a.occurred_at, DATETIME, 130),
@@ -417,8 +420,45 @@ class ProductDialog(QDialog):
             self.saved = True
             self._load()
 
+    def export_history(self, path: str | None = None):
+        from datetime import date
+        from pathlib import Path
+
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+        from PySide6.QtWidgets import QFileDialog
+
+        from wms.exporters.export import export_xlsx
+        result = run(self, history_report, self.app, self.product_id)
+        if result is None:
+            return None
+        open_after = path is None
+        if path is None:
+            code = "".join(ch if ch.isalnum() or ch in "-." else "_" for ch in result.title.split(" ", 1)[1])
+            default = Path.home() / "Documents" / f"History_{code}_{date.today():%Y-%m-%d}.xlsx"
+            path, _ = QFileDialog.getSaveFileName(self, "Export movement history", str(default),
+                                                  "Excel workbook (*.xlsx)")
+            if not path:
+                return None
+            if not path.lower().endswith(".xlsx"):
+                path += ".xlsx"
+        out = run(self, export_xlsx, result, Path(path), self.app.ctx.config.company_name)
+        if out and open_after:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(out)))
+        return out
+
     def _open_movement_doc(self, m):
         open_movement(self.app, m, self)
+
+
+def history_report(app, product_id: int):
+    """The product's full movement history as a report (every line, not only the newest on screen)."""
+    from wms.services.reports import ReportFilters
+    p = app.services.products.get(product_id)
+    result = app.services.reports.run("movements", ReportFilters(product_id=product_id))
+    result.title = f"History {p.internal_code}"
+    result.filters_text = f"Movement history of {p.internal_code} - {p.name}"
+    return result
 
 
 def product_history_columns() -> list[Col]:

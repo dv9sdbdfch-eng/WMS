@@ -1,11 +1,16 @@
 from __future__ import annotations
 
-from PySide6.QtWidgets import QCheckBox, QComboBox
+from datetime import date
+from pathlib import Path
+
+from PySide6.QtCore import QUrl
+from PySide6.QtGui import QDesktopServices
+from PySide6.QtWidgets import QCheckBox, QComboBox, QFileDialog, QMenu
 
 from wms.core.enums import ItemType, StockStatus
 from wms.core.permissions import P
 from wms.ui.pages.base import Page
-from wms.ui.widgets.common import MONEY, QTY, Col, DataTable, PickCombo, SearchBox, button, h, label
+from wms.ui.widgets.common import MONEY, QTY, Col, DataTable, PickCombo, SearchBox, button, h, info, label, run
 
 
 def product_columns():
@@ -36,6 +41,15 @@ class ProductsPage(Page):
         super().__init__(app, parent)
         if app.can(P.PRODUCTS_EDIT):
             self.add_action(button("New product", self.new, primary=True, shortcut="Ctrl+N"))
+            self.add_action(button("Import from Excel...", self.import_excel))
+        if app.can(P.REPORTS_EXPORT):
+            self.export_btn = button("Export to Excel")
+            menu = QMenu(self.export_btn)
+            menu.addAction("All products...", lambda: self.export_excel("all"))
+            menu.addAction("Current filtered list...", lambda: self.export_excel("shown"))
+            menu.addAction("Selected products...", lambda: self.export_excel("selected"))
+            self.export_btn.setMenu(menu)
+            self.add_action(self.export_btn)
         self.search = SearchBox("Search code, name, description, supplier, supplier code, category, bin...")
         self.search.search.connect(lambda _: self.refresh())
         self.type_filter = QComboBox()
@@ -62,6 +76,7 @@ class ProductsPage(Page):
         self.table = DataTable(self.columns())
         self.table.set_row_style(lambda r: "low" if r.is_low else ("muted" if not r.product.is_active else None))
         self.table.activated_item.connect(self.open)
+        self.table.allow_multi_select()
         self.body.addWidget(self.table, 1)
         self.count = label("", "Muted")
         self.body.addLayout(h(self.count, None, button("Open", lambda: self.open(self.table.current()))))
@@ -104,3 +119,42 @@ class ProductsPage(Page):
         dlg.exec()
         if dlg.saved:
             self.app.changed()
+
+    def import_excel(self):
+        from wms.ui.dialogs.excel_import import ExcelImportDialog
+        dlg = ExcelImportDialog(self.app, self)
+        dlg.exec()
+        if dlg.result is not None:
+            self._filters_loaded = False
+            self.refresh()
+
+    def export_ids(self, scope: str) -> tuple[list[int] | None, str]:
+        """Which products an export covers: everything, the filtered list as shown, or the selected rows."""
+        if scope == "selected":
+            return [r.product.id for r in self.table.selected_items()], "Selected products"
+        if scope == "shown":
+            return [r.product.id for r in self.table.shown_items()], "Current filtered list"
+        return None, "All products"
+
+    def export_excel(self, scope: str, path: str | None = None):
+        ids, text = self.export_ids(scope)
+        if ids is not None and not ids:
+            info(self, "Export to Excel", "Select one or more products first (Ctrl+click or Shift+click)."
+                 if scope == "selected" else "The list is empty.")
+            return None
+        if path is None:
+            default = Path.home() / "Documents" / f"Products_{date.today():%Y-%m-%d}.xlsx"
+            path, _ = QFileDialog.getSaveFileName(self, "Export products", str(default), "Excel workbook (*.xlsx)")
+            if not path:
+                return None
+            if not path.lower().endswith(".xlsx"):
+                path += ".xlsx"
+            open_after = True
+        else:
+            open_after = False
+        from wms.exporters.export import export_xlsx
+        result = run(self, self.app.services.reports.product_export, ids, text)
+        out = result and run(self, export_xlsx, result, Path(path), self.app.ctx.config.company_name)
+        if out and open_after:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(out)))
+        return out

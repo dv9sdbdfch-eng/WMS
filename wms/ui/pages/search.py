@@ -506,6 +506,43 @@ class SearchPage(Page):
             if key != "view":
                 table.add_menu_action(text, lambda k=key: self.product_action(k))
         self.products_view.actions.addStretch(1)
+        if self.app.can(P.REPORTS_EXPORT):
+            self.products_view.actions.addWidget(button("Export to Excel...", self.export_products))
+
+    def export_products(self, path: str | None = None):
+        """Every product matching the search (not only the rows on screen), in the order shown."""
+        from datetime import date
+        from pathlib import Path
+
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+        from PySide6.QtWidgets import QFileDialog
+
+        from wms.exporters.export import export_xlsx
+        svc = self.app.services
+        key, desc = self.sorts[self.PRODUCTS]
+        res = run(self, svc.search.products, self.criteria, 1_000_000, key, desc)
+        if res is None:
+            return None
+        if not res.rows:
+            info(self, "Export to Excel", "No matching products to export.")
+            return None
+        open_after = path is None
+        if path is None:
+            default = Path.home() / "Documents" / f"Search_results_{date.today():%Y-%m-%d}.xlsx"
+            path, _ = QFileDialog.getSaveFileName(self, "Export search results", str(default),
+                                                  "Excel workbook (*.xlsx)")
+            if not path:
+                return None
+            if not path.lower().endswith(".xlsx"):
+                path += ".xlsx"
+        chips = [text for _k, text in svc.search.describe(self.criteria)]
+        scope = "Search results" + (f" ({'; '.join(chips)})" if chips else "")
+        result = run(self, svc.reports.product_export, [r.product.id for r in res.rows], scope)
+        out = result and run(self, export_xlsx, result, Path(path), self.app.ctx.config.company_name)
+        if out and open_after:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(out)))
+        return out
 
     def _movement_buttons(self):
         v = self.movements_view

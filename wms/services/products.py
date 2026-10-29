@@ -382,55 +382,61 @@ class ProductService(BaseService):
     def save(self, product_id: int | None, data: dict, expected_version: int | None = None) -> Product:
         self.require(P.PRODUCTS_EDIT)
         with self.db.session() as s:
-            v = self._validate(s, data, product_id)
-            if product_id:
-                p = s.get(Product, product_id)
-                if p is None:
-                    raise NotFoundError("Product not found.")
-                if expected_version is not None and p.version != expected_version:
-                    raise ConcurrencyError("This product was changed by someone else. Reopen it and try again.")
-                if v["unit_id"] != p.unit_id and self.has_movements(s, p.id):
-                    raise ValidationError(
-                        "The unit of measure cannot be changed after stock movements exist "
-                        "(it would change the meaning of past quantities). Create a new product instead.",
-                        "unit_id",
-                    )
-                if not v["is_active"] and p.is_active:
-                    # Any bin with a non-zero balance blocks archiving - including +5 in one bin and
-                    # -5 in another, which add up to zero but are both real problems to resolve first.
-                    holding = s.scalar(select(func.count(StockLevel.id)).where(
-                        StockLevel.product_id == p.id, StockLevel.quantity != ZERO))
-                    if holding:
-                        raise ValidationError(
-                            f"Cannot archive {p.internal_code}: {holding} bin(s) still show stock for it "
-                            f"(positive or negative). Issue, transfer or adjust it to zero first.", "is_active")
-                    plan = self._plan(s, p)
-                    plan.archive_only = True
-                    plan.check()
-                old = audit.snapshot(p, PRODUCT_FIELDS)
-                old_fin = audit.snapshot(p.finished_info, FINISHED_FIELDS) if p.finished_info else {}
-            else:
-                p = Product(created_by_id=self.user.id)
-                s.add(p)
-                old, old_fin = {}, {}
-            for k, val in v.items():
-                setattr(p, k, val)
-            self._apply_finished(s, p, data)
-            s.flush()
-            new = audit.snapshot(p, PRODUCT_FIELDS)
-            new_fin = audit.snapshot(p.finished_info, FINISHED_FIELDS) if p.finished_info else {}
-            o, n = audit.diff({**old, **old_fin}, {**new, **new_fin})
-            if n:
-                audit.record(s, self.ctx, "PRODUCT_UPDATED" if product_id else "PRODUCT_CREATED", "PRODUCT", p.id,
-                             f"{p.internal_code} {p.name}", old=o, new=n)
-            if product_id and "is_active" in n:
-                if p.is_active:
-                    lifecycle.record_restore(s, self.ctx, EntityType.PRODUCT.value, p.id,
-                                             f"{p.internal_code} {p.name}", "PRODUCT", None)
-                else:
-                    lifecycle.record_removal(s, self.ctx, plan, "PRODUCT", None)
-            saved_id = p.id
+            saved_id = self.save_in(s, product_id, data, expected_version).id
         return self.get(saved_id)
+
+    def save_in(self, s: Session, product_id: int | None, data: dict,
+                expected_version: int | None = None) -> Product:
+        """Create / change a product inside the caller's transaction (bulk import: all or nothing)."""
+        self.require(P.PRODUCTS_EDIT)
+        v = self._validate(s, data, product_id)
+        if product_id:
+            p = s.get(Product, product_id)
+            if p is None:
+                raise NotFoundError("Product not found.")
+            if expected_version is not None and p.version != expected_version:
+                raise ConcurrencyError("This product was changed by someone else. Reopen it and try again.")
+            if v["unit_id"] != p.unit_id and self.has_movements(s, p.id):
+                raise ValidationError(
+                    "The unit of measure cannot be changed after stock movements exist "
+                    "(it would change the meaning of past quantities). Create a new product instead.",
+                    "unit_id",
+                )
+            if not v["is_active"] and p.is_active:
+                # Any bin with a non-zero balance blocks archiving - including +5 in one bin and
+                # -5 in another, which add up to zero but are both real problems to resolve first.
+                holding = s.scalar(select(func.count(StockLevel.id)).where(
+                    StockLevel.product_id == p.id, StockLevel.quantity != ZERO))
+                if holding:
+                    raise ValidationError(
+                        f"Cannot archive {p.internal_code}: {holding} bin(s) still show stock for it "
+                        f"(positive or negative). Issue, transfer or adjust it to zero first.", "is_active")
+                plan = self._plan(s, p)
+                plan.archive_only = True
+                plan.check()
+            old = audit.snapshot(p, PRODUCT_FIELDS)
+            old_fin = audit.snapshot(p.finished_info, FINISHED_FIELDS) if p.finished_info else {}
+        else:
+            p = Product(created_by_id=self.user.id)
+            s.add(p)
+            old, old_fin = {}, {}
+        for k, val in v.items():
+            setattr(p, k, val)
+        self._apply_finished(s, p, data)
+        s.flush()
+        new = audit.snapshot(p, PRODUCT_FIELDS)
+        new_fin = audit.snapshot(p.finished_info, FINISHED_FIELDS) if p.finished_info else {}
+        o, n = audit.diff({**old, **old_fin}, {**new, **new_fin})
+        if n:
+            audit.record(s, self.ctx, "PRODUCT_UPDATED" if product_id else "PRODUCT_CREATED", "PRODUCT", p.id,
+                         f"{p.internal_code} {p.name}", old=o, new=n)
+        if product_id and "is_active" in n:
+            if p.is_active:
+                lifecycle.record_restore(s, self.ctx, EntityType.PRODUCT.value, p.id,
+                                         f"{p.internal_code} {p.name}", "PRODUCT", None)
+            else:
+                lifecycle.record_removal(s, self.ctx, plan, "PRODUCT", None)
+        return p
 
     def _apply_finished(self, s: Session, p: Product, data: dict) -> None:
         if p.item_type != ItemType.FINISHED.value:
