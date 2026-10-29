@@ -96,8 +96,10 @@ class DeliveryNote(IdMixin, _PostedDocument, Base):
     received_by_id: Mapped[int] = fk("users.id", nullable=False)
     reversed_by_id: Mapped[int | None] = fk("users.id")
     supplier_name_snapshot: Mapped[str | None] = mapped_column(String(200))
+    purchase_order_id: Mapped[int | None] = fk("purchase_orders.id")  # delivery against an order (1.6)
 
     supplier = relationship("Supplier", lazy="joined")
+    purchase_order = relationship("PurchaseOrder", lazy="joined")
     received_by = relationship("User", foreign_keys=[received_by_id], lazy="joined")
     reversed_by = relationship("User", foreign_keys=[reversed_by_id], lazy="joined")
     lines: Mapped[list[DeliveryNoteLine]] = relationship(
@@ -120,6 +122,7 @@ class DeliveryNoteLine(_LineHistory, IdMixin, Base):
     bin_id: Mapped[int] = fk("bins.id", nullable=False)
     notes: Mapped[str | None] = mapped_column(Text)
     movement_id: Mapped[int | None] = fk("stock_movements.id")
+    purchase_order_line_id: Mapped[int | None] = fk("purchase_order_lines.id")  # order line it delivers
 
     delivery_note: Mapped[DeliveryNote] = relationship(back_populates="lines")
     product = relationship("Product", lazy="joined")

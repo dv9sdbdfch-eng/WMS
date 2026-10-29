@@ -52,6 +52,8 @@ SEQUENCES = [
     ("TRANSFER", "TRF-"),
     ("PRODUCTION", "PRD-"),
     ("STOCK_COUNT", "SC-"),
+    ("PURCHASE_ORDER", "PO-"),
+    ("DISCREPANCY", "DSC-"),
 ]
 
 

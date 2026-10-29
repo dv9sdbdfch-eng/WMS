@@ -28,6 +28,7 @@ class ReceiptLine:
     bin_id: int | None = None
     unit_cost: Decimal | str | None = None
     notes: str | None = None
+    po_line_id: int | None = None  # order line delivered; found by product when left empty
 
 
 def normalise_dn_number(value: str | None) -> str:
@@ -89,6 +90,11 @@ class GoodsInService(BaseService):
         with self.db.session() as s:
             check_client_token(s, DeliveryNote, header.get("client_token"), "dn_number",
                                EntityType.DELIVERY_NOTE.value, "delivery note")
+            receiving = None
+            if header.get("purchase_order_id"):
+                from wms.services.purchasing import Receiving
+                receiving = Receiving(s, self.ctx, header["purchase_order_id"], header.get("supplier_id"))
+                header = {**header, "supplier_id": receiving.po.supplier_id}
             supplier = s.get(Supplier, header.get("supplier_id")) if header.get("supplier_id") else None
             if supplier is None:
                 raise ValidationError("Supplier is required.", "supplier_id")
@@ -109,7 +115,9 @@ class GoodsInService(BaseService):
                 supplier_id=supplier.id,
                 supplier_name_snapshot=supplier.name,
                 delivery_date=delivery_date,
-                po_reference=clean_str(header.get("po_reference"), max_len=80),
+                po_reference=clean_str(header.get("po_reference"), max_len=80)
+                or (receiving.po.po_number if receiving else None),
+                purchase_order_id=receiving.po.id if receiving else None,
                 notes=clean_str(header.get("notes")),
                 received_by_id=self.user.id,
                 status=DocumentStatus.POSTED.value,
@@ -137,17 +145,22 @@ class GoodsInService(BaseService):
                     doc_type=EntityType.DELIVERY_NOTE.value, doc_id=dn.id, doc_number=dn_number,
                     reference=dn.po_reference, notes=clean_str(ln.notes),
                 )
+                po_line_id = receiving.line_for(product, qty, ln.po_line_id, i) if receiving else None
                 dn.lines.append(DeliveryNoteLine(line_no=i, product_id=product.id, quantity=qty, unit_cost=cost,
-                                                 bin_id=b.id, notes=clean_str(ln.notes), movement_id=mv.id))
+                                                 bin_id=b.id, notes=clean_str(ln.notes), movement_id=mv.id,
+                                                 purchase_order_line_id=po_line_id))
                 if update_costs and cost is not None and cost != product.unit_cost:
                     audit.record(s, self.ctx, "PRODUCT_COST_UPDATED", "PRODUCT", product.id, product.internal_code,
                                  f"Unit cost updated from delivery note {dn_number}.",
                                  old={"unit_cost": product.unit_cost}, new={"unit_cost": cost})
                     product.unit_cost = cost
             s.flush()
+            if receiving:
+                receiving.finish(dn)
             audit.record(s, self.ctx, "GOODS_IN_POSTED", EntityType.DELIVERY_NOTE.value, dn.id,
                          f"{dn_number} ({supplier.name})", f"{len(lines)} line(s) received.",
                          new={"dn_number": dn_number, "supplier": supplier.name, "delivery_date": delivery_date,
+                              "purchase_order_id": dn.purchase_order_id,
                               "lines": [{"product_id": l.product_id, "qty": l.quantity, "bin_id": l.bin_id}
                                         for l in dn.lines]})
             for f in staged:
@@ -173,6 +186,8 @@ class GoodsInService(BaseService):
             dn.reversed_at = utcnow()
             dn.reversed_by_id = self.user.id
             dn.reversal_reason = reason
+            from wms.services.purchasing import after_delivery_reversed
+            after_delivery_reversed(s, self.ctx, dn)
             audit.record(s, self.ctx, "GOODS_IN_REVERSED", EntityType.DELIVERY_NOTE.value, dn.id, dn.dn_number,
                          reason, old={"status": "POSTED"}, new={"status": "REVERSED"})
         return self.get(dn_id)

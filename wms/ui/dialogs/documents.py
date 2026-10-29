@@ -117,7 +117,9 @@ class DeliveryNoteDialog(QDialog):
         ll.setContentsMargins(0, 0, 0, 0)
         total = sum(((l.unit_cost or 0) * l.quantity for l in dn.lines), 0)
         ll.addLayout(_form([("Supplier", dn.supplier_label), ("Delivery date", fmt_date(dn.delivery_date)),
-                            ("PO / reference", dn.po_reference or ""), ("Received by", dn.received_by.full_name),
+                            ("PO / reference", dn.po_reference or ""),
+                            ("Purchase order", dn.purchase_order.po_number if dn.purchase_order else ""),
+                            ("Received by", dn.received_by.full_name),
                             ("Entered", fmt_datetime(dn.created_at)), ("Status", dn.status.title()),
                             ("Total value", fmt_money(total)), ("Notes", dn.notes or "")]))
         tabs = QTabWidget()
@@ -135,6 +137,12 @@ class DeliveryNoteDialog(QDialog):
         mv = movement_table()
         mv.set_items(app.services.goods_in.movements(dn.id))
         tabs.addTab(mv, "Stock transactions")
+        from wms.ui.dialogs.purchasing import DiscrepancyDialog, discrepancy_table
+        problems = app.services.purchasing.discrepancies(delivery_note_id=dn.id)
+        probs = discrepancy_table()
+        probs.set_items(problems)
+        probs.activated_item.connect(lambda d: DiscrepancyDialog(app, d.id, self).exec())
+        tabs.addTab(probs, f"Delivery problems ({len(problems)})")
         ll.addWidget(tabs, 1)
         split.addWidget(left)
 
@@ -158,11 +166,21 @@ class DeliveryNoteDialog(QDialog):
             self.preview.empty.setText("No scan attached. Use 'Attach file...' to add the original delivery note.")
 
         buttons = [button("Print", self.print_note)]
+        if dn.purchase_order_id:
+            buttons.append(button("Open purchase order",
+                                  lambda: app.open_entity("PURCHASE_ORDER", dn.purchase_order_id, self)))
+        if dn.status == "POSTED" and (app.can(P.GOODS_IN_POST) or app.can(P.PURCHASING_EDIT)):
+            buttons.append(button("Report problem...", self.report_problem))
         if dn.status == "POSTED" and app.can(P.GOODS_IN_POST):
             buttons.append(button("Edit PO / notes...", self.edit_header))
         if dn.status == "POSTED" and app.can(P.GOODS_IN_REVERSE):
             buttons.append(button("Reverse delivery note...", self.reverse, danger=True))
         self.lay.addLayout(h(*buttons, None, button("Close", self.accept)))
+
+    def report_problem(self):
+        from wms.ui.dialogs.purchasing import NewDiscrepancyDialog
+        if NewDiscrepancyDialog(self.app, self, delivery_note_id=self.dn_id).exec():
+            self.app.changed()
 
     def edit_header(self):
         from PySide6.QtWidgets import QLineEdit

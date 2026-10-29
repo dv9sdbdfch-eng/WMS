@@ -17,6 +17,8 @@ class P:
     GOODS_IN_VIEW = "goods_in.view"
     GOODS_IN_POST = "goods_in.post"
     GOODS_IN_REVERSE = "goods_in.reverse"
+    PURCHASING_VIEW = "purchasing.view"
+    PURCHASING_EDIT = "purchasing.edit"
     GOODS_OUT_VIEW = "goods_out.view"
     GOODS_OUT_POST = "goods_out.post"
     GOODS_OUT_REVERSE = "goods_out.reverse"
@@ -51,6 +53,8 @@ PERMISSION_LABELS = {
     P.GOODS_IN_VIEW: "View delivery notes",
     P.GOODS_IN_POST: "Post Goods In",
     P.GOODS_IN_REVERSE: "Reverse delivery notes",
+    P.PURCHASING_VIEW: "View purchase orders and delivery problems",
+    P.PURCHASING_EDIT: "Create purchase orders, resolve delivery problems",
     P.GOODS_OUT_VIEW: "View Goods Out",
     P.GOODS_OUT_POST: "Post Goods Out",
     P.GOODS_OUT_REVERSE: "Reverse Goods Out",

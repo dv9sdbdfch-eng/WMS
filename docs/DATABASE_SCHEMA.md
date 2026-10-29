@@ -93,6 +93,36 @@ Protected tables (database triggers, see `wms.db.engine`):
 
 * UNIQUE (parent_id, name)
 
+## delivery_discrepancies
+
+| Column | Type | Null | Key / reference |
+|---|---|---|---|
+| number | String(30) | no | UNIQUE |
+| supplier_id | Integer | no | FK suppliers.id, indexed |
+| supplier_name_snapshot | String(200) | yes |  |
+| purchase_order_id | Integer | yes | FK purchase_orders.id, indexed |
+| purchase_order_line_id | Integer | yes | FK purchase_order_lines.id, indexed |
+| delivery_note_id | Integer | yes | FK delivery_notes.id, indexed |
+| product_id | Integer | yes | FK products.id, indexed |
+| reason_code | String(30) | no | FK reason_codes.code, indexed |
+| expected_qty | Quantity | yes |  |
+| received_qty | Quantity | yes |  |
+| quantity | Quantity | no |  |
+| notes | Text | yes |  |
+| is_automatic | Boolean | no |  |
+| status | String(20) | no | indexed |
+| resolution | Text | yes |  |
+| resolved_at | UTCDateTime | yes |  |
+| resolved_by_id | Integer | yes | FK users.id, indexed |
+| created_by_id | Integer | no | FK users.id, indexed |
+| created_at | UTCDateTime | no |  |
+| id | Integer | no | PK |
+| client_token | String(40) | yes | UNIQUE, indexed |
+
+* CHECK quantity >= 0
+* CHECK status IN ('OPEN', 'RESOLVED')
+* UNIQUE INDEX ix_delivery_discrepancies_client_token (client_token)
+
 ## delivery_note_lines
 
 | Column | Type | Null | Key / reference |
@@ -105,6 +135,7 @@ Protected tables (database triggers, see `wms.db.engine`):
 | bin_id | Integer | no | FK bins.id, indexed |
 | notes | Text | yes |  |
 | movement_id | Integer | yes | FK stock_movements.id, indexed |
+| purchase_order_line_id | Integer | yes | FK purchase_order_lines.id, indexed |
 | id | Integer | no | PK |
 
 ## delivery_notes
@@ -119,6 +150,7 @@ Protected tables (database triggers, see `wms.db.engine`):
 | received_by_id | Integer | no | FK users.id, indexed |
 | reversed_by_id | Integer | yes | FK users.id, indexed |
 | supplier_name_snapshot | String(200) | yes |  |
+| purchase_order_id | Integer | yes | FK purchase_orders.id, indexed |
 | id | Integer | no | PK |
 | status | String(20) | no | indexed |
 | notes | Text | yes |  |
@@ -283,6 +315,48 @@ Protected tables (database triggers, see `wms.db.engine`):
 | updated_at | UTCDateTime | no |  |
 | is_active | Boolean | no |  |
 | version | Integer | no |  |
+
+## purchase_order_lines
+
+| Column | Type | Null | Key / reference |
+|---|---|---|---|
+| purchase_order_id | Integer | no | FK purchase_orders.id, indexed |
+| line_no | Integer | no |  |
+| product_id | Integer | no | FK products.id, indexed |
+| quantity | Quantity | no |  |
+| unit_cost | Money | yes |  |
+| notes | Text | yes |  |
+| id | Integer | no | PK |
+
+* CHECK quantity > 0
+* UNIQUE (purchase_order_id, line_no)
+
+## purchase_orders
+
+| Column | Type | Null | Key / reference |
+|---|---|---|---|
+| po_number | String(30) | no | UNIQUE |
+| supplier_id | Integer | no | FK suppliers.id, indexed |
+| supplier_name_snapshot | String(200) | yes |  |
+| site_id | Integer | yes | FK sites.id, indexed |
+| order_date | Date | no | indexed |
+| expected_date | Date | yes | indexed |
+| supplier_reference | String(80) | yes |  |
+| status | String(20) | no | indexed |
+| notes | Text | yes |  |
+| created_by_id | Integer | no | FK users.id, indexed |
+| created_at | UTCDateTime | no |  |
+| ordered_at | UTCDateTime | yes |  |
+| closed_at | UTCDateTime | yes |  |
+| closed_by_id | Integer | yes | FK users.id, indexed |
+| close_reason | Text | yes |  |
+| id | Integer | no | PK |
+| site_number_snapshot | String(50) | yes |  |
+| site_name_snapshot | String(200) | yes |  |
+| client_token | String(40) | yes | UNIQUE, indexed |
+
+* CHECK status IN ('DRAFT', 'ORDERED', 'PARTIALLY_RECEIVED', 'RECEIVED', 'CANCELLED')
+* UNIQUE INDEX ix_purchase_orders_client_token (client_token)
 
 ## reason_codes
 
