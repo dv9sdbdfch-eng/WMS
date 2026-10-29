@@ -31,7 +31,7 @@ class ReturnsPage(ListPage):
         return [Col("Date", lambda r: r.return_date, DATE, 95),
                 Col("Number", lambda r: r.return_number, width=100),
                 Col("Type", lambda r: ReturnType(r.return_type).label, width=150),
-                Col("From / To", lambda r: r.site.display if r.site else (r.supplier.name if r.supplier else ""),
+                Col("From / To", lambda r: r.party_label,
                     width=260),
                 Col("Reference", lambda r: r.reference or "", width=110),
                 Col("Lines", lambda r: len(r.lines), INT, 60),

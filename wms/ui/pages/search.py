@@ -94,16 +94,16 @@ def movement_result_columns() -> list[Col]:
         Col("Date / Time", lambda m: m.occurred_at, DATETIME, 130, sort="date"),
         Col("Type", lambda m: MovementType(m.movement_type).label + (" (reversal)" if m.reversal_of_id else ""),
             width=150, sort="type"),
-        Col("Code", lambda m: m.product.internal_code, width=110, sort="code"),
-        Col("Product", lambda m: m.product.name, width=200, sort="product"),
+        Col("Code", lambda m: m.product_code, width=110, sort="code"),
+        Col("Product", lambda m: m.product_name, width=200, sort="product"),
         Col("Qty", signed_qty, QTY, 80, sort="qty"),
         Col("Unit", lambda m: m.product.unit.code, width=50),
         Col("From", lambda m: movement_route(m)[0], width=190, sort="bin"),
         Col("To", lambda m: movement_route(m)[1], width=190),
-        Col("Project", lambda m: m.site.display if m.site else "", width=160, sort="project"),
-        Col("Supplier", lambda m: m.supplier.name if m.supplier else "", width=130, sort="supplier"),
+        Col("Project", lambda m: m.site_label, width=160, sort="project"),
+        Col("Supplier", lambda m: m.supplier_label, width=130, sort="supplier"),
         Col("Reference", movement_reference, width=130, sort="reference"),
-        Col("User", lambda m: m.user.full_name, width=110, sort="user"),
+        Col("User", lambda m: m.user_label, width=110, sort="user"),
     ]
 
 
@@ -266,12 +266,12 @@ class FilterPanel(QScrollArea):
     def load_options(self) -> None:
         app = self.page.app
         self.category.set_options([(c.full_name, c.id) for c in app.services.reference.categories()])
-        tree = app.services.locations.tree()
+        tree = app.services.locations.tree(include_inactive=True)
         for attr, kind in LOCATION_LEVELS:
             self.locations[attr].set_options([(f"{loc.name} ({loc.path})" if loc.name != loc.code else loc.path,
                                                loc.id) for loc in tree if loc.kind == kind.value])
-        self.bin.set_options(app.bin_options())
-        self.supplier.set_options(app.supplier_options())
+        self.bin.set_options(app.bin_options(include_inactive=True))
+        self.supplier.set_options(app.supplier_options(include_inactive=True))
         self.site.set_options(app.site_options(open_only=False))
         self._options_loaded = True
 

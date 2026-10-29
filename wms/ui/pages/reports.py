@@ -107,7 +107,7 @@ class ReportsPage(Page):
     def refresh(self):
         if not self._loaded:
             self.product.set_options(self.app.product_options(include_inactive=True))
-            self.supplier.set_options(self.app.supplier_options())
+            self.supplier.set_options(self.app.supplier_options(include_inactive=True))
             self.site.set_options(self.app.site_options(open_only=False))
             self.location.set_options(self.app.location_options())
             self._loaded = True

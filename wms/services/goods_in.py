@@ -92,6 +92,9 @@ class GoodsInService(BaseService):
             supplier = s.get(Supplier, header.get("supplier_id")) if header.get("supplier_id") else None
             if supplier is None:
                 raise ValidationError("Supplier is required.", "supplier_id")
+            if not supplier.is_active:
+                raise ValidationError(f"Supplier {supplier.name} has been archived. Restore it first if you "
+                                      f"still deal with them.", "supplier_id")
             norm = normalise_dn_number(dn_number)
             if s.scalar(select(DeliveryNote.id).where(DeliveryNote.supplier_id == supplier.id,
                                                       DeliveryNote.dn_number_norm == norm,

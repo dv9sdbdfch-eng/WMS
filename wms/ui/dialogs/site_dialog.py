@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from wms.core.enums import EntityType, MovementType, SiteStatus
+from wms.core.enums import OPEN_SITE_STATUSES, EntityType, MovementType, SiteStatus
 from wms.core.numbers import fmt_money
 from wms.core.permissions import P
 from wms.ui.dialogs.product_dialog import _changes
@@ -47,7 +47,12 @@ class SiteDialog(QDialog):
         self.setWindowTitle(f"Site {self.site.project_number}" if self.site else "New site / project")
         self.resize(1150, 740)
         lay = QVBoxLayout(self)
-        self.header = label(self.site.display if self.site else "New site / project", "PageTitle")
+        title = "New site / project"
+        if self.site:
+            title = self.site.display
+            if self.site.status not in OPEN_SITE_STATUSES:
+                title += f"  —  {SiteStatus(self.site.status).label}"
+        self.header = label(title, "PageTitle")
         lay.addWidget(self.header)
         self.tabs = QTabWidget()
         lay.addWidget(self.tabs, 1)
@@ -60,7 +65,15 @@ class SiteDialog(QDialog):
                 self.tabs.setCurrentWidget(self.history_tab)
         self.btn_save = button("Save", self.save, primary=True, shortcut="Ctrl+S")
         self.btn_save.setVisible(self.can_edit)
-        lay.addLayout(h(None, button("Close", self.reject), self.btn_save))
+        extra = []
+        if self.site and self.can_edit:
+            if self.site.status in OPEN_SITE_STATUSES:
+                extra.append(button("Mark completed", self.complete))
+            else:
+                extra.append(button("Reopen / restore", self.restore))
+            if self.site.status != SiteStatus.ARCHIVED.value:
+                extra.append(button("Delete project", self.delete, danger=True))
+        lay.addLayout(h(*extra, None, button("Close", self.reject), self.btn_save))
 
     def _details(self) -> QWidget:
         w = QWidget()
@@ -103,14 +116,14 @@ class SiteDialog(QDialog):
             Col("Date", lambda m: m.occurred_at, DATETIME, 130),
             Col("Type", lambda m: MovementType(m.movement_type).label + (" (reversal)" if m.reversal_of_id else ""),
                 width=170),
-            Col("Code", lambda m: m.product.internal_code, width=110),
-            Col("Material", lambda m: m.product.name, width=220),
+            Col("Code", lambda m: m.product_code, width=110),
+            Col("Material", lambda m: m.product_name, width=220),
             Col("Qty", _signed, QTY, 80),
             Col("Unit", lambda m: m.product.unit.code, width=50),
             Col("Document", lambda m: m.doc_number or "", width=100),
             Col("Job Ref", lambda m: m.reference or "", width=100),
-            Col("Issued By", lambda m: issued_by.get(m.doc_id, m.user.full_name)
-                if m.movement_type == MovementType.GOODS_OUT.value else m.user.full_name, width=130)])
+            Col("Issued By", lambda m: issued_by.get(m.doc_id, m.user_label)
+                if m.movement_type == MovementType.GOODS_OUT.value else m.user_label, width=130)])
         self.movements.activated_item.connect(self._open_doc)
         self.movements.set_items(app.services.sites.movements(sid))
         mw = QWidget()
@@ -148,6 +161,28 @@ class SiteDialog(QDialog):
                             Col("Changes", _changes)])
             at.set_items(app.services.audit.for_entity(EntityType.SITE.value, sid))
             self.tabs.addTab(at, "Audit")
+
+    def complete(self):
+        from wms.ui.widgets.common import confirm
+        if confirm(self, "Complete project",
+                   f"Mark {self.site.display} as completed?\n\nIt disappears from normal project selection, so "
+                   f"no new material can be issued to it by mistake. Its full history stays available "
+                   f"(search with completed projects included, reports, this screen).", yes="Mark completed") \
+                and run(self, self.app.services.sites.set_status, self.site.id, SiteStatus.COMPLETED.value):
+            self.app.changed()
+            self.accept()
+
+    def restore(self):
+        from wms.ui.dialogs.removal import restore_record
+        if restore_record(self, "Project", self.site.display, self.app.services.sites.restore, self.site.id):
+            self.app.changed()
+            self.accept()
+
+    def delete(self):
+        from wms.ui.dialogs.removal import delete_record
+        if delete_record(self, self.app.services.sites.removal_plan, self.app.services.sites.remove, self.site.id):
+            self.app.changed()
+            self.accept()
 
     def _open_doc(self, m):
         if m.doc_type and m.doc_id:

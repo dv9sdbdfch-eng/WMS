@@ -326,6 +326,12 @@ class StockOpsService(BaseService):
                                                                     Site.project_number.ilike(like, escape="\\")))),
                 StockMovement.from_bin_id.in_(select(Bin.id).where(Bin.full_code.ilike(like, escape="\\"))),
                 StockMovement.to_bin_id.in_(select(Bin.id).where(Bin.full_code.ilike(like, escape="\\"))),
+                # names as they were at the time (bins, projects, products renamed or removed since)
+                *(col.ilike(like, escape="\\") for col in (
+                    StockMovement.product_code_snapshot, StockMovement.product_name_snapshot,
+                    StockMovement.from_bin_name_snapshot, StockMovement.to_bin_name_snapshot,
+                    StockMovement.site_number_snapshot, StockMovement.site_name_snapshot,
+                    StockMovement.supplier_name_snapshot)),
             ))
         with self.db.read_session() as s:
             return list(s.scalars(q))

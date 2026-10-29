@@ -34,11 +34,11 @@ def movement_table() -> DataTable:
     return DataTable([
         Col("Date / Time", lambda m: m.occurred_at, DATETIME, 130),
         Col("Type", lambda m: MovementType(m.movement_type).label, width=150),
-        Col("Code", lambda m: m.product.internal_code, width=110),
+        Col("Code", lambda m: m.product_code, width=110),
         Col("Qty", lambda m: m.quantity, QTY, 80),
-        Col("From", lambda m: m.from_bin.full_code if m.from_bin else "", width=200),
-        Col("To", lambda m: m.to_bin.full_code if m.to_bin else "", width=200),
-        Col("User", lambda m: m.user.full_name, width=120),
+        Col("From", lambda m: m.from_bin_code, width=200),
+        Col("To", lambda m: m.to_bin_code, width=200),
+        Col("User", lambda m: m.user_label, width=120),
         Col("Recorded", lambda m: m.recorded_at, DATETIME, 130),
         Col("Notes", lambda m: m.notes or "")])
 
@@ -84,7 +84,7 @@ class DeliveryNoteDialog(QDialog):
         dn = app.services.goods_in.get(self.dn_id)
         self.dn = dn
         self.setWindowTitle(f"Delivery note {dn.dn_number}")
-        self.lay.addWidget(label(f"Delivery note {dn.dn_number}  -  {dn.supplier.name}", "PageTitle"))
+        self.lay.addWidget(label(f"Delivery note {dn.dn_number}  -  {dn.supplier_label}", "PageTitle"))
         banner = _status_banner(dn)
         if banner:
             self.lay.addWidget(banner)
@@ -93,17 +93,17 @@ class DeliveryNoteDialog(QDialog):
         ll = QVBoxLayout(left)
         ll.setContentsMargins(0, 0, 0, 0)
         total = sum(((l.unit_cost or 0) * l.quantity for l in dn.lines), 0)
-        ll.addLayout(_form([("Supplier", dn.supplier.name), ("Delivery date", fmt_date(dn.delivery_date)),
+        ll.addLayout(_form([("Supplier", dn.supplier_label), ("Delivery date", fmt_date(dn.delivery_date)),
                             ("PO / reference", dn.po_reference or ""), ("Received by", dn.received_by.full_name),
                             ("Entered", fmt_datetime(dn.created_at)), ("Status", dn.status.title()),
                             ("Total value", fmt_money(total)), ("Notes", dn.notes or "")]))
         tabs = QTabWidget()
         lines = DataTable([Col("#", lambda l: l.line_no, width=40),
-                           Col("Code", lambda l: l.product.internal_code, width=110),
-                           Col("Product", lambda l: l.product.name, width=220),
+                           Col("Code", lambda l: l.product_code, width=110),
+                           Col("Product", lambda l: l.product_name, width=220),
                            Col("Qty received", lambda l: l.quantity, QTY, 100),
                            Col("Unit", lambda l: l.product.unit.code, width=55),
-                           Col("Bin", lambda l: l.bin.full_code, width=200),
+                           Col("Bin", lambda l: l.bin_code, width=200),
                            Col("Unit cost", lambda l: l.unit_cost, MONEY, 85),
                            Col("Notes", lambda l: l.notes or "")])
         lines.set_items(dn.lines)
@@ -170,9 +170,9 @@ class DeliveryNoteDialog(QDialog):
         dn = self.dn
         res = ReportResult(f"Delivery Note {dn.dn_number}", [Column("Code"), Column("Product"), Column("Quantity", RQ),
                                                              Column("Unit"), Column("Bin")],
-                           [[l.product.internal_code, l.product.name, l.quantity, l.product.unit.code,
-                             l.bin.full_code] for l in dn.lines],
-                           f"Supplier: {dn.supplier.name}; Date: {fmt_date(dn.delivery_date)}; "
+                           [[l.product_code, l.product_name, l.quantity, l.product.unit.code,
+                             l.bin_code] for l in dn.lines],
+                           f"Supplier: {dn.supplier_label}; Date: {fmt_date(dn.delivery_date)}; "
                            f"Received by: {dn.received_by.full_name}")
         _print(self, res)
 
@@ -198,19 +198,19 @@ class GoodsIssueDialog(QDialog):
         self.setWindowTitle(f"Goods Out {gi.issue_number}")
         self.resize(1100, 680)
         lay = QVBoxLayout(self)
-        lay.addWidget(label(f"Goods Out {gi.issue_number}  -  {gi.site.display}", "PageTitle"))
+        lay.addWidget(label(f"Goods Out {gi.issue_number}  -  {gi.site_label}", "PageTitle"))
         banner = _status_banner(gi)
         if banner:
             lay.addWidget(banner)
-        lay.addLayout(_form([("Date", fmt_date(gi.issue_date)), ("Site / project", gi.site.display),
+        lay.addLayout(_form([("Date", fmt_date(gi.issue_date)), ("Site / project", gi.site_label),
                              ("Reference / job no.", gi.reference or ""), ("Requested by", gi.requested_by or ""),
                              ("Issued by", gi.issued_by), ("Entered by", f"{gi.user.full_name}, "
                                                                          f"{fmt_datetime(gi.created_at)}"),
                              ("Notes", gi.notes or "")]))
-        t = DataTable([Col("#", lambda l: l.line_no, width=40), Col("Code", lambda l: l.product.internal_code, width=110),
-                       Col("Product", lambda l: l.product.name, width=260), Col("Qty", lambda l: l.quantity, QTY, 90),
+        t = DataTable([Col("#", lambda l: l.line_no, width=40), Col("Code", lambda l: l.product_code, width=110),
+                       Col("Product", lambda l: l.product_name, width=260), Col("Qty", lambda l: l.quantity, QTY, 90),
                        Col("Unit", lambda l: l.product.unit.code, width=55),
-                       Col("From bin", lambda l: l.bin.full_code, width=220),
+                       Col("From bin", lambda l: l.bin_code, width=220),
                        Col("Value", lambda l: (l.unit_cost or 0) * l.quantity, MONEY, 90),
                        Col("Notes", lambda l: l.notes or "")])
         t.set_items(gi.lines)
@@ -226,9 +226,9 @@ class GoodsIssueDialog(QDialog):
         gi = self.gi
         res = ReportResult(f"Goods Out {gi.issue_number}", [Column("Code"), Column("Product"), Column("Quantity", RQ),
                                                             Column("Unit"), Column("From Bin"), Column("Notes")],
-                           [[l.product.internal_code, l.product.name, l.quantity, l.product.unit.code,
-                             l.bin.full_code, l.notes or ""] for l in gi.lines],
-                           f"Site: {gi.site.display}; Date: {fmt_date(gi.issue_date)}; Ref: {gi.reference or '-'}; "
+                           [[l.product_code, l.product_name, l.quantity, l.product.unit.code,
+                             l.bin_code, l.notes or ""] for l in gi.lines],
+                           f"Site: {gi.site_label}; Date: {fmt_date(gi.issue_date)}; Ref: {gi.reference or '-'}; "
                            f"Requested by: {gi.requested_by or '-'}; Issued by: {gi.issued_by}")
         _print(self, res)
 
@@ -252,7 +252,7 @@ class ReturnDialog(QDialog):
         self.setWindowTitle(f"Return {r.return_number}")
         self.resize(1000, 600)
         lay = QVBoxLayout(self)
-        party = r.site.display if r.site else (r.supplier.name if r.supplier else "")
+        party = r.party_label
         lay.addWidget(label(f"{ReturnType(r.return_type).label} {r.return_number}  -  {party}", "PageTitle"))
         banner = _status_banner(r)
         if banner:
@@ -260,11 +260,11 @@ class ReturnDialog(QDialog):
         lay.addLayout(_form([("Date", fmt_date(r.return_date)), ("Reference", r.reference or ""),
                              ("Reason", r.reason or ""), ("Entered by", f"{r.user.full_name}, "
                                                                         f"{fmt_datetime(r.created_at)}")]))
-        t = DataTable([Col("Code", lambda l: l.product.internal_code, width=110),
-                       Col("Product", lambda l: l.product.name, width=260), Col("Qty", lambda l: l.quantity, QTY, 90),
+        t = DataTable([Col("Code", lambda l: l.product_code, width=110),
+                       Col("Product", lambda l: l.product_name, width=260), Col("Qty", lambda l: l.quantity, QTY, 90),
                        Col("Unit", lambda l: l.product.unit.code, width=55),
                        Col("Condition", lambda l: ReturnCondition(l.condition).label, width=90),
-                       Col("Bin", lambda l: l.bin.full_code, width=220), Col("Notes", lambda l: l.notes or "")])
+                       Col("Bin", lambda l: l.bin_code, width=220), Col("Notes", lambda l: l.notes or "")])
         t.set_items(r.lines)
         lay.addWidget(t, 1)
         buttons = []
@@ -288,21 +288,21 @@ class ProductionDialog(QDialog):
         self.setWindowTitle(f"Production {o.order_number}")
         self.resize(950, 560)
         lay = QVBoxLayout(self)
-        lay.addWidget(label(f"{o.order_number}  -  {o.finished_product.internal_code} {o.finished_product.name}",
+        lay.addWidget(label(f"{o.order_number}  -  {o.product_code} {o.product_name}",
                             "PageTitle"))
         banner = _status_banner(o)
         if banner:
             lay.addWidget(banner)
         from wms.core.numbers import fmt_qty
         lay.addLayout(_form([("Quantity produced", f"{fmt_qty(o.quantity)} {o.finished_product.unit.code}"),
-                             ("Stored in", o.output_bin.full_code), ("Production date", fmt_date(o.production_date)),
-                             ("Site / project", o.site.display if o.site else ""), ("Notes", o.notes or ""),
+                             ("Stored in", o.output_bin_code), ("Production date", fmt_date(o.production_date)),
+                             ("Site / project", o.site_label), ("Notes", o.notes or ""),
                              ("Entered by", f"{o.user.full_name}, {fmt_datetime(o.created_at)}")]))
         lay.addWidget(label("Materials consumed", "SectionTitle"))
-        t = DataTable([Col("Code", lambda l: l.product.internal_code, width=110),
-                       Col("Material", lambda l: l.product.name, width=260), Col("Qty", lambda l: l.quantity, QTY, 90),
+        t = DataTable([Col("Code", lambda l: l.product_code, width=110),
+                       Col("Material", lambda l: l.product_name, width=260), Col("Qty", lambda l: l.quantity, QTY, 90),
                        Col("Unit", lambda l: l.product.unit.code, width=55),
-                       Col("From bin", lambda l: l.bin.full_code)])
+                       Col("From bin", lambda l: l.bin_code)])
         t.set_items(o.lines)
         lay.addWidget(t, 1)
         buttons = []
@@ -336,6 +336,9 @@ class BinContentsDialog(QDialog):
         self.banner = label("Quarantine bin - stock here cannot be issued.", "Banner")
         self.banner.hide()
         lay.addWidget(self.banner)
+        self.archived = label("", "Banner", wrap=True)
+        self.archived.hide()
+        lay.addWidget(self.archived)
         tabs = QTabWidget()
         self.table = DataTable([Col("Code", lambda l: l.product.internal_code, width=120),
                                 Col("Product", lambda l: l.product.name, width=340),
@@ -350,10 +353,19 @@ class BinContentsDialog(QDialog):
             t.activated_item.connect(self._open_movement)
         tabs.addTab(self.moved_in, "Recent movements into the bin")
         tabs.addTab(self.moved_out, "Recent movements out of the bin")
+        self.history = DataTable(_bin_history_columns())
+        self.history.activated_item.connect(self._open_movement)
+        self.history_index = tabs.addTab(self.history, "Full history")
+        self.tabs = tabs
         lay.addWidget(tabs, 1)
         buttons = [button("View product", lambda: self._open_product())]
         if app.can(P.STOCK_TRANSFER):
-            buttons.append(button("Transfer selected...", self.transfer))
+            self.transfer_btn = button("Transfer selected...", self.transfer)
+            buttons.append(self.transfer_btn)
+        if app.can(P.LOCATIONS_EDIT):
+            self.delete_btn = button("Delete bin", self.delete_bin, danger=True)
+            self.restore_btn = button("Restore bin", self.restore_bin)
+            buttons += [self.delete_btn, self.restore_btn]
         lay.addLayout(h(*buttons, None, button("Close", self.accept)))
         self.refresh()
 
@@ -361,14 +373,31 @@ class BinContentsDialog(QDialog):
         v = self.app.services.search.bin_view(self.bin_id)
         b = v.bin
         self.setWindowTitle(f"Bin {b.code}")
-        self.title.setText(f"BIN {b.code}" + ("" if b.is_active else "  (archived)"))
+        self.title.setText(f"BIN {b.code}" + ("" if b.is_active else "  —  Archived"))
         self.where.setText(f"Location: {v.path_text}")
-        self.summary.setText(f"{v.product_count} different product(s)   ·   full code {b.full_code}"
+        from wms.core.numbers import fmt_qty
+        self.summary.setText(f"Current stock: {fmt_qty(v.current_stock)}   ·   "
+                             f"{v.product_count} different product(s)   ·   "
+                             f"Historical movements: {v.history_count:,}   ·   full code {b.full_code}"
                              + (f"   ·   {b.description}" if b.description else ""))
-        self.banner.setVisible(not b.is_available)
+        self.banner.setVisible(b.is_active and not b.is_available)
+        if v.is_archived:
+            when = f" on {fmt_datetime(v.removed_on)} by {v.removed_by}" if v.removed_on else ""
+            why = f" Reason: {v.removed_reason}" if v.removed_reason else ""
+            self.archived.setText(f"This bin was removed from active warehouse operations{when}. It cannot "
+                                  f"receive stock or be chosen for transfers. Its history is kept below.{why}")
+        self.archived.setVisible(v.is_archived)
+        if hasattr(self, "delete_btn"):
+            self.delete_btn.setVisible(b.is_active)
+            self.restore_btn.setVisible(not b.is_active)
+        if hasattr(self, "transfer_btn"):
+            self.transfer_btn.setVisible(b.is_active)
         self.table.set_items(v.contents)
         self.moved_in.set_items(v.recent_in)
         self.moved_out.set_items(v.recent_out)
+        self.history.set_items(v.history)
+        if v.is_archived:
+            self.tabs.setCurrentIndex(self.history_index)
 
     def _open_product(self):
         lvl = self.table.current()
@@ -386,18 +415,51 @@ class BinContentsDialog(QDialog):
             self.app.changed()
             self.refresh()
 
+    def delete_bin(self):
+        from wms.core.exceptions import NotFoundError
+        from wms.ui.dialogs.removal import delete_record
+        loc = self.app.services.locations
+        if delete_record(self, loc.bin_removal_plan, loc.remove_bin, self.bin_id):
+            self.app.changed()
+            try:
+                self.refresh()  # archived: stay open on its history
+            except NotFoundError:  # deleted permanently: nothing left to show
+                self.accept()
+
+    def restore_bin(self):
+        from wms.ui.dialogs.removal import restore_record
+        v = self.app.services.search.bin_view(self.bin_id)
+        if restore_record(self, "Bin", v.bin.code, self.app.services.locations.restore_bin, self.bin_id):
+            self.app.changed()
+            self.refresh()
+
+
+def _bin_history_columns() -> list[Col]:
+    """Date | Product | Movement | Qty | From | To | Project | Reference - as recorded at the time."""
+    from wms.services.search import movement_reference
+    return [Col("Date", lambda m: m.occurred_at, DATETIME, 130),
+            Col("Product", lambda m: f"{m.product_code} - {m.product_name}", width=240),
+            Col("Movement", lambda m: MovementType(m.movement_type).label + (" (reversal)" if m.reversal_of_id
+                                                                              else ""), width=150),
+            Col("Qty", lambda m: m.quantity, QTY, 80),
+            Col("From", lambda m: m.from_bin_code or m.supplier_label or m.site_label, width=200),
+            Col("To", lambda m: m.to_bin_code or m.site_label or m.supplier_label, width=200),
+            Col("Project", lambda m: m.site_label, width=180),
+            Col("Reference", movement_reference, width=120),
+            Col("User", lambda m: m.user_label)]
+
 
 def _bin_movement_columns() -> list[Col]:
     from wms.services.search import movement_reference, movement_route
     return [Col("Date / Time", lambda m: m.occurred_at, DATETIME, 130),
             Col("Type", lambda m: MovementType(m.movement_type).label, width=150),
-            Col("Code", lambda m: m.product.internal_code, width=110),
-            Col("Product", lambda m: m.product.name, width=220),
+            Col("Code", lambda m: m.product_code, width=110),
+            Col("Product", lambda m: m.product_name, width=220),
             Col("Qty", lambda m: m.quantity, QTY, 80),
             Col("From", lambda m: movement_route(m)[0], width=200),
             Col("To", lambda m: movement_route(m)[1], width=200),
             Col("Reference", movement_reference, width=120),
-            Col("User", lambda m: m.user.full_name)]
+            Col("User", lambda m: m.user_label)]
 
 
 __all__ = ["DeliveryNoteDialog", "GoodsIssueDialog", "ReturnDialog", "ProductionDialog", "BinContentsDialog",

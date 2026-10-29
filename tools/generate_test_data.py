@@ -179,6 +179,19 @@ def generate(data_dir: Path, products: int = 10_000, deliveries: int = 5_000, is
         movements.sort(key=lambda m: m["occurred_at"])
         keys = ("from_bin_id", "to_bin_id", "site_id", "supplier_id", "doc_id", "reference")
         movements = [{k: None for k in keys} | m for m in movements]
+        # Names as of posting, exactly as StockEngine.post records them.
+        pnames = {r.id: (r.internal_code, r.name) for r in c.execute(select(Product.id, Product.internal_code,
+                                                                            Product.name))}
+        bnames = dict(c.execute(select(Bin.id, Bin.full_code)).all())
+        snames = {r.id: (r.project_number, r.name) for r in c.execute(select(Site.id, Site.project_number, Site.name))}
+        supnames = dict(c.execute(select(Supplier.id, Supplier.name)).all())
+        uname = c.scalar(select(User.full_name).where(User.id == admin))
+        for m in movements:
+            site = snames.get(m["site_id"], (None, None))
+            m.update(product_code_snapshot=pnames[m["product_id"]][0], product_name_snapshot=pnames[m["product_id"]][1],
+                     from_bin_name_snapshot=bnames.get(m["from_bin_id"]), to_bin_name_snapshot=bnames.get(m["to_bin_id"]),
+                     site_number_snapshot=site[0], site_name_snapshot=site[1],
+                     supplier_name_snapshot=supnames.get(m["supplier_id"]), user_name_snapshot=uname)
         c.execute(insert(StockMovement), movements)
         c.execute(insert(DeliveryNoteLine), dn_lines)
         c.execute(insert(GoodsIssueLine), gi_lines)

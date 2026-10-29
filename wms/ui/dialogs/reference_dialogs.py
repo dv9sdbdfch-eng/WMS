@@ -90,7 +90,25 @@ class SupplierDialog(QDialog):
         lay.addWidget(tabs, 1)
         save = button("Save", self.save, primary=True)
         save.setVisible(self.can_edit)
-        lay.addLayout(h(None, button("Close", self.reject), save))
+        extra = []
+        if self.sup and self.can_edit:
+            extra.append(button("Delete supplier", self.delete_supplier, danger=True) if self.sup.is_active
+                         else button("Restore supplier", self.restore_supplier))
+        lay.addLayout(h(*extra, None, button("Close", self.reject), save))
+
+    def delete_supplier(self):
+        from wms.ui.dialogs.removal import delete_record
+        ref = self.app.services.reference
+        if delete_record(self, ref.supplier_removal_plan, ref.remove_supplier, self.sup.id):
+            self.app.changed()
+            self.accept()
+
+    def restore_supplier(self):
+        from wms.ui.dialogs.removal import restore_record
+        if restore_record(self, "Supplier", self.sup.name, self.app.services.reference.restore_supplier,
+                          self.sup.id):
+            self.app.changed()
+            self.accept()
 
     def save(self):
         data = {k: e.text() for k, e in self.f.items()}

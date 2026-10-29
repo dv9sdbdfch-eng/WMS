@@ -21,10 +21,10 @@ class FinishedPage(ProductsPage):
         self.orders = DataTable([
             Col("Date", lambda o: o.production_date, DATE, 95),
             Col("Number", lambda o: o.order_number, width=100),
-            Col("Product", lambda o: f"{o.finished_product.internal_code} - {o.finished_product.name}", width=300),
+            Col("Product", lambda o: f"{o.product_code} - {o.product_name}", width=300),
             Col("Qty", lambda o: o.quantity, QTY, 70),
-            Col("Bin", lambda o: o.output_bin.full_code, width=200),
-            Col("Project", lambda o: o.site.display if o.site else "", width=220),
+            Col("Bin", lambda o: o.output_bin_code, width=200),
+            Col("Project", lambda o: o.site_label, width=220),
             Col("Materials", lambda o: len(o.lines), width=80),
             Col("Status", lambda o: o.status.title())])
         self.orders.setMaximumHeight(240)

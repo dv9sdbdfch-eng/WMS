@@ -491,7 +491,9 @@ def test_upgrade_from_version_1_0_database(tmp_path):
     db = Database(url)
     db.migrate()
     with db.engine.connect() as c:
-        assert c.execute(text("SELECT version_num FROM alembic_version")).scalar() == "0003"
+        from alembic.script import ScriptDirectory
+        head = ScriptDirectory.from_config(cfg).get_current_head()
+        assert c.execute(text("SELECT version_num FROM alembic_version")).scalar() == head
         names = {r[0] for r in c.execute(text("SELECT name FROM sqlite_master WHERE type='trigger'"))}
         assert {"trg_goods_issue_lines_no_delete", "trg_stock_movements_no_update"} <= names
         cols = {r[1] for r in c.execute(text("PRAGMA table_info(goods_issues)"))}

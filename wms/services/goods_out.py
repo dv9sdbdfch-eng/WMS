@@ -21,7 +21,6 @@ from wms.services.numbering import next_number
 from wms.services.stock_engine import StockEngine
 
 
-
 @dataclass
 class IssueLine:
     product_id: int

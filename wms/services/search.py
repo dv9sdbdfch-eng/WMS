@@ -52,6 +52,7 @@ from wms.db.models import (
 from wms.db.types import Quantity, UTCDateTime
 from wms.services.base import BaseService, clean_str, like_pattern, prefix_pattern
 from wms.services.goods_in import normalise_dn_number
+from wms.services.lifecycle import last_removal
 from wms.services.products import (
     ProductRow,
     code_key,
@@ -100,6 +101,13 @@ RECENT_DAYS = 7  # "Recently Received / Issued" = the last 7 days
 
 ARCHIVE_CHOICES = {"ACTIVE": "Active", "ARCHIVED": "Archived", "ALL": "Active and Archived"}
 PROJECT_STATUS_CHOICES = {"ACTIVE": "Active", "CLOSED": "Closed"}
+#: Historical names kept on every movement - searched alongside the current names.
+SNAPSHOT_TEXT_COLUMNS = (
+    StockMovement.product_code_snapshot, StockMovement.product_name_snapshot,
+    StockMovement.from_bin_name_snapshot, StockMovement.to_bin_name_snapshot,
+    StockMovement.site_number_snapshot, StockMovement.site_name_snapshot,
+    StockMovement.supplier_name_snapshot, StockMovement.user_name_snapshot,
+)
 ATTACHMENT_CHOICES = {"WITH": "Has Attachment", "WITHOUT": "Missing Attachment"}
 
 LOCATION_LEVELS = (("warehouse_id", LocationKind.WAREHOUSE), ("zone_id", LocationKind.ZONE),
@@ -360,6 +368,19 @@ class BinView:
     contents: list[StockLevel]
     recent_in: list[StockMovement]
     recent_out: list[StockMovement]
+    history: list[StockMovement] = field(default_factory=list)  # every movement in or out, newest first
+    history_count: int = 0
+    removed_on: datetime | None = None  # when it was taken out of active use (archived bins)
+    removed_by: str | None = None
+    removed_reason: str | None = None
+
+    @property
+    def is_archived(self) -> bool:
+        return not self.bin.is_active
+
+    @property
+    def current_stock(self) -> Decimal:
+        return sum((lvl.quantity for lvl in self.contents), ZERO)
 
     @property
     def product_count(self) -> int:
@@ -420,14 +441,11 @@ def movement_route(m: StockMovement) -> tuple[str, str]:
     label = MovementType(m.movement_type).label
 
     def outside() -> str:
-        if m.site is not None:
-            return m.site.display
-        if m.supplier is not None:
-            return m.supplier.name
-        return label
+        return m.site_label or m.supplier_label or label
 
-    src = f"Bin {m.from_bin.full_code}" if m.from_bin is not None else outside()
-    dst = f"Bin {m.to_bin.full_code}" if m.to_bin is not None else outside()
+    # Names as they were when the movement happened (a bin removed or renamed since still shows).
+    src = f"Bin {m.from_bin_code}" if m.from_bin_id is not None else outside()
+    dst = f"Bin {m.to_bin_code}" if m.to_bin_id is not None else outside()
     return src, dst
 
 
@@ -726,6 +744,8 @@ class SearchService(BaseService):
             parts.append(or_(
                 m.doc_number.ilike(like, escape="\\"), m.reference.ilike(like, escape="\\"),
                 m.notes.ilike(like, escape="\\"),
+                # historical names: finds 'B04' or an old project name after a rename / removal
+                *(col.ilike(like, escape="\\") for col in SNAPSHOT_TEXT_COLUMNS),
                 m.product_id.in_(select(Product.id).where(or_(
                     Product.internal_code.ilike(like, escape="\\"), Product.name.ilike(like, escape="\\"),
                     Product.supplier_code.ilike(like, escape="\\"), Product.barcode.ilike(like, escape="\\"),
@@ -754,6 +774,7 @@ class SearchService(BaseService):
                 code_key_sql(Product.supplier_code).like(pat, escape="\\"),
                 code_key_sql(Product.barcode).like(pat, escape="\\")))),
             m.from_bin_id.in_(bins), m.to_bin_id.in_(bins),
+            code_key_sql(m.product_code_snapshot).like(pat, escape="\\"),
             *([and_(m.doc_type == EntityType.DELIVERY_NOTE.value, m.doc_id.in_(
                 select(DeliveryNote.id).where(DeliveryNote.dn_number_norm.contains(dn_key, autoescape=True))))]
               if len(dn_key) >= 3 else []),
@@ -765,14 +786,14 @@ class SearchService(BaseService):
             "date": m.occurred_at,
             "type": m.movement_type,
             "qty": m.quantity,
-            "code": select(Product.internal_code).where(Product.id == m.product_id).scalar_subquery(),
-            "product": select(Product.name).where(Product.id == m.product_id).scalar_subquery(),
-            "supplier": select(Supplier.name).where(Supplier.id == m.supplier_id).scalar_subquery(),
-            "project": select(Site.name).where(Site.id == m.site_id).scalar_subquery(),
-            "bin": select(Bin.full_code).where(Bin.id == func.coalesce(m.from_bin_id, m.to_bin_id))
-            .scalar_subquery(),
+            # Sorted by the names shown, i.e. as they were at the time
+            "code": m.product_code_snapshot,
+            "product": m.product_name_snapshot,
+            "supplier": m.supplier_name_snapshot,
+            "project": m.site_name_snapshot,
+            "bin": func.coalesce(m.from_bin_name_snapshot, m.to_bin_name_snapshot),
             "reference": func.coalesce(m.doc_number, m.reference),
-            "user": select(User.full_name).where(User.id == m.user_id).scalar_subquery(),
+            "user": m.user_name_snapshot,
         }
         col = keys.get(sort, m.occurred_at)
         direction = col.desc() if descending else col.asc()
@@ -822,26 +843,47 @@ class SearchService(BaseService):
                 exact_bin = or_(func.upper(Bin.code) == text.upper(), code_key_sql(Bin.code) == key)
                 cond = or_(Bin.full_code.ilike(like, escape="\\"),
                            *([code_key_sql(Bin.code).like(key_pattern(key), escape="\\")] if len(key) >= 2 else []))
-                for b in s.scalars(select(Bin).where(cond).order_by(case((exact_bin, 0), else_=1), Bin.full_code)
+                # A bin renamed or removed since is still found by the code it had on old transactions.
+                m = StockMovement
+                by_history = select(m.from_bin_id).where(m.from_bin_name_snapshot.ilike(like, escape="\\")).union(
+                    select(m.to_bin_id).where(m.to_bin_name_snapshot.ilike(like, escape="\\")))
+                cond = or_(cond, Bin.id.in_(by_history))
+                for b in s.scalars(select(Bin).where(cond).order_by(case((exact_bin, 0), else_=1),
+                                                                    Bin.is_active.desc(), Bin.full_code)
                                    .limit(per_kind)):
                     count = s.scalar(select(func.count(StockLevel.id)).where(StockLevel.bin_id == b.id,
                                                                             StockLevel.quantity != ZERO))
-                    hits.append(SearchHit("Bin", EntityType.BIN.value, b.id, b.code,
-                                          " | ".join(x for x in (location_of(b), f"{count} product(s)",
-                                                                 None if b.is_available else "Quarantine",
-                                                                 None if b.is_active else "Archived") if x)))
+                    if b.is_active:
+                        hits.append(SearchHit("Bin", EntityType.BIN.value, b.id, b.code,
+                                              " | ".join(x for x in (location_of(b), f"{count} product(s)",
+                                                                     None if b.is_available else "Quarantine") if x)))
+                    else:
+                        moves = s.scalar(select(func.count(m.id)).where(or_(m.from_bin_id == b.id,
+                                                                            m.to_bin_id == b.id)))
+                        hits.append(SearchHit("Historical Bin", EntityType.BIN.value, b.id, b.code,
+                                              f"{location_of(b)} | Archived - removed from active use | "
+                                              f"{moves:,} historical movement(s)"))
             if ctx.has(P.SITES_VIEW):
+                renamed = select(StockMovement.site_id).where(or_(
+                    StockMovement.site_name_snapshot.ilike(like, escape="\\"),
+                    StockMovement.site_number_snapshot.ilike(like, escape="\\")))
                 for site in s.scalars(select(Site).where(or_(
                         Site.project_number.ilike(like, escape="\\"), Site.name.ilike(like, escape="\\"),
                         Site.customer.ilike(like, escape="\\"), Site.postcode.ilike(like, escape="\\"),
-                        Site.project_manager.ilike(like, escape="\\"))).order_by(Site.name).limit(per_kind)):
-                    hits.append(SearchHit("Project", EntityType.SITE.value, site.id, site.display,
+                        Site.project_manager.ilike(like, escape="\\"), Site.id.in_(renamed)))
+                        .order_by(Site.name).limit(per_kind)):
+                    kind = "Historical Project" if site.status in CLOSED_SITE_STATUSES else "Project"
+                    hits.append(SearchHit(kind, EntityType.SITE.value, site.id, site.display,
                                           " | ".join(x for x in (site.customer, SiteStatus(site.status).label,
                                                                  site.project_manager) if x)))
+            supplied_as = select(StockMovement.supplier_id).where(
+                StockMovement.supplier_name_snapshot.ilike(like, escape="\\"))
             for sup in s.scalars(select(Supplier).where(or_(Supplier.name.ilike(like, escape="\\"),
-                                                            Supplier.code.ilike(like, escape="\\")))
+                                                            Supplier.code.ilike(like, escape="\\"),
+                                                            Supplier.id.in_(supplied_as)))
                                  .order_by(Supplier.name).limit(per_kind)):
-                hits.append(SearchHit("Supplier", EntityType.SUPPLIER.value, sup.id, sup.name,
+                hits.append(SearchHit("Supplier" if sup.is_active else "Historical Supplier",
+                                      EntityType.SUPPLIER.value, sup.id, sup.name,
                                       " | ".join(x for x in (sup.code, sup.contact_name,
                                                              None if sup.is_active else "Archived") if x)))
             if ctx.has(P.GOODS_IN_VIEW):
@@ -852,7 +894,7 @@ class SearchService(BaseService):
                         *([DeliveryNote.dn_number_norm.contains(dn_key, autoescape=True)] if dn_key else [])))
                         .order_by(DeliveryNote.delivery_date.desc()).limit(per_kind)):
                     hits.append(SearchHit("Delivery Note", EntityType.DELIVERY_NOTE.value, dn.id,
-                                          f"{dn.dn_number} - {dn.supplier.name}",
+                                          f"{dn.dn_number} - {dn.supplier_label}",
                                           f"{fmt_date(dn.delivery_date)} | {dn.status.title()}"
                                           + (f" | PO {dn.po_reference}" if dn.po_reference else "")))
             if ctx.has(P.GOODS_OUT_VIEW):
@@ -861,7 +903,7 @@ class SearchService(BaseService):
                         GoodsIssue.requested_by.ilike(like, escape="\\")))
                         .order_by(GoodsIssue.issue_date.desc()).limit(per_kind)):
                     hits.append(SearchHit("Goods Out", EntityType.GOODS_ISSUE.value, gi.id,
-                                          f"{gi.issue_number} - {gi.site.display}",
+                                          f"{gi.issue_number} - {gi.site_label}",
                                           f"{fmt_date(gi.issue_date)} | Ref {gi.reference or '-'} | "
                                           f"{gi.status.title()}"))
                 for r in s.scalars(select(StockReturn).where(or_(StockReturn.return_number.ilike(like, escape="\\"),
@@ -895,7 +937,7 @@ class SearchService(BaseService):
                 if (m.doc_type, m.doc_id) in seen_docs:
                     continue
                 hits.append(SearchHit("Movement", "MOVEMENT", m.id,
-                                      f"{m.doc_number or m.reference} - {m.product.internal_code}",
+                                      f"{m.doc_number or m.reference} - {m.product_code}",
                                       f"{MovementType(m.movement_type).label} | {fmt_qty(m.quantity)} "
                                       f"{m.product.unit.code} | {fmt_date(m.occurred_at)}"))
         return hits
@@ -1008,7 +1050,9 @@ class SearchService(BaseService):
             s.execute(delete(RecentSearch).where(RecentSearch.user_id == self.user.id))
 
     # ---- dedicated views ----------------------------------------------------------
-    def bin_view(self, bin_id: int, recent: int = 20) -> BinView:
+    def bin_view(self, bin_id: int, recent: int = 20, history_limit: int = 5000) -> BinView:
+        """A bin's own page. Works the same for a bin removed from active use: its full movement
+        history (with the names recorded at the time) stays available for investigation."""
         with self.db.read_session() as s:
             b = s.get(Bin, bin_id)
             if b is None:
@@ -1030,7 +1074,17 @@ class SearchService(BaseService):
                                        .order_by(*order).limit(recent).options(*opts)))
             recent_out = list(s.scalars(select(StockMovement).where(StockMovement.from_bin_id == bin_id)
                                         .order_by(*order).limit(recent).options(*opts)))
-        return BinView(b, path, contents, recent_in, recent_out)
+            either = or_(StockMovement.from_bin_id == bin_id, StockMovement.to_bin_id == bin_id)
+            history = list(s.scalars(select(StockMovement).where(either).order_by(*order)
+                                     .limit(history_limit).options(*opts)))
+            history_count = s.scalar(select(func.count(StockMovement.id)).where(either)) or 0
+            view = BinView(b, path, contents, recent_in, recent_out, history, history_count)
+            if not b.is_active:
+                entry = last_removal(s, EntityType.BIN.value, b.id)
+                if entry is not None:
+                    view.removed_on, view.removed_by = entry.occurred_at, entry.username
+                    view.removed_reason = json.loads(entry.new_values or "{}").get("reason")
+        return view
 
     def supplier_view(self, supplier_id: int) -> SupplierView:
         m = StockMovement

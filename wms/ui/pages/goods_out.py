@@ -46,7 +46,7 @@ class IssueHistory(ListPage):
     def columns(self):
         return [Col("Date", lambda g: g.issue_date, DATE, 95),
                 Col("Number", lambda g: g.issue_number, width=100),
-                Col("Site / Project", lambda g: g.site.display, width=260),
+                Col("Site / Project", lambda g: g.site_label, width=260),
                 Col("Job Ref", lambda g: g.reference or "", width=110),
                 Col("Lines", lambda g: len(g.lines), INT, 60),
                 Col("Requested By", lambda g: g.requested_by or "", width=130),
@@ -188,7 +188,7 @@ class GoodsOutPage(Page):
                                   header=header, lines=lines)
         if issue:
             self.app.changed()
-            if confirm(self, "Goods Out posted", f"{issue.issue_number} has been posted to {issue.site.display}.\n\n"
+            if confirm(self, "Goods Out posted", f"{issue.issue_number} has been posted to {issue.site_label}.\n\n"
                        "Open it to print the issue note?", yes="Open"):
                 self.app.open_entity("GOODS_ISSUE", issue.id, self)
             self.clear()

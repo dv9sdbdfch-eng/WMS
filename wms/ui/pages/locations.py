@@ -189,7 +189,7 @@ class LocationsPage(Page):
         self.tree.currentItemChanged.connect(lambda *_: self._load_bins())
         self.tree.itemDoubleClicked.connect(lambda *_: self.edit_location())
         ll.addWidget(self.tree, 1)
-        self.show_inactive = QCheckBox("Show inactive")
+        self.show_inactive = QCheckBox("Show archived (removed from use)")
         self.show_inactive.toggled.connect(lambda _: self.refresh())
         btns = [self.show_inactive, None]
         if self.can_edit:
@@ -205,7 +205,7 @@ class LocationsPage(Page):
                                Col("Code", lambda b: b.code, width=80),
                                Col("Description", lambda b: b.description or "", width=200),
                                Col("Issuable", lambda b: "Yes" if b.is_available else "No - quarantine", width=120),
-                               Col("Active", lambda b: "Yes" if b.is_active else "No", width=60),
+                               Col("Status", lambda b: "Active" if b.is_active else "Archived", width=80),
                                Col("Notes", lambda b: b.notes or "")])
         self.bins.set_row_style(lambda b: "muted" if not b.is_active else ("low" if not b.is_available else None))
         self.bins.activated_item.connect(self.open_bin)
@@ -214,6 +214,9 @@ class LocationsPage(Page):
         self.bin_count = rb[0]
         if self.can_edit:
             rb.append(button("Edit bin", self.edit_bin))
+            rb.append(button("Delete bin", self.delete_bin, danger=True))
+            self.restore_btn = button("Restore bin", self.restore_bin)
+            rb.append(self.restore_btn)
         rl.addLayout(h(*rb))
         split.addWidget(right)
         split.setSizes([380, 900])
@@ -272,6 +275,22 @@ class LocationsPage(Page):
     def edit_bin(self):
         b = self.bins.current()
         if b and BinDialog(self.app, b, None, self).exec():
+            self.app.changed()
+
+    def delete_bin(self):
+        from wms.ui.dialogs.removal import delete_record
+        b = self.bins.current()
+        if b is not None and delete_record(self, self.app.services.locations.bin_removal_plan,
+                                           self.app.services.locations.remove_bin, b.id):
+            self.app.changed()
+
+    def restore_bin(self):
+        from wms.ui.dialogs.removal import restore_record
+        b = self.bins.current()
+        if b is None or b.is_active:
+            info(self, "Restore bin", "Tick 'Show archived' and select an archived bin to restore it.")
+            return
+        if restore_record(self, "Bin", b.code, self.app.services.locations.restore_bin, b.id):
             self.app.changed()
 
     def bulk_bins(self):
