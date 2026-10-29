@@ -190,6 +190,18 @@ def test_scanner_flow_in_lines_editor(ui, sample):
     prod.setEditText("5012345678900")
     prod.lineEdit().returnPressed.emit()
     assert prod.value() == sample.mdf.id
+    # Next: the bin (blank = the product's default bin); scanning a bin label fills it
+    bin_w = ed._bin_widget(0)
+    assert bin_w.value() is None
+    bin_w.setEditText("b05")
+    bin_w.lineEdit().returnPressed.emit()
+    assert bin_w.value() == sample.bin2.id
+    bin_w.setEditText("NO-SUCH-BIN")
+    bin_w.lineEdit().returnPressed.emit()
+    assert bin_w.value() is None
+    bin_w.setEditText("B04")
+    bin_w.lineEdit().returnPressed.emit()
+    assert bin_w.value() == sample.bin1.id
     qty = ed.table.cellWidget(0, 1)
     qty.setText("4")
     qty.returnPressed.emit()
@@ -297,8 +309,10 @@ def test_search_screen_type_results_filter_open(ui, sample):
     row = view.table.items()[0]
     assert (row.location_text, row.bin_text) == ("MAIN / A / R03 / S02", "B04")
     page.search_for("B04")
-    assert page.side.isVisible() and "Bin:  B04" in page.matches.item(0).text()
-    page._open_match(page.matches.item(0))
+    assert page.side.isVisible() and page.matches.item(0).text() == "BINS"  # group heading
+    assert page.matches.item(1).text().startswith("B04\n")
+    page._open_match(page.matches.item(0))  # a heading opens nothing
+    page._open_match(page.matches.item(1))
     assert opened[-1] == "BinContentsDialog"
     # Nothing found: an explicit message instead of an empty table
     page.search_for("no-such-thing-zz")
@@ -599,4 +613,43 @@ def test_reserve_for_project_then_reorder_required(ui, sample, qtbot):
     drafts = app.services.purchasing.list()
     assert len(drafts) == 1 and drafts[0].po.status == "DRAFT"
     assert any(title == "Draft orders" and drafts[0].po.po_number in text for _, title, text in msgs)
+    assert not _errors(msgs), msgs
+
+
+def test_scan_transfer_and_goods_out_project(ui, sample, qtbot):
+    """Transfer: scan product, FROM bin, TO bin, quantity, Ctrl+S. Goods Out: scan the project number."""
+    app, win, msgs, _ = ui
+    from wms.ui.dialogs.stock_dialogs import TransferDialog
+    sample.receive(sample.mdf, 12)
+    dlg = TransferDialog(app)
+    qtbot.addWidget(dlg)
+    for field, scan in ((dlg.product, "mdf-18"), (dlg.src, "B04"), (dlg.dst, "B05")):
+        field.setEditText(scan)
+        field.lineEdit().returnPressed.emit()
+    assert (dlg.product.value(), dlg.src.value(), dlg.dst.value()) == (sample.mdf.id, sample.bin1.id, sample.bin2.id)
+    dlg.qty.setText("5")
+    dlg.save()
+    levels = {lvl.bin_id: lvl.quantity for lvl in app.services.products.stock_by_bin(sample.mdf.id)}
+    assert levels == {sample.bin1.id: Decimal("7"), sample.bin2.id: Decimal("5")}
+
+    win.go("goods_out")
+    page = win.page("goods_out")
+    page.refresh()
+    page.site.setEditText("p-1001")
+    page.site.lineEdit().returnPressed.emit()
+    assert page.site.value() == sample.site.id
+    assert not _errors(msgs), msgs
+
+
+def test_ready_made_views_menu(ui, sample):
+    app, win, msgs, _ = ui
+    from wms.services.search import BUILTIN_VIEWS
+    page = _search_page(win)
+    views = dict(BUILTIN_VIEWS)
+    page.open_builtin(views["Products Without Bin"])
+    assert page.criteria.default_bin == "WITHOUT" and page.chips_w.isVisibleTo(page)
+    page.open_builtin(views["Recently Received"])
+    assert page.criteria.quick == "RECENTLY_RECEIVED" and page.criteria.default_bin is None
+    page.open_builtin(views["Outstanding Purchase Orders"])
+    assert win.nav.currentItem().data(Qt.ItemDataRole.UserRole) == "purchase_orders"
     assert not _errors(msgs), msgs

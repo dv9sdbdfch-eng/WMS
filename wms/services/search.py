@@ -26,7 +26,17 @@ from decimal import Decimal
 from sqlalchemy import and_, case, delete, exists, func, or_, select, type_coerce
 from sqlalchemy.orm import selectinload
 
-from wms.core.enums import CLOSED_SITE_STATUSES, EntityType, ItemType, LocationKind, MovementType, SiteStatus
+from wms.core.enums import (
+    CLOSED_SITE_STATUSES,
+    AttachmentKind,
+    EntityType,
+    ItemType,
+    LocationKind,
+    MovementType,
+    POStatus,
+    ReservationStatus,
+    SiteStatus,
+)
 from wms.core.exceptions import NotFoundError, ValidationError
 from wms.core.numbers import ZERO, fmt_date, fmt_qty, utcnow
 from wms.core.permissions import P
@@ -34,16 +44,20 @@ from wms.db.models import (
     Attachment,
     Bin,
     Category,
+    DeliveryDiscrepancy,
     DeliveryNote,
     DeliveryNoteLine,
     GoodsIssue,
     Location,
     Product,
+    PurchaseOrder,
+    PurchaseOrderLine,
     RecentSearch,
     SavedSearch,
     Site,
     StockLevel,
     StockMovement,
+    StockReservation,
     StockReturn,
     Supplier,
     Unit,
@@ -61,6 +75,7 @@ from wms.services.products import (
     search_terms,
     text_filter,
 )
+from wms.services.reservations import reserved_query
 from wms.services.stock_engine import product_totals_query
 
 # --- vocabularies ------------------------------------------------------------------
@@ -88,12 +103,12 @@ DATE_PRESETS = {
     "CUSTOM": "Custom Date Range",
 }
 
-STOCK_STATUSES = {"IN_STOCK": "In Stock", "OUT_OF_STOCK": "Out of Stock", "LOW_STOCK": "Low Stock"}
+STOCK_STATUSES = {"IN_STOCK": "In Stock", "OUT_OF_STOCK": "Out of Stock", "LOW_STOCK": "Reorder Required"}
 
 QUICK_FILTERS = {
     "ALL": "All",
     "IN_STOCK": "In Stock",
-    "LOW_STOCK": "Low Stock",
+    "LOW_STOCK": "Reorder Required",
     "OUT_OF_STOCK": "Out of Stock",
     "RECENTLY_RECEIVED": "Recently Received",
     "RECENTLY_ISSUED": "Recently Issued",
@@ -112,6 +127,8 @@ SNAPSHOT_TEXT_COLUMNS = (
     StockMovement.supplier_name_snapshot, StockMovement.user_name_snapshot,
 )
 ATTACHMENT_CHOICES = {"WITH": "Has Attachment", "WITHOUT": "Missing Attachment"}
+PHOTO_CHOICES = {"WITH": "Has Photo", "WITHOUT": "Missing Photo"}
+DEFAULT_BIN_CHOICES = {"WITH": "Bin Assigned", "WITHOUT": "No Bin Assigned"}
 
 LOCATION_LEVELS = (("warehouse_id", LocationKind.WAREHOUSE), ("zone_id", LocationKind.ZONE),
                    ("rack_id", LocationKind.RACK), ("shelf_id", LocationKind.SHELF))
@@ -129,6 +146,8 @@ FILTER_LABELS = {
     "category_id": "Category",
     "brand": "Brand",
     "archive": "Status",
+    "photo": "Photo",
+    "default_bin": "Default Bin",
     "stock_status": "Stock",
     "qty_gt": "Qty more than",
     "qty_lt": "Qty less than",
@@ -145,6 +164,7 @@ FILTER_LABELS = {
     "project_status": "Project",
     "movement_types": "Transaction",
     "dn_number": "Delivery Note",
+    "po_number": "Purchase Order",
     "reference": "Reference",
     "attachment": "Attachment",
     "date": "Date",
@@ -167,6 +187,8 @@ class SearchCriteria:
     category_id: int | None = None
     brand: str | None = None
     archive: str | None = None  # ACTIVE / ARCHIVED / ALL; None = products: active only, transactions: all
+    photo: str | None = None  # WITH / WITHOUT a product photo
+    default_bin: str | None = None  # WITH / WITHOUT a default storage bin
     # Stock
     stock_status: str | None = None
     qty_gt: Decimal | None = None
@@ -188,6 +210,7 @@ class SearchCriteria:
     # Transactions / documents
     movement_types: list[str] = field(default_factory=list)  # MOVEMENT_GROUPS keys
     dn_number: str | None = None
+    po_number: str | None = None
     reference: str | None = None
     attachment: str | None = None
     # Date
@@ -471,6 +494,54 @@ def _ilike(col, text: str):
     return col.ilike(like_pattern(text), escape="\\")
 
 
+class StockColumns:
+    """SQL for a product's stock states (see ProductRow), joined onto a product query with join()."""
+
+    def __init__(self):
+        self.totals = product_totals_query().subquery()
+        self.res = reserved_query().subquery()
+        self.on_hand = type_coerce(func.coalesce(self.totals.c.on_hand, 0), Quantity())
+        self.usable = type_coerce(func.coalesce(self.totals.c.available, 0), Quantity())
+        self.reserved = type_coerce(func.coalesce(self.res.c.reserved, 0), Quantity())
+        self.available = type_coerce(self.usable - self.reserved, Quantity())
+        # The reorder level when set and above the minimum, else the minimum; NULL = never flagged.
+        level_set = and_(Product.reorder_level.is_not(None), Product.reorder_level > 0)
+        min_set = and_(Product.min_stock.is_not(None), Product.min_stock > 0)
+        self.reorder_point = case(
+            (and_(level_set, or_(~min_set, Product.reorder_level > Product.min_stock)), Product.reorder_level),
+            (min_set, Product.min_stock), else_=None)
+
+    def join(self, q):
+        return (q.outerjoin(self.totals, self.totals.c.product_id == Product.id)
+                .outerjoin(self.res, self.res.c.product_id == Product.id))
+
+
+#: Ready-made views in the Saved searches menu (spec section 20). A dict is a search; "page:<key>"
+#: opens that screen instead (its default filter already shows the open items).
+BUILTIN_VIEWS: tuple[tuple[str, dict | str], ...] = (
+    ("Reorder Required", {"stock_status": "LOW_STOCK"}),
+    ("Products Without Bin", {"default_bin": "WITHOUT"}),
+    ("Missing Product Photos", {"photo": "WITHOUT"}),
+    ("Recently Received", {"quick": "RECENTLY_RECEIVED"}),
+    ("Recently Issued", {"quick": "RECENTLY_ISSUED"}),
+    ("Delivery Problems (open)", "page:discrepancies"),
+    ("Outstanding Purchase Orders", "page:purchase_orders"),
+    ("Active Reservations", "page:reservations"),
+)
+
+#: Movements that send stock to a project or bring it back (net quantity per project).
+SITE_MOVEMENT_TYPES = (MovementType.GOODS_OUT.value, MovementType.RETURN_FROM_SITE.value)
+
+#: Order and heading of the groups in "Other matches" (spec: products, locations, project history...).
+GROUP_TITLES = {
+    "Location": "LOCATIONS", "Project History": "PROJECT HISTORY", "Movements": "MOVEMENTS",
+    "Delivery Note": "DELIVERY NOTES", "Purchase Order": "PURCHASE ORDERS", "Delivery Problem": "DELIVERY PROBLEMS",
+    "Reservation": "RESERVATIONS", "Goods Out": "GOODS OUT", "Return": "RETURNS",
+    "Bin": "BINS", "Historical Bin": "BINS", "Project": "PROJECTS", "Historical Project": "PROJECTS",
+    "Supplier": "SUPPLIERS", "Historical Supplier": "SUPPLIERS",
+}
+
+
 # --- the service -------------------------------------------------------------------
 
 class SearchService(BaseService):
@@ -481,27 +552,26 @@ class SearchService(BaseService):
                  descending: bool = False) -> SearchResult:
         self.require(P.PRODUCTS_VIEW)
         c.validate()
-        totals = product_totals_query().subquery()
-        on_hand = type_coerce(func.coalesce(totals.c.on_hand, 0), Quantity())
-        available = type_coerce(func.coalesce(totals.c.available, 0), Quantity())
-        conds = self._product_conditions(c, on_hand, available, products_mode=True)
-        order = self._product_order(sort, descending, c.text, on_hand)
+        st = StockColumns()
+        conds = self._product_conditions(c, st, products_mode=True)
+        order = self._product_order(sort, descending, c.text, st)
         with self.db.read_session() as s:
             def filtered(q):
-                return self._apply_related_product_filters(
-                    s, c, q.outerjoin(totals, totals.c.product_id == Product.id).where(*conds))
+                return self._apply_related_product_filters(s, c, st.join(q).where(*conds))
 
-            q = filtered(select(Product, on_hand, available)).order_by(*order, Product.internal_code).limit(limit)
+            q = filtered(select(Product, st.on_hand, st.usable, st.reserved)).order_by(
+                *order, Product.internal_code).limit(limit)
             total, rows = 0, []
             if c.text.strip():
                 # Text is tested on every product anyway: count in the same pass (count() OVER ()).
-                for p, oh, av, n in s.execute(q.add_columns(func.count().over())).unique():
-                    rows.append(ProductHit(p, Decimal(oh or 0), Decimal(av or 0)))
+                for p, oh, us, rs, n in s.execute(q.add_columns(func.count().over())).unique():
+                    rows.append(ProductHit(p, Decimal(oh or 0), Decimal(us or 0), Decimal(rs or 0)))
                     total = n
             else:
                 total = s.scalar(select(func.count()).select_from(filtered(select(Product.id)).subquery()))
                 if total:
-                    rows = [ProductHit(p, Decimal(oh or 0), Decimal(av or 0)) for p, oh, av in s.execute(q).unique()]
+                    rows = [ProductHit(p, Decimal(oh or 0), Decimal(us or 0), Decimal(rs or 0))
+                            for p, oh, us, rs in s.execute(q).unique()]
             if rows:
                 by_id = {r.product.id: r for r in rows}
                 levels = s.execute(
@@ -513,14 +583,15 @@ class SearchService(BaseService):
             exact = self._exact_product(s, c.text)
         return SearchResult(rows, total or 0, limit, exact)
 
-    def _product_order(self, sort: str, descending: bool, text: str, on_hand):
-        status = case((or_(Product.min_stock.is_(None), Product.min_stock <= 0), 3),
-                      (on_hand <= 0, 0), (on_hand <= Product.min_stock, 1), else_=2)
+    def _product_order(self, sort: str, descending: bool, text: str, st: StockColumns):
+        status = case((st.reorder_point.is_(None), 3), (st.available <= 0, 0), (st.available <= st.reorder_point, 1),
+                      else_=2)
         keys = {
             "code": Product.internal_code,
             "name": Product.name,
             "description": Product.description,
-            "qty": on_hand,
+            "qty": st.on_hand,
+            "available": st.available,
             "unit": select(Unit.code).where(Unit.id == Product.unit_id).scalar_subquery(),
             "supplier": select(Supplier.name).where(Supplier.id == Product.supplier_id).scalar_subquery(),
             "bin": select(func.min(Bin.code)).join(StockLevel, StockLevel.bin_id == Bin.id).where(
@@ -542,7 +613,7 @@ class SearchService(BaseService):
                      (code_key_sql(Product.supplier_code) == key, 1),
                      (code_key_sql(Product.internal_code).like(key_pattern(key)[1:], escape="\\"), 2), else_=3)]
 
-    def _product_conditions(self, c: SearchCriteria, on_hand, available, products_mode: bool) -> list:
+    def _product_conditions(self, c: SearchCriteria, st: StockColumns, products_mode: bool) -> list:
         """Conditions on ``Product`` (and its stock totals) shared by both result lists."""
         conds: list = []
         if c.text.strip() and products_mode:
@@ -563,11 +634,21 @@ class SearchService(BaseService):
             val = (getattr(c, attr) or "").strip()
             if val:
                 conds.append(_ilike(col, val))
+        if c.photo in PHOTO_CHOICES:
+            has = exists().where(Attachment.entity_type == EntityType.PRODUCT.value, Attachment.entity_id == Product.id,
+                                 Attachment.kind == AttachmentKind.PHOTO.value, Attachment.is_deleted.is_(False))
+            conds.append(has if c.photo == "WITH" else ~has)
+        if c.default_bin == "WITH":
+            conds.append(Product.default_bin_id.is_not(None))
+        elif c.default_bin == "WITHOUT":
+            conds.append(Product.default_bin_id.is_(None))
         if c.category_id:
             conds.append(Product.category_id.in_(
                 select(Category.id).where((Category.id == c.category_id) | (Category.parent_id == c.category_id))))
-        # Stock
-        low = and_(Product.min_stock.is_not(None), Product.min_stock > 0, available <= Product.min_stock)
+        # Stock. Low = reorder required: Available (usable - reserved) at or below the reorder level /
+        # minimum, exactly as the Reorder Required list judges it.
+        on_hand = st.on_hand
+        low = and_(st.reorder_point.is_not(None), st.available <= st.reorder_point)
         status_cond = {"IN_STOCK": on_hand > 0, "OUT_OF_STOCK": on_hand <= 0, "LOW_STOCK": low}
         if c.stock_status in status_cond:
             conds.append(status_cond[c.stock_status])
@@ -659,6 +740,8 @@ class SearchService(BaseService):
                                                    *([DeliveryNote.dn_number_norm.contains(key, autoescape=True)]
                                                      if key else [])))
             conds.append(and_(m.doc_type == EntityType.DELIVERY_NOTE.value, m.doc_id.in_(dn)))
+        if (c.po_number or "").strip() and not products_mode:
+            conds.append(and_(m.doc_type == EntityType.DELIVERY_NOTE.value, m.doc_id.in_(self._po_dn_ids(c.po_number))))
         if (c.reference or "").strip():
             ref = c.reference.strip()
             gi = select(GoodsIssue.id).where(_ilike(GoodsIssue.reference, ref))
@@ -675,7 +758,26 @@ class SearchService(BaseService):
         return conds
 
     # ---- products, continued: filters that live on other tables ----------------
+    @staticmethod
+    def _po_ids(po_number: str):
+        """Purchase orders whose number or supplier reference contains the text."""
+        t = po_number.strip()
+        return select(PurchaseOrder.id).where(or_(_ilike(PurchaseOrder.po_number, t),
+                                                  _ilike(PurchaseOrder.supplier_reference, t)))
+
+    def _po_dn_ids(self, po_number: str):
+        """Delivery notes received against those orders, or quoting the number as their PO reference."""
+        return select(DeliveryNote.id).where(or_(DeliveryNote.purchase_order_id.in_(self._po_ids(po_number)),
+                                                 _ilike(DeliveryNote.po_reference, po_number.strip())))
+
     def _apply_related_product_filters(self, s, c: SearchCriteria, q):
+        if (c.po_number or "").strip():
+            # Products on the order: ordered on it or delivered against it.
+            ordered = select(PurchaseOrderLine.product_id).where(
+                PurchaseOrderLine.purchase_order_id.in_(self._po_ids(c.po_number)))
+            delivered = select(DeliveryNoteLine.product_id).where(
+                DeliveryNoteLine.delivery_note_id.in_(self._po_dn_ids(c.po_number)))
+            q = q.where(or_(Product.id.in_(ordered), Product.id.in_(delivered)))
         if c.supplier_id:
             received = select(StockMovement.product_id).where(
                 StockMovement.supplier_id == c.supplier_id,
@@ -710,15 +812,13 @@ class SearchService(BaseService):
                 conds.append(or_(m.from_bin_id.in_(bins), m.to_bin_id.in_(bins)))
             if c.text.strip():
                 conds.append(self._movement_text(c.text))
-            totals = product_totals_query().subquery()
-            on_hand = type_coerce(func.coalesce(totals.c.on_hand, 0), Quantity())
-            available = type_coerce(func.coalesce(totals.c.available, 0), Quantity())
-            pconds = self._product_conditions(c, on_hand, available, products_mode=False)
+            st = StockColumns()
+            pconds = self._product_conditions(c, st, products_mode=False)
             if pconds:
-                prod = select(Product.id).where(*pconds)
+                prod = select(Product.id)
                 if self._needs_stock_totals(c):
-                    prod = prod.outerjoin(totals, totals.c.product_id == Product.id)
-                conds.append(m.product_id.in_(prod))
+                    prod = st.join(prod)
+                conds.append(m.product_id.in_(prod.where(*pconds)))
             order = self._movement_order(sort, descending)
             opts = (selectinload(m.product), selectinload(m.from_bin), selectinload(m.to_bin),
                     selectinload(m.site), selectinload(m.supplier), selectinload(m.user))
@@ -917,6 +1017,67 @@ class SearchService(BaseService):
                                    .limit(per_kind)):
                     hits.append(SearchHit("Return", EntityType.RETURN.value, r.id, r.return_number,
                                           f"{fmt_date(r.return_date)} | {r.reference or ''}"))
+            if ctx.has(P.PURCHASING_VIEW):
+                for po in s.scalars(select(PurchaseOrder).where(or_(
+                        PurchaseOrder.po_number.ilike(like, escape="\\"),
+                        PurchaseOrder.supplier_reference.ilike(like, escape="\\")))
+                        .order_by(PurchaseOrder.order_date.desc(), PurchaseOrder.id.desc()).limit(per_kind)):
+                    hits.append(SearchHit("Purchase Order", EntityType.PURCHASE_ORDER.value, po.id,
+                                          f"{po.po_number} - {po.supplier_label}",
+                                          " | ".join(x for x in (fmt_date(po.order_date), POStatus(po.status).label,
+                                                                 po.supplier_reference) if x)))
+                for d in s.scalars(select(DeliveryDiscrepancy).where(DeliveryDiscrepancy.number.ilike(
+                        like, escape="\\")).order_by(DeliveryDiscrepancy.id.desc()).limit(per_kind)):
+                    hits.append(SearchHit("Delivery Problem", EntityType.DISCREPANCY.value, d.id, d.number,
+                                          f"{d.product.internal_code} | {d.status.title()}"))
+            if ctx.has(P.STOCK_VIEW):
+                for r in s.scalars(select(StockReservation).where(StockReservation.number.ilike(
+                        like, escape="\\")).order_by(StockReservation.id.desc()).limit(per_kind)):
+                    hits.append(SearchHit("Reservation", EntityType.RESERVATION.value, r.id, r.number,
+                                          f"{r.product.internal_code} {fmt_qty(r.quantity)} for {r.site_label} | "
+                                          f"{ReservationStatus(r.status).label}"))
+        return hits
+
+    # ---- one product, grouped (what a scan of H3311 should answer at a glance) ----
+    def product_groups(self, product_id: int, per_kind: int = 8) -> list[SearchHit]:
+        """Where it is, which projects had it, which delivery notes brought it, how many movements."""
+        hits: list[SearchHit] = []
+        m = StockMovement
+        with self.db.read_session() as s:
+            p = s.get(Product, product_id)
+            if p is None:
+                return []
+            unit = p.unit.code
+            for lvl in s.scalars(select(StockLevel).where(StockLevel.product_id == product_id,
+                                                          StockLevel.quantity != ZERO)
+                                 .order_by(StockLevel.quantity.desc())).unique():
+                hits.append(SearchHit("Location", EntityType.BIN.value, lvl.bin_id, lvl.bin.code,
+                                      f"{fmt_qty(lvl.quantity)} {unit} | {location_of(lvl.bin)}"
+                                      + ("" if lvl.bin.is_available else " | Quarantine")))
+            if self.ctx.has(P.SITES_VIEW):
+                net: dict[int, Decimal] = {}
+                for site_id, from_bin, qty in s.execute(
+                        select(m.site_id, m.from_bin_id, m.quantity).where(
+                            m.product_id == product_id, m.site_id.is_not(None),
+                            m.movement_type.in_(SITE_MOVEMENT_TYPES))):
+                    net[site_id] = net.get(site_id, ZERO) + (qty if from_bin else -qty)
+                for site_id, qty in sorted(net.items(), key=lambda kv: -kv[1])[:per_kind]:
+                    site = s.get(Site, site_id)
+                    hits.append(SearchHit("Project History", EntityType.SITE.value, site_id, site.display,
+                                          f"{fmt_qty(qty)} {unit} net (issued less returned) | "
+                                          f"{SiteStatus(site.status).label}"))
+            if self.ctx.has(P.GOODS_IN_VIEW):
+                dns = select(DeliveryNoteLine.delivery_note_id).where(DeliveryNoteLine.product_id == product_id)
+                for dn in s.scalars(select(DeliveryNote).where(DeliveryNote.id.in_(dns))
+                                    .order_by(DeliveryNote.delivery_date.desc(), DeliveryNote.id.desc())
+                                    .limit(per_kind)):
+                    hits.append(SearchHit("Delivery Note", EntityType.DELIVERY_NOTE.value, dn.id,
+                                          f"{dn.dn_number} - {dn.supplier_label}",
+                                          f"{fmt_date(dn.delivery_date)} | {dn.status.title()}"))
+            if self.ctx.has(P.STOCK_VIEW):
+                count = s.scalar(select(func.count(m.id)).where(m.product_id == product_id)) or 0
+                hits.append(SearchHit("Movements", "MOVEMENTS", product_id, f"{count:,} matching transaction(s)",
+                                      "Open the full movement history"))
         return hits
 
     def search(self, text: str, per_kind: int = 50) -> list[SearchHit]:
@@ -979,6 +1140,12 @@ class SearchService(BaseService):
                     val = PROJECT_STATUS_CHOICES.get(v, v)
                 elif key == "attachment":
                     out.append((key, ATTACHMENT_CHOICES.get(v, v)))
+                    continue
+                elif key == "photo":
+                    out.append((key, PHOTO_CHOICES.get(v, v)))
+                    continue
+                elif key == "default_bin":
+                    out.append((key, DEFAULT_BIN_CHOICES.get(v, v)))
                     continue
                 elif key == "movement_types":
                     val = ", ".join(MOVEMENT_GROUPS[g][0] for g in v if g in MOVEMENT_GROUPS)

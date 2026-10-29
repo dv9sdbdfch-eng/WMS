@@ -35,9 +35,13 @@ from wms.core.permissions import P
 from wms.services.search import (
     ARCHIVE_CHOICES,
     ATTACHMENT_CHOICES,
+    BUILTIN_VIEWS,
     DATE_PRESETS,
+    DEFAULT_BIN_CHOICES,
+    GROUP_TITLES,
     LOCATION_LEVELS,
     MOVEMENT_GROUPS,
+    PHOTO_CHOICES,
     PROJECT_STATUS_CHOICES,
     QUICK_FILTERS,
     STOCK_STATUSES,
@@ -64,6 +68,13 @@ from wms.ui.widgets.common import (
     show_error,
 )
 
+#: Inside its own group a hit needs no "Bin:" prefix; mixed groups (BINS: live and historical) keep it.
+GROUP_KIND_SINGULAR = {"LOCATIONS": "Location", "PROJECT HISTORY": "Project History", "MOVEMENTS": "Movements",
+                       "DELIVERY NOTES": "Delivery Note", "PURCHASE ORDERS": "Purchase Order",
+                       "DELIVERY PROBLEMS": "Delivery Problem", "RESERVATIONS": "Reservation",
+                       "GOODS OUT": "Goods Out", "RETURNS": "Return", "BINS": "Bin", "PROJECTS": "Project",
+                       "SUPPLIERS": "Supplier"}
+
 
 def product_result_columns() -> list[Col]:
     return [
@@ -72,6 +83,7 @@ def product_result_columns() -> list[Col]:
         Col("Description", lambda r: (r.product.description or "").replace("\n", " "), width=200,
             sort="description"),
         Col("Qty", lambda r: r.on_hand, QTY, 80, sort="qty"),
+        Col("Available", lambda r: r.available, QTY, 80, sort="available"),
         Col("Unit", lambda r: r.product.unit.code, width=55, sort="unit"),
         Col("Location", lambda r: r.location_text, width=200, sort="location"),
         Col("Bin", lambda r: r.bin_text, width=100, sort="bin"),
@@ -191,6 +203,10 @@ class FilterPanel(QScrollArea):
         f.addRow("Category", self.category)
         f.addRow("Brand", self.brand)
         f.addRow("Active / Archived", self.archive)
+        self.photo = combo(PHOTO_CHOICES)
+        self.default_bin = combo(DEFAULT_BIN_CHOICES)
+        f.addRow("Photo", self.photo)
+        f.addRow("Default bin", self.default_bin)
 
         f = group("Stock")
         self.stock_status = combo(STOCK_STATUSES)
@@ -242,9 +258,11 @@ class FilterPanel(QScrollArea):
 
         f = group("Documents")
         self.dn_number = text("e.g. DN-74821")
+        self.po_number = text("e.g. PO-000123")
         self.reference = text("job / PO / document no.")
         self.attachment = combo(ATTACHMENT_CHOICES)
         f.addRow("Delivery note number", self.dn_number)
+        f.addRow("Purchase order", self.po_number)
         f.addRow("Reference number", self.reference)
         f.addRow("Attachment", self.attachment)
 
@@ -286,9 +304,10 @@ class FilterPanel(QScrollArea):
     def read_into(self, c: SearchCriteria) -> None:
         """Copy the panel into the criteria. Raises on an unreadable number or date."""
         for attr in ("product_code", "barcode", "name", "description", "brand", "supplier_code", "project_number",
-                     "customer", "project_manager", "dn_number", "reference"):
+                     "customer", "project_manager", "dn_number", "po_number", "reference"):
             setattr(c, attr, getattr(self, attr).text().strip() or None)
-        for attr in ("archive", "stock_status", "project_status", "attachment", "date_preset"):
+        for attr in ("archive", "photo", "default_bin", "stock_status", "project_status", "attachment",
+                     "date_preset"):
             setattr(c, attr, getattr(self, attr).currentData())
         c.category_id = self.category.value()
         c.supplier_id = self.supplier.value()
@@ -309,12 +328,13 @@ class FilterPanel(QScrollArea):
         self._loading = True
         try:
             for attr in ("product_code", "barcode", "name", "description", "brand", "supplier_code",
-                         "project_number", "customer", "project_manager", "dn_number", "reference"):
+                         "project_number", "customer", "project_manager", "dn_number", "po_number", "reference"):
                 box = getattr(self, attr)
                 box.blockSignals(True)
                 box.setText(getattr(c, attr) or "")
                 box.blockSignals(False)
-            for attr in ("archive", "stock_status", "project_status", "attachment", "date_preset"):
+            for attr in ("archive", "photo", "default_bin", "stock_status", "project_status", "attachment",
+                         "date_preset"):
                 cb = getattr(self, attr)
                 cb.setCurrentIndex(max(0, cb.findData(getattr(c, attr))))
             self.category.set_value(c.category_id)
@@ -603,19 +623,42 @@ class SearchPage(Page):
 
     def _update_matches(self):
         self.matches.clear()
-        hits = self.app.services.search.matches(self.criteria.text) if self.criteria.text else []
+        svc = self.app.services.search
+        hits = []
+        if self.criteria.text:
+            # A scanned / typed code that names one product: where it is, projects, deliveries first.
+            exact = svc.exact_product(self.criteria.text)
+            if exact is not None:
+                hits += svc.product_groups(exact.id)
+            hits += svc.matches(self.criteria.text)
+        groups: dict[str, list] = {}
         for hit in hits:
-            item = QListWidgetItem(f"{hit.kind}:  {hit.title}\n{hit.detail}")
-            item.setData(Qt.ItemDataRole.UserRole, hit)
-            item.setToolTip("Open " + hit.kind.lower())
-            self.matches.addItem(item)
+            groups.setdefault(GROUP_TITLES.get(hit.kind, hit.kind.upper()), []).append(hit)
+        for title, members in groups.items():
+            head = QListWidgetItem(title)
+            head.setFlags(Qt.ItemFlag.NoItemFlags)
+            font = head.font()
+            font.setBold(True)
+            head.setFont(font)
+            self.matches.addItem(head)
+            for hit in members:
+                text = hit.title if hit.kind == GROUP_KIND_SINGULAR.get(title, hit.kind) else f"{hit.kind}:  {hit.title}"
+                item = QListWidgetItem(f"{text}\n{hit.detail}")
+                item.setData(Qt.ItemDataRole.UserRole, hit)
+                item.setToolTip("Open " + hit.kind.lower())
+                self.matches.addItem(item)
         self.side.setVisible(bool(hits))
 
     def _open_match(self, item):
         hit = item.data(Qt.ItemDataRole.UserRole)
+        if hit is None:
+            return  # a group heading
         self._remember()
-        tab = {"SITE": "materials", "SUPPLIER": "products"}.get(hit.entity_type)
-        self.app.open_entity(hit.entity_type, hit.entity_id, self, tab=tab)
+        if hit.entity_type == "MOVEMENTS":
+            self.app.open_entity(EntityType.PRODUCT.value, hit.entity_id, self, tab="history")
+        else:
+            tab = {"SITE": "materials", "SUPPLIER": "products"}.get(hit.entity_type)
+            self.app.open_entity(hit.entity_type, hit.entity_id, self, tab=tab)
         self.app.changed()
 
     # -- chips --------------------------------------------------------------
@@ -709,6 +752,10 @@ class SearchPage(Page):
 
     def _saved_menu(self):
         m = QMenu(self)
+        ready = m.addMenu("Ready-made views")
+        for name, view in BUILTIN_VIEWS:
+            ready.addAction(name, lambda v=view: self.open_builtin(v))
+        m.addSeparator()
         saved = self.app.services.search.saved_searches()
         if not saved:
             act = m.addAction("No saved searches yet - set filters and press 'Save search...'")
@@ -721,6 +768,16 @@ class SearchPage(Page):
             for s in saved:
                 delete.addAction(s.name, lambda s=s: self._delete_saved(s))
         m.exec(self.saved_btn.mapToGlobal(self.saved_btn.rect().bottomLeft()))
+
+    def open_builtin(self, view) -> None:
+        """A ready-made view: a search, or another screen (open purchase orders, delivery problems)."""
+        if isinstance(view, str):
+            if self.main_window is not None:
+                self.main_window.go(view.split(":", 1)[1])
+            return
+        c = SearchCriteria.from_dict(view)
+        c.text = ""
+        self.apply_criteria(c)
 
     def open_saved(self, saved) -> None:
         self.apply_criteria(SearchCriteria.from_json(saved.criteria))

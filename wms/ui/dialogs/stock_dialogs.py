@@ -59,8 +59,17 @@ class TransferDialog(QDialog):
         form.addRow("Quantity *", self.qty)
         form.addRow("Notes", self.notes)
         lay.addLayout(form)
-        ok = button("Transfer", self.save, primary=True)
+        lay.addWidget(label("Scanner: scan product, FROM bin, TO bin, type the quantity, then Ctrl+S.",
+                            "Muted", wrap=True))
+        ok = button("Transfer", self.save, primary=True, shortcut="Ctrl+S")
         lay.addLayout(h(None, button("Cancel", self.reject), ok))
+        # Scan product -> FROM bin -> TO bin -> quantity: each Enter moves to the next field.
+        self.product.resolver = app.find_product_id
+        self.src.resolver = app.find_bin_id
+        self.dst.resolver = app.find_bin_id
+        self.product.entered.connect(lambda v: v is not None and self.src.setFocus())
+        self.src.entered.connect(lambda v: v is not None and self.dst.setFocus())
+        self.dst.entered.connect(lambda v: v is not None and (self.qty.setFocus(), self.qty.selectAll()))
         self._levels = {}
         if product_id:
             self.product.set_value(product_id)

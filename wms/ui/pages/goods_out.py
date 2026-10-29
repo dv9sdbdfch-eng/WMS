@@ -117,6 +117,8 @@ class GoodsOutPage(Page):
                               "stock). Quarantine bins are never used.", "Muted"), None,
                         button("Clear form", self.clear)))
         self.lines.add_row()
+        # Scan / type the project number + Enter -> straight to the first empty product line.
+        self.site.entered.connect(lambda v: v is not None and self.lines.focus_next_empty())
         return w
 
     def refresh(self):

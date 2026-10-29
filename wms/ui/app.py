@@ -45,6 +45,16 @@ class App(QObject):
                 for b in self.services.locations.bins(include_inactive=include_inactive)
                 if b.is_available or not available_only]
 
+    def find_bin_id(self, scan: str) -> int | None:
+        """Bin from a scanned label / typed code (PickCombo.resolver for bin fields)."""
+        b = self.services.locations.find_bin(scan)
+        return b.id if b else None
+
+    def find_product_id(self, scan: str) -> int | None:
+        """Product from a scanned barcode / typed code (PickCombo.resolver for product fields)."""
+        p = self.services.products.find_by_code(scan)
+        return p.id if p else None
+
     def site_options(self, open_only: bool = True):
         """Open projects only by default; history screens pass open_only=False to include completed and
         archived ones (marked, so nobody mistakes them for live projects)."""

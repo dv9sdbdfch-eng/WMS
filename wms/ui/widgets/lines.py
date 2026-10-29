@@ -98,13 +98,17 @@ class LinesEditor(QWidget):
         self.table.insertRow(r)
         prod = PickCombo("Type code or name...")
         prod.set_options(self._product_opts)
+        prod.resolver = self.app.find_product_id
         prod.picked.connect(lambda _v, row_widget=prod: self._product_picked(row_widget))
         self.table.setCellWidget(r, 0, prod)
         q = DecimalEdit()
         q.textChanged.connect(lambda _: self._update_total())
-        # Scanner / keyboard flow: scan (or type a code) + Enter -> product chosen, cursor in Quantity;
-        # quantity + Enter -> next line, cursor back in Product, ready for the next scan.
-        prod.lineEdit().returnPressed.connect(lambda w=prod, qe=q: self._code_entered(w, qe))
+        # Scanner / keyboard flow (spec: scan product -> scan bin -> quantity):
+        # scan (or type a code) + Enter -> product chosen, cursor in Bin (Quantity when there is no bin
+        # column); scan the bin label (or Enter to keep the bin shown) -> Quantity; quantity + Enter ->
+        # next line, cursor back in Product, ready for the next scan.
+        prod.entered.connect(lambda _v, w=prod, qe=q: self._code_entered(w, qe))
+        prod.lineEdit().returnPressed.connect(lambda w=prod: self._code_unknown(w))
         q.returnPressed.connect(lambda qe=q: self._quantity_entered(qe))
         self.table.setCellWidget(r, 1, q)
         unit = QLineEdit()
@@ -120,6 +124,8 @@ class LinesEditor(QWidget):
         if self.show_bin:
             b = PickCombo("Automatic" if self.bin_optional else "Choose bin...")
             b.set_options(self._bin_opts)
+            b.resolver = self.app.find_bin_id
+            b.entered.connect(lambda _v, qe=q, bw=b: self._bin_entered(bw, qe))
             self.table.setCellWidget(r, self._bin_col_index(), b)
         if self.show_condition:
             c = QComboBox()
@@ -139,20 +145,30 @@ class LinesEditor(QWidget):
         prod.setFocus()
         self.changed.emit()
 
-    def _code_entered(self, prod: PickCombo, qty_edit: DecimalEdit) -> None:
+    def _code_unknown(self, prod: PickCombo) -> None:
         text = prod.currentText().strip()
         if prod.value() is None and text:
-            p = self.app.services.products.find_by_code(text)
-            if p is None or p.id not in self._products:
-                prod.lineEdit().selectAll()
-                QApplication.beep()
-                self.total_label.setText(f"No product with code / barcode '{text}'")
-                return
-            prod.set_value(p.id)
-            self._product_picked(prod)
-        if prod.value() is not None:
+            self.total_label.setText(f"No product with code / barcode '{text}'")
+
+    def _code_entered(self, prod: PickCombo, qty_edit: DecimalEdit) -> None:
+        if prod.value() is None:
+            return
+        self._product_picked(prod)
+        r = self._row_of(prod)
+        if self.show_bin and r >= 0:
+            bw = self._bin_widget(r)
+            bw.setFocus()
+            bw.lineEdit().selectAll()  # a bin scan replaces the default shown; Enter keeps it
+        else:
             qty_edit.setFocus()
             qty_edit.selectAll()
+
+    def _bin_entered(self, bin_widget: PickCombo, qty_edit: DecimalEdit) -> None:
+        if bin_widget.value() is None and not self.bin_optional:
+            QApplication.beep()
+            return
+        qty_edit.setFocus()
+        qty_edit.selectAll()
 
     def _quantity_entered(self, qty_edit: DecimalEdit) -> None:
         r = next((i for i in range(self.table.rowCount()) if self.table.cellWidget(i, 1) is qty_edit), -1)
@@ -212,6 +228,14 @@ class LinesEditor(QWidget):
             self._product_picked(prod)
         self.table.setCurrentCell(r, 1)
         self.table.cellWidget(r, 1).setFocus()
+
+    def focus_next_empty(self) -> None:
+        """Cursor to the first line without a product (a new line if all are filled)."""
+        for r in range(self.table.rowCount()):
+            if self.table.cellWidget(r, 0).value() is None:
+                self.table.cellWidget(r, 0).setFocus()
+                return
+        self.add_row()
 
     def remove_row(self):
         r = self.table.currentRow()
