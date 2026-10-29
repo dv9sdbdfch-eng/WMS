@@ -486,13 +486,15 @@ class PurchasingService(BaseService):
 
     def list(self, text: str | None = None, status: str | None = None, supplier_id: int | None = None,
              open_only: bool = False, date_from: date | None = None, date_to: date | None = None,
-             limit: int = 2000) -> list[PORow]:
+             limit: int = 2000, overdue_only: bool = False) -> list[PORow]:
         q = (select(PurchaseOrder).options(selectinload(PurchaseOrder.lines).lazyload(PurchaseOrderLine.product))
              .order_by(PurchaseOrder.order_date.desc(), PurchaseOrder.id.desc()).limit(limit))
         if status:
             q = q.where(PurchaseOrder.status == status)
-        if open_only:
+        if open_only or overdue_only:
             q = q.where(PurchaseOrder.status.in_(OPEN_PO_STATUSES))
+        if overdue_only:  # the Dashboard "Overdue purchase orders" counter
+            q = q.where(PurchaseOrder.expected_date < date.today())
         if supplier_id:
             q = q.where(PurchaseOrder.supplier_id == supplier_id)
         if date_from:

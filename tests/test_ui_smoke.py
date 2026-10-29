@@ -248,11 +248,27 @@ def test_dashboard_shows_actionable_alerts(ui, sample):
     sample.receive(sample.mdf, 1)
     app.services.goods_out.post({"site_id": sample.site.id, "issue_date": date.today()},
                                 [IssueLine(sample.mdf.id, "3")], override_reason="sheets on site")
-    alerts = app.services.dashboard.load().alerts
-    texts = " | ".join(a.text for a in alerts)
-    assert "negative" in texts and "out of stock" in texts and "no scan" in texts
+    d = app.services.dashboard.load()
+    texts = " | ".join(a.text for a in d.alerts)
+    assert "negative" in texts and "no scan" in texts
+    low = d.action("low_stock")
+    assert low.count >= 1 and "out of stock" in low.hint and low.level == "danger"
+    assert d.today["Goods Out"] == 1 and d.today["Goods In"] == 1
     win.go("dashboard")
-    win.page("dashboard").refresh()
+    dash = win.page("dashboard")
+    dash.refresh()
+    assert dash.tiles["low_stock"].objectName() == "TileDanger"
+    assert dash.tiles["no_bin"].text().endswith("Products without bin")
+    # Every counter opens the list of exactly those records
+    dash.tiles["low_stock"].click()
+    assert win.page("low_stock").isVisible()
+    win.go("dashboard")
+    dash.open_action("no_photo")
+    search = win.page("search")
+    assert search.criteria.photo == "WITHOUT"
+    win.go("dashboard")
+    dash.open_action("overdue_po")
+    assert win.page("purchase_orders").status.currentData() == "OVERDUE"
     assert not _errors(msgs), msgs
 
 
@@ -581,7 +597,7 @@ def test_reserve_for_project_then_reorder_required(ui, sample, qtbot):
     qtbot.addWidget(card)
     states = {k: w.text() for k, w in card.ov_states.items()}
     assert states == {"on_hand": "40 SHEET", "reserved": "35 SHEET", "available": "5 SHEET",
-                      "incoming": "0 SHEET"}
+                      "incoming": "0 SHEET", "minimum": "10 SHEET"}
     assert "Reorder" in card.ov_reorder.text() or "Low" in card.ov_reorder.text()
     assert [v.reservation.id for v in card.reservations.table.items()] == [res.id]
     card.reorder_level.set_value(Decimal("12"))

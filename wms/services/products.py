@@ -297,6 +297,12 @@ class ProductService(BaseService):
                 )
             )
 
+    def passport(self, product_id: int):
+        """Purchasing, projects and documents for the Product Passport screen (see services.passport)."""
+        from wms.services.passport import build_passport
+        self.require(P.PRODUCTS_VIEW)
+        return build_passport(self.ctx, product_id)
+
     def movements(self, product_id: int, limit: int = 1000) -> list[StockMovement]:
         with self.db.read_session() as s:
             return list(

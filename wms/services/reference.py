@@ -71,6 +71,7 @@ class ReferenceService(BaseService):
         plan.history = lifecycle.count(s, StockMovement.id, StockMovement.supplier_id == sup.id)
         plan.references = sum(lifecycle.count(s, col, col == sup.id) for col in (
             DeliveryNote.supplier_id, StockReturn.supplier_id, Product.supplier_id))
+        plan.references += lifecycle.attachment_count(s, EntityType.SUPPLIER.value, sup.id)
         linked = lifecycle.count(s, Product.id, Product.supplier_id == sup.id, Product.is_active.is_(True))
         if linked:
             plan.notes.append(f"{linked} active product{' lists' if linked == 1 else 's list'} it as the main "

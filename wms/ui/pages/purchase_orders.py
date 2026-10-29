@@ -24,6 +24,7 @@ class PurchaseOrdersPage(ListPage):
         self.add_filter(self.supplier, self.supplier.picked)
         self.status = QComboBox()
         self.status.addItem("Open (ordered, part received)", "OPEN")
+        self.status.addItem("Overdue (past expected date)", "OVERDUE")
         self.status.addItem("All statuses", None)
         for val, text in POStatus.choices():
             self.status.addItem(text, val)
@@ -53,9 +54,9 @@ class PurchaseOrdersPage(ListPage):
     def fetch(self):
         d1, d2 = self.dates()
         st = self.status.currentData()
-        return self.app.services.purchasing.list(self.search.text(), None if st == "OPEN" else st,
+        return self.app.services.purchasing.list(self.search.text(), None if st in ("OPEN", "OVERDUE") else st,
                                                  self.supplier.value(), open_only=st == "OPEN",
-                                                 date_from=d1, date_to=d2)
+                                                 date_from=d1, date_to=d2, overdue_only=st == "OVERDUE")
 
     def describe(self, rows):
         overdue = sum(1 for r in rows if r.is_overdue)

@@ -111,6 +111,7 @@ class SiteService(BaseService):
         plan.history = lifecycle.count(s, StockMovement.id, StockMovement.site_id == site.id)
         plan.references = sum(lifecycle.count(s, col, col == site.id) for col in (
             GoodsIssue.site_id, StockReturn.site_id, ProductionOrder.site_id, FinishedProductInfo.site_id))
+        plan.references += lifecycle.attachment_count(s, EntityType.SITE.value, site.id)
         return plan
 
     def removal_plan(self, site_id: int) -> RemovalPlan:

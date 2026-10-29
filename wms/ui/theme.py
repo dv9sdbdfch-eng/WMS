@@ -55,6 +55,16 @@ QPushButton#Primary {{ background: {ACCENT}; border-color: {ACCENT}; color: whit
 QPushButton#Primary:hover {{ background: #285F99; }}
 QPushButton#Primary:disabled {{ background: #9DB7D5; border-color: #9DB7D5; }}
 QPushButton#Danger {{ color: {DANGER}; border-color: #FDA29B; }}
+QPushButton#Tile, QPushButton#TileWarn, QPushButton#TileDanger, QPushButton#TileZero {{
+    text-align: left; padding: 10px 14px; border-radius: 8px; font-size: 10pt; min-height: 52px; }}
+QPushButton#Tile {{ background: white; border: 1px solid #E4E7EC; color: #101828; }}
+QPushButton#TileWarn {{ background: #FFFAEB; border: 1px solid #FEC84B; color: {WARNING}; font-weight: 600; }}
+QPushButton#TileDanger {{ background: #FEF3F2; border: 1px solid #FDA29B; color: {DANGER}; font-weight: 600; }}
+QPushButton#TileZero {{ background: white; border: 1px solid #E4E7EC; color: #98A2B3; }}
+QPushButton#Tile:hover, QPushButton#TileWarn:hover, QPushButton#TileDanger:hover, QPushButton#TileZero:hover {{
+    border-color: {ACCENT}; }}
+QPushButton#Tile:focus, QPushButton#TileWarn:focus, QPushButton#TileDanger:focus, QPushButton#TileZero:focus {{
+    border: 2px solid {ACCENT}; }}
 QLineEdit, QComboBox, QDateEdit, QSpinBox, QDoubleSpinBox, QPlainTextEdit, QTextEdit {{
     background: white; border: 1px solid #D0D5DD; border-radius: 6px; padding: 5px 8px; }}
 QLineEdit:focus, QComboBox:focus, QDateEdit:focus, QPlainTextEdit:focus {{ border: 1px solid {ACCENT}; }}

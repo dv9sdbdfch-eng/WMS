@@ -159,6 +159,10 @@ class SiteDialog(QDialog):
         from wms.ui.dialogs.reservations import ReservationsPanel
         self.reservations = ReservationsPanel(app, site_id=sid)
         self.tabs.insertTab(2, self.reservations, "Reservations")
+        from wms.ui.widgets.attachments import AttachmentPanel
+        self.docs = AttachmentPanel(app, EntityType.SITE.value, None, thumbs=False)  # drawings, site photos
+        self.docs.set_entity(sid)
+        self.tabs.addTab(self.docs, "Documents")
         if app.can(P.AUDIT_VIEW):
             at = DataTable([Col("When", lambda a: a.occurred_at, DATETIME, 130),
                             Col("User", lambda a: a.username, width=100),

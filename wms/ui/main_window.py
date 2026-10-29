@@ -150,10 +150,24 @@ class MainWindow(QMainWindow):
         rl.addWidget(main, 1)
         self.setCentralWidget(root)
 
-        self.statusBar().showMessage("Ready")
+        app.main_window = self
         QShortcut(QKeySequence("Ctrl+K"), self, self.focus_search)
         QShortcut(QKeySequence("Ctrl+F"), self, self.focus_search)
         QShortcut(QKeySequence("F5"), self, self.refresh_current)
+        # Warehouse keys (spec 16 / 39.39): the three everyday operations without the mouse.
+        hints = []
+        for key, page, text in (("F2", "goods_in", "Goods In"), ("F3", "goods_out", "Goods Out")):
+            if page in self.factories:
+                QShortcut(QKeySequence(key), self, lambda p=page: self.go(p))
+                hints.append(f"{key} {text}")
+        if app.can(P.STOCK_TRANSFER):
+            QShortcut(QKeySequence("F4"), self, self.transfer)
+            hints.append("F4 Transfer")
+        QShortcut(QKeySequence("Ctrl+D"), self, lambda: self.go("dashboard"))
+        hints += ["Ctrl+K Search / scan", "Ctrl+D Dashboard", "F5 Refresh"]
+        self.keys_hint = label("   ·   ".join(hints), "Muted")
+        self.statusBar().addPermanentWidget(self.keys_hint)
+        self.statusBar().showMessage("Ready")
         app.data_changed.connect(self._data_changed)
         self.go("dashboard")
 
@@ -206,6 +220,11 @@ class MainWindow(QMainWindow):
         page = self.page("search")
         if page is not None:
             page.search_for(text) if text else page.focus_box()
+
+    def transfer(self):
+        from wms.ui.dialogs.stock_dialogs import TransferDialog
+        if TransferDialog(self.app, None, self).exec():
+            self.app.changed()
 
     def focus_search(self):
         page = self.page("search")
