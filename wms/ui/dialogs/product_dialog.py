@@ -80,12 +80,34 @@ class ProductDialog(QDialog):
             self.tabs.addTab(self.audit_table, "Audit")
         self.btn_save = button("Save", self.save, primary=True, shortcut="Ctrl+S")
         self.btn_save.setVisible(self.can_edit)
-        lay.addLayout(h(None, button("Close", self.reject), self.btn_save))
+        extra = []
+        if self.product and self.can_edit:
+            if self.product.is_active:
+                extra.append(button("Delete product", self.delete_product, danger=True))
+            else:
+                extra.append(button("Restore product", self.restore_product))
+        lay.addLayout(h(*extra, None, button("Close", self.reject), self.btn_save))
         self._load()
         if tab == "history":
             self.tabs.setCurrentWidget(self.history_tab)
         elif tab == "photos":
             self.tabs.setCurrentWidget(self.photos)
+
+    def delete_product(self):
+        from wms.ui.dialogs.removal import delete_record
+        if delete_record(self, self.app.services.products.removal_plan, self.app.services.products.remove,
+                         self.product.id):
+            self.saved = True
+            self.app.changed()
+            self.accept()
+
+    def restore_product(self):
+        from wms.ui.dialogs.removal import restore_record
+        if restore_record(self, "Product", self.product.internal_code, self.app.services.products.restore,
+                          self.product.id):
+            self.saved = True
+            self.app.changed()
+            self.accept()
 
     # -- overview tab (what search opens) -------------------------------------
     def _build_overview(self) -> QWidget:
@@ -368,10 +390,10 @@ def product_history_columns() -> list[Col]:
         Col("Quantity", signed_qty, QTY, 85),
         Col("From", lambda m: movement_route(m)[0], width=220),
         Col("To", lambda m: movement_route(m)[1], width=220),
-        Col("Project", lambda m: m.site.display if m.site else "", width=170),
-        Col("Supplier", lambda m: m.supplier.name if m.supplier else "", width=140),
+        Col("Project", lambda m: m.site_label, width=170),
+        Col("Supplier", lambda m: m.supplier_label, width=140),
         Col("Reference", movement_reference, width=140),
-        Col("User", lambda m: m.user.full_name, width=120),
+        Col("User", lambda m: m.user_label, width=120),
         Col("Notes", lambda m: m.notes or "")]
 
 

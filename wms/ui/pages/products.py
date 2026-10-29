@@ -71,7 +71,7 @@ class ProductsPage(Page):
 
     def _load_filters(self):
         self.category.set_options([(c.full_name, c.id) for c in self.app.services.reference.categories()])
-        self.supplier.set_options(self.app.supplier_options())
+        self.supplier.set_options(self.app.supplier_options(include_inactive=True))
         self.location.set_options(self.app.location_options())
 
     def refresh(self):

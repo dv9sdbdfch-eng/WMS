@@ -47,19 +47,19 @@ class DashboardPage(Page):
         self.t_low.activated_item.connect(lambda r: self._open("PRODUCT", r.product.id))
         self.t_dn = DataTable([Col("Date", lambda d: d.delivery_date, DATE, 90),
                                Col("Delivery Note", lambda d: d.dn_number, width=110),
-                               Col("Supplier", lambda d: d.supplier.name, width=130),
+                               Col("Supplier", lambda d: d.supplier_label, width=130),
                                Col("Status", lambda d: d.status.title())])
         self.t_dn.activated_item.connect(lambda d: self._open("DELIVERY_NOTE", d.id))
         self.t_go = DataTable([Col("Date", lambda g: g.issue_date, DATE, 90),
                                Col("Number", lambda g: g.issue_number, width=90),
-                               Col("Site", lambda g: g.site.display, width=150),
+                               Col("Site", lambda g: g.site_label, width=150),
                                Col("Ref", lambda g: g.reference or "")])
         self.t_go.activated_item.connect(lambda g: self._open("GOODS_ISSUE", g.id))
         self.t_mv = DataTable([Col("When", lambda m: m.occurred_at, DATETIME, 120),
                                Col("Type", lambda m: MovementType(m.movement_type).label, width=150),
-                               Col("Product", lambda m: f"{m.product.internal_code} - {m.product.name}", width=260),
+                               Col("Product", lambda m: f"{m.product_code} - {m.product_name}", width=260),
                                Col("Qty", lambda m: m.quantity, QTY, 70),
-                               Col("By", lambda m: m.user.full_name)])
+                               Col("By", lambda m: m.user_label)])
         self.t_sites = DataTable([Col("Project", lambda s: s.project_number, width=100),
                                   Col("Site", lambda s: s.name, width=170),
                                   Col("Customer", lambda s: s.customer or "")])

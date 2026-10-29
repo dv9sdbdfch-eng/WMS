@@ -3,6 +3,10 @@
 Documents are created already POSTED (stock changes in the same transaction).
 They are never edited afterwards; a mistake is corrected by reversing the
 document, which posts mirror-image movements and marks it REVERSED.
+
+Headers keep a snapshot of the supplier / project name at posting time, and lines show the
+product and bin as recorded on their stock movement, so a document reads the same years later
+even if the product, bin, project or supplier has since been renamed or removed from use.
 """
 
 from __future__ import annotations
@@ -15,6 +19,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from wms.core.numbers import utcnow
 from wms.db.base import Base, IdMixin, fk
+from wms.db.models.stock import site_label
 from wms.db.types import Money, Quantity, UTCDateTime
 
 
@@ -23,6 +28,40 @@ class _ClientToken:
     # (double-click, Enter pressed again, retry after a freeze) hits the UNIQUE index instead of
     # creating a second document.
     client_token: Mapped[str | None] = mapped_column(String(40), unique=True, index=True)
+
+
+class _SiteSnapshot:
+    site_number_snapshot: Mapped[str | None] = mapped_column(String(50))
+    site_name_snapshot: Mapped[str | None] = mapped_column(String(200))
+
+    @property
+    def site_label(self) -> str:
+        if self.site_id is None:
+            return ""
+        if self.site_number_snapshot or self.site_name_snapshot:
+            return site_label(self.site_number_snapshot, self.site_name_snapshot)
+        return self.site.display
+
+
+class _LineHistory:
+    """Product and bin of a posted line as they were recorded on its stock movement."""
+
+    @property
+    def product_code(self) -> str:
+        return self.movement.product_code if self.movement is not None else self.product.internal_code
+
+    @property
+    def product_name(self) -> str:
+        return self.movement.product_name if self.movement is not None else self.product.name
+
+    @property
+    def bin_code(self) -> str:
+        code = self.movement.bin_code_of(self.bin_id) if self.movement is not None else ""
+        return code or self.bin.full_code
+
+
+def _movement_link(column):
+    return relationship("StockMovement", foreign_keys=[column], lazy="selectin", viewonly=True)
 
 
 class _PostedDocument(_ClientToken):
@@ -56,6 +95,7 @@ class DeliveryNote(IdMixin, _PostedDocument, Base):
     po_reference: Mapped[str | None] = mapped_column(String(80), index=True)
     received_by_id: Mapped[int] = fk("users.id", nullable=False)
     reversed_by_id: Mapped[int | None] = fk("users.id")
+    supplier_name_snapshot: Mapped[str | None] = mapped_column(String(200))
 
     supplier = relationship("Supplier", lazy="joined")
     received_by = relationship("User", foreign_keys=[received_by_id], lazy="joined")
@@ -64,8 +104,12 @@ class DeliveryNote(IdMixin, _PostedDocument, Base):
         back_populates="delivery_note", order_by="DeliveryNoteLine.line_no", cascade="all, delete-orphan"
     )
 
+    @property
+    def supplier_label(self) -> str:
+        return self.supplier_name_snapshot or self.supplier.name
 
-class DeliveryNoteLine(IdMixin, Base):
+
+class DeliveryNoteLine(_LineHistory, IdMixin, Base):
     __tablename__ = "delivery_note_lines"
 
     delivery_note_id: Mapped[int] = fk("delivery_notes.id", nullable=False, ondelete="CASCADE")
@@ -80,11 +124,12 @@ class DeliveryNoteLine(IdMixin, Base):
     delivery_note: Mapped[DeliveryNote] = relationship(back_populates="lines")
     product = relationship("Product", lazy="joined")
     bin = relationship("Bin", lazy="joined")
+    movement = _movement_link(movement_id)
 
 
 # --- Goods Out -----------------------------------------------------------------
 
-class GoodsIssue(IdMixin, _PostedDocument, Base):
+class GoodsIssue(IdMixin, _SiteSnapshot, _PostedDocument, Base):
     __tablename__ = "goods_issues"
 
     issue_number: Mapped[str] = mapped_column(String(30), unique=True, nullable=False)
@@ -104,7 +149,7 @@ class GoodsIssue(IdMixin, _PostedDocument, Base):
     )
 
 
-class GoodsIssueLine(IdMixin, Base):
+class GoodsIssueLine(_LineHistory, IdMixin, Base):
     __tablename__ = "goods_issue_lines"
 
     issue_id: Mapped[int] = fk("goods_issues.id", nullable=False, ondelete="CASCADE")
@@ -119,11 +164,12 @@ class GoodsIssueLine(IdMixin, Base):
     issue: Mapped[GoodsIssue] = relationship(back_populates="lines")
     product = relationship("Product", lazy="joined")
     bin = relationship("Bin", lazy="joined")
+    movement = _movement_link(movement_id)
 
 
 # --- Returns -------------------------------------------------------------------
 
-class StockReturn(IdMixin, _PostedDocument, Base):
+class StockReturn(IdMixin, _SiteSnapshot, _PostedDocument, Base):
     __tablename__ = "stock_returns"
 
     return_number: Mapped[str] = mapped_column(String(30), unique=True, nullable=False)
@@ -135,6 +181,7 @@ class StockReturn(IdMixin, _PostedDocument, Base):
     reason: Mapped[str | None] = mapped_column(Text)
     user_id: Mapped[int] = fk("users.id", nullable=False)
     reversed_by_id: Mapped[int | None] = fk("users.id")
+    supplier_name_snapshot: Mapped[str | None] = mapped_column(String(200))
 
     site = relationship("Site", lazy="joined")
     supplier = relationship("Supplier", lazy="joined")
@@ -143,8 +190,19 @@ class StockReturn(IdMixin, _PostedDocument, Base):
         back_populates="stock_return", order_by="ReturnLine.line_no", cascade="all, delete-orphan"
     )
 
+    @property
+    def supplier_label(self) -> str:
+        if self.supplier_id is None:
+            return ""
+        return self.supplier_name_snapshot or self.supplier.name
 
-class ReturnLine(IdMixin, Base):
+    @property
+    def party_label(self) -> str:
+        """The project the material came back from, or the supplier it went back to."""
+        return self.site_label or self.supplier_label
+
+
+class ReturnLine(_LineHistory, IdMixin, Base):
     __tablename__ = "return_lines"
 
     return_id: Mapped[int] = fk("stock_returns.id", nullable=False, ondelete="CASCADE")
@@ -159,11 +217,12 @@ class ReturnLine(IdMixin, Base):
     stock_return: Mapped[StockReturn] = relationship(back_populates="lines")
     product = relationship("Product", lazy="joined")
     bin = relationship("Bin", lazy="joined")
+    movement = _movement_link(movement_id)
 
 
 # --- Adjustments and transfers ---------------------------------------------------
 
-class StockAdjustment(IdMixin, _ClientToken, Base):
+class StockAdjustment(_LineHistory, IdMixin, _ClientToken, Base):
     __tablename__ = "stock_adjustments"
 
     adjustment_number: Mapped[str] = mapped_column(String(30), unique=True, nullable=False)
@@ -181,6 +240,7 @@ class StockAdjustment(IdMixin, _ClientToken, Base):
     product = relationship("Product", lazy="joined")
     bin = relationship("Bin", lazy="joined")
     user = relationship("User", lazy="joined")
+    movement = _movement_link(movement_id)
 
 
 class StockTransfer(IdMixin, _ClientToken, Base):
@@ -200,11 +260,28 @@ class StockTransfer(IdMixin, _ClientToken, Base):
     from_bin = relationship("Bin", foreign_keys=[from_bin_id], lazy="joined")
     to_bin = relationship("Bin", foreign_keys=[to_bin_id], lazy="joined")
     user = relationship("User", lazy="joined")
+    movement = _movement_link(movement_id)
+
+    @property
+    def product_code(self) -> str:
+        return self.movement.product_code if self.movement is not None else self.product.internal_code
+
+    @property
+    def product_name(self) -> str:
+        return self.movement.product_name if self.movement is not None else self.product.name
+
+    @property
+    def from_bin_code(self) -> str:
+        return self.movement.from_bin_code if self.movement is not None else self.from_bin.full_code
+
+    @property
+    def to_bin_code(self) -> str:
+        return self.movement.to_bin_code if self.movement is not None else self.to_bin.full_code
 
 
 # --- Production ------------------------------------------------------------------
 
-class ProductionOrder(IdMixin, _PostedDocument, Base):
+class ProductionOrder(IdMixin, _SiteSnapshot, _PostedDocument, Base):
     """Materials consumed -> finished product produced, in one posting."""
 
     __tablename__ = "production_orders"
@@ -226,9 +303,25 @@ class ProductionOrder(IdMixin, _PostedDocument, Base):
     lines: Mapped[list[ProductionLine]] = relationship(
         back_populates="order", order_by="ProductionLine.line_no", cascade="all, delete-orphan"
     )
+    output_movement = _movement_link(output_movement_id)
+
+    @property
+    def product_code(self) -> str:
+        mv = self.output_movement
+        return mv.product_code if mv is not None else self.finished_product.internal_code
+
+    @property
+    def product_name(self) -> str:
+        mv = self.output_movement
+        return mv.product_name if mv is not None else self.finished_product.name
+
+    @property
+    def output_bin_code(self) -> str:
+        mv = self.output_movement
+        return (mv.to_bin_code if mv is not None else "") or self.output_bin.full_code
 
 
-class ProductionLine(IdMixin, Base):
+class ProductionLine(_LineHistory, IdMixin, Base):
     __tablename__ = "production_lines"
 
     order_id: Mapped[int] = fk("production_orders.id", nullable=False, ondelete="CASCADE")
@@ -241,6 +334,7 @@ class ProductionLine(IdMixin, Base):
     order: Mapped[ProductionOrder] = relationship(back_populates="lines")
     product = relationship("Product", lazy="joined")
     bin = relationship("Bin", lazy="joined")
+    movement = _movement_link(movement_id)
 
 
 # --- Stocktake -------------------------------------------------------------------

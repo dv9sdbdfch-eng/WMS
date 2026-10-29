@@ -36,16 +36,26 @@ class App(QObject):
         rows = self.services.products.list(item_types=item_types, include_inactive=include_inactive)
         return [(f"{r.product.internal_code} - {r.product.name}", r.product.id) for r in rows]
 
-    def bin_options(self, available_only: bool = False):
-        return [(b.full_code + ("" if b.is_available else "  [quarantine]"), b.id)
-                for b in self.services.locations.bins() if b.is_available or not available_only]
+    def bin_options(self, available_only: bool = False, include_inactive: bool = False):
+        """Active bins for posting screens. Search and history pass include_inactive=True so bins removed
+        from active use can still be investigated."""
+        return [(b.full_code + ("" if b.is_available else "  [quarantine]")
+                 + ("" if b.is_active else "  [archived]"), b.id)
+                for b in self.services.locations.bins(include_inactive=include_inactive)
+                if b.is_available or not available_only]
 
     def site_options(self, open_only: bool = True):
+        """Open projects only by default; history screens pass open_only=False to include completed and
+        archived ones (marked, so nobody mistakes them for live projects)."""
+        from wms.core.enums import OPEN_SITE_STATUSES, SiteStatus
         sites = self.services.sites.open_sites() if open_only else self.services.sites.list()
-        return [(f"{s.project_number} - {s.name}", s.id) for s in sites]
+        return [(f"{s.project_number} - {s.name}"
+                 + ("" if s.status in OPEN_SITE_STATUSES else f"  [{SiteStatus(s.status).label}]"), s.id)
+                for s in sites]
 
-    def supplier_options(self):
-        return [(f"{s.name} ({s.code})", s.id) for s in self.services.reference.suppliers()]
+    def supplier_options(self, include_inactive: bool = False):
+        return [(f"{s.name} ({s.code})" + ("" if s.is_active else "  [archived]"), s.id)
+                for s in self.services.reference.suppliers(include_inactive=include_inactive)]
 
     def location_options(self):
         return [(loc.path, loc.id) for loc in self.services.locations.tree()]

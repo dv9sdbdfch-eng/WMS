@@ -27,7 +27,7 @@ class DeliveryNotesPage(ListPage):
     def columns(self):
         return [Col("Date", lambda r: r[0].delivery_date, DATE, 95),
                 Col("Delivery Note", lambda r: r[0].dn_number, width=140),
-                Col("Supplier", lambda r: r[0].supplier.name, width=220),
+                Col("Supplier", lambda r: r[0].supplier_label, width=220),
                 Col("PO / Ref", lambda r: r[0].po_reference or "", width=110),
                 Col("Lines", lambda r: r[1], INT, 60),
                 Col("Value", lambda r: r[2], MONEY, 100),
@@ -38,7 +38,7 @@ class DeliveryNotesPage(ListPage):
 
     def refresh(self):
         if not self.supplier.count():
-            self.supplier.set_options(self.app.supplier_options())
+            self.supplier.set_options(self.app.supplier_options(include_inactive=True))
         super().refresh()
 
     def fetch(self):

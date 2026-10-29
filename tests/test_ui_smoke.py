@@ -400,3 +400,26 @@ def test_search_result_actions_open_the_right_screens(ui, sample):
     page.product_action("photo")  # no photo yet: a message, not an error
     assert msgs[-1][0] == "info"
     assert not _errors(msgs), msgs
+
+
+def test_archived_records_open_with_their_history_and_restore(ui, sample, monkeypatch):
+    """Delete B05 through the screen (it has history, so it is archived), open its history page,
+    then restore it - all without error dialogs."""
+    app, win, msgs, opened = ui
+    sample.receive(sample.mdf, 3, sample.bin2)
+    app.services.stock.transfer(sample.mdf.id, sample.bin2.id, sample.bin1.id, "3")
+    from wms.ui.dialogs import removal
+    from wms.ui.dialogs.documents import BinContentsDialog
+    monkeypatch.setattr(removal.RemovalDialog, "exec", lambda self: QDialog.DialogCode.Accepted)
+    dlg = BinContentsDialog(app, sample.bin2.id, win)
+    dlg.delete_bin()
+    assert not app.services.locations.reload(type(sample.bin2), sample.bin2.id).is_active
+    assert "Archived" in dlg.title.text() and "Historical movements: 2" in dlg.summary.text()
+    assert dlg.history.model().rowCount() == 2 and dlg.archived.isVisibleTo(dlg)
+    assert any(m[1] == "Removed from active use" for m in msgs)
+    app.services.sites.set_status(sample.site.id, "COMPLETED")
+    app.open_entity("SITE", sample.site.id, win)
+    app.services.locations.restore_bin(sample.bin2.id)
+    dlg.refresh()
+    assert "Archived" not in dlg.title.text()
+    assert not _errors(msgs), msgs

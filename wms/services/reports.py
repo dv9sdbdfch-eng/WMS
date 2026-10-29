@@ -163,8 +163,8 @@ class ReportService(BaseService):
                 Column("Quantity", QTY), Column("Unit"), Column("Bin"), Column("Unit Cost", MONEY),
                 Column("Value", MONEY, True), Column("Status"), Column("Received By")]
         with self.db.read_session() as s:
-            data = [[dn.delivery_date, dn.dn_number, dn.supplier.name, l.product.internal_code, l.product.name,
-                     l.quantity, l.product.unit.code, l.bin.full_code, l.unit_cost,
+            data = [[dn.delivery_date, dn.dn_number, dn.supplier_label, l.product_code, l.product_name,
+                     l.quantity, l.product.unit.code, l.bin_code, l.unit_cost,
                      _line_value(l, dn.status), dn.status.title(),
                      dn.received_by.full_name] for l, dn in s.execute(q)]
         return ReportResult("Goods In", cols, data)
@@ -184,8 +184,8 @@ class ReportService(BaseService):
                 Column("Code"), Column("Product"), Column("Quantity", QTY), Column("Unit"), Column("From Bin"),
                 Column("Value", MONEY, True), Column("Requested By"), Column("Issued By"), Column("Status")]
         with self.db.read_session() as s:
-            data = [[gi.issue_date, gi.issue_number, gi.site.display, gi.reference or "", l.product.internal_code,
-                     l.product.name, l.quantity, l.product.unit.code, l.bin.full_code,
+            data = [[gi.issue_date, gi.issue_number, gi.site_label, gi.reference or "", l.product_code,
+                     l.product_name, l.quantity, l.product.unit.code, l.bin_code,
                      _line_value(l, gi.status), gi.requested_by or "",
                      gi.issued_by, gi.status.title()] for l, gi in s.execute(q)]
         return ReportResult("Goods Out", cols, data)
@@ -196,11 +196,12 @@ class ReportService(BaseService):
                                                    date_to=f.date_to, limit=None)
         cols = [Column("Date / Time", DATETIME), Column("Type"), Column("Code"), Column("Product"),
                 Column("Quantity", QTY), Column("Unit"), Column("From"), Column("To"), Column("Site / Project"),
-                Column("Document"), Column("Reference"), Column("User"), Column("Notes")]
-        data = [[m.occurred_at, MovementType(m.movement_type).label, m.product.internal_code, m.product.name,
-                 m.quantity, m.product.unit.code, m.from_bin.full_code if m.from_bin else "",
-                 m.to_bin.full_code if m.to_bin else "", m.site.display if m.site else "", m.doc_number or "",
-                 m.reference or "", m.user.full_name, m.notes or ""] for m in rows]
+                Column("Supplier"), Column("Document"), Column("Reference"), Column("User"), Column("Notes")]
+        # Names as recorded at the time: bins, projects and products removed or renamed since still show.
+        data = [[m.occurred_at, MovementType(m.movement_type).label, m.product_code, m.product_name,
+                 m.quantity, m.product.unit.code, m.from_bin_code, m.to_bin_code, m.site_label,
+                 m.supplier_label, m.doc_number or "", m.reference or "", m.user_label, m.notes or ""]
+                for m in rows]
         return ReportResult("Stock Movement History", cols, data)
 
     def stock_by_site(self, f: ReportFilters) -> ReportResult:
@@ -209,10 +210,10 @@ class ReportService(BaseService):
                                                    date_to=f.date_to, limit=None)
         agg: dict[tuple[int, int], list] = {}
         for m in rows:
-            if m.site is None:
+            if m.site_id is None:
                 continue
             key = (m.site_id, m.product_id)
-            r = agg.setdefault(key, [m.site.display, m.product.internal_code, m.product.name, ZERO, ZERO,
+            r = agg.setdefault(key, [m.site_label, m.product_code, m.product_name, ZERO, ZERO,
                                      m.product.unit.code, ZERO])
             sign = 1 if m.from_bin_id else -1
             cost = m.unit_cost or ZERO
@@ -238,15 +239,15 @@ class ReportService(BaseService):
                 Column("Code"), Column("Material"), Column("Issued", QTY, True), Column("Returned", QTY, True),
                 Column("Unit"), Column("Bin"), Column("Reference"), Column("User"), Column("Notes")]
         data = []
-        for m in sorted(rows, key=lambda m: (m.site.display if m.site else "", m.occurred_at, m.id)):
+        for m in sorted(rows, key=lambda m: (m.site_label, m.occurred_at, m.id)):
             out = m.from_bin_id is not None  # stock left the store -> to site
             qty = m.quantity if out else -m.quantity
             is_issue = m.movement_type == MovementType.GOODS_OUT.value
             label = MovementType(m.movement_type).label + (" (reversal)" if m.reversal_of_id else "")
-            data.append([m.occurred_at, m.site.display if m.site else "", m.doc_number or "", label,
-                         m.product.internal_code, m.product.name, qty if is_issue else None,
+            data.append([m.occurred_at, m.site_label, m.doc_number or "", label,
+                         m.product_code, m.product_name, qty if is_issue else None,
                          None if is_issue else -qty, m.product.unit.code,
-                         (m.from_bin or m.to_bin).full_code, m.reference or "", m.user.full_name, m.notes or ""])
+                         m.from_bin_code or m.to_bin_code, m.reference or "", m.user_label, m.notes or ""])
         return ReportResult("Project Material History", cols, data)
 
     def _levels(self, f: ReportFilters) -> list[StockLevel]:
@@ -366,13 +367,13 @@ class ReportService(BaseService):
                     continue
                 if f.supplier_id and r.supplier_id != f.supplier_id:
                     continue
-                party = r.site.display if r.site else (r.supplier.name if r.supplier else "")
+                party = r.party_label
                 for l in r.lines:
                     if f.product_id and l.product_id != f.product_id:
                         continue
                     data.append([r.return_date, r.return_number, ReturnType(r.return_type).label, party,
-                                 l.product.internal_code, l.product.name, l.quantity, l.product.unit.code,
-                                 ReturnCondition(l.condition).label, l.bin.full_code, r.reference or "",
+                                 l.product_code, l.product_name, l.quantity, l.product.unit.code,
+                                 ReturnCondition(l.condition).label, l.bin_code, r.reference or "",
                                  r.reason or "", r.status.title()])
         return ReportResult("Returns", cols, data)
 
@@ -383,7 +384,7 @@ class ReportService(BaseService):
         cols = [Column("Date / Time", DATETIME), Column("Adjustment No."), Column("Code"), Column("Product"),
                 Column("Bin"), Column("Previous Qty", QTY), Column("New Qty", QTY), Column("Difference", QTY),
                 Column("Unit"), Column("Reason"), Column("Details"), Column("User")]
-        data = [[a.created_at, a.adjustment_number, a.product.internal_code, a.product.name, a.bin.full_code,
+        data = [[a.created_at, a.adjustment_number, a.product_code, a.product_name, a.bin_code,
                  a.previous_qty, a.new_qty, a.difference, a.product.unit.code, AdjustmentReason(a.reason_code).label,
                  a.reason, a.user.full_name] for a in rows if not f.product_id or a.product_id == f.product_id]
         return ReportResult("Stock Adjustments", cols, data)

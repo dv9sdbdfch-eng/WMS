@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from sqlalchemy import func, or_, select
 
+from wms.core.enums import EntityType
 from wms.core.exceptions import DuplicateError, NotFoundError, ValidationError
 from wms.core.permissions import P
-from wms.db.models import Category, Product, Supplier, Unit
-from wms.services import audit
+from wms.db.models import Category, DeliveryNote, Product, StockMovement, StockReturn, Supplier, Unit
+from wms.services import audit, lifecycle
 from wms.services.base import BaseService, clean_code, clean_str, like_pattern
+from wms.services.lifecycle import RemovalPlan
 
 SUPPLIER_FIELDS = ("code", "name", "contact_name", "phone", "email", "address", "account_number", "notes", "is_active")
 
@@ -30,8 +32,11 @@ class ReferenceService(BaseService):
         code = clean_code(data.get("code"), "code", "Supplier code", 30)
         name = clean_str(data.get("name"), "name", required=True, max_len=200)
         with self.db.session() as s:
-            dup = s.scalar(select(Supplier.id).where(func.upper(Supplier.code) == code))
-            if dup and dup != supplier_id:
+            dup = s.scalar(select(Supplier).where(func.upper(Supplier.code) == code))
+            if dup is not None and dup.id != supplier_id:
+                if not dup.is_active:
+                    raise DuplicateError(f"Supplier code '{code}' belongs to archived supplier {dup.name}. "
+                                         f"Restore it instead of creating it again.")
                 raise DuplicateError(f"Supplier code '{code}' already exists.")
             if supplier_id:
                 sup = s.get(Supplier, supplier_id)
@@ -52,6 +57,62 @@ class ReferenceService(BaseService):
             if n:
                 audit.record(s, self.ctx, "SUPPLIER_UPDATED" if supplier_id else "SUPPLIER_CREATED",
                              "SUPPLIER", sup.id, f"{sup.code} {sup.name}", old=o, new=n)
+            if supplier_id and "is_active" in n:
+                if sup.is_active:
+                    lifecycle.record_restore(s, self.ctx, EntityType.SUPPLIER.value, sup.id, sup.name, "SUPPLIER", None)
+                else:
+                    plan = self._supplier_plan(s, sup)
+                    plan.archive_only = True
+                    lifecycle.record_removal(s, self.ctx, plan, "SUPPLIER", None)
+            return sup
+
+    def _supplier_plan(self, s, sup: Supplier) -> RemovalPlan:
+        plan = RemovalPlan("Supplier", EntityType.SUPPLIER.value, sup.id, sup.name, already_archived=not sup.is_active)
+        plan.history = lifecycle.count(s, StockMovement.id, StockMovement.supplier_id == sup.id)
+        plan.references = sum(lifecycle.count(s, col, col == sup.id) for col in (
+            DeliveryNote.supplier_id, StockReturn.supplier_id, Product.supplier_id))
+        linked = lifecycle.count(s, Product.id, Product.supplier_id == sup.id, Product.is_active.is_(True))
+        if linked:
+            plan.notes.append(f"{linked} active product{' lists' if linked == 1 else 's list'} it as the main "
+                              f"supplier - that link is kept for reference.")
+        return plan
+
+    def supplier_removal_plan(self, supplier_id: int) -> RemovalPlan:
+        with self.db.read_session() as s:
+            sup = s.get(Supplier, supplier_id)
+            if sup is None:
+                raise NotFoundError("Supplier not found.")
+            return self._supplier_plan(s, sup)
+
+    def remove_supplier(self, supplier_id: int, reason: str | None = None) -> RemovalPlan:
+        """Delete a supplier never used, or archive one with deliveries (their Goods In history stays)."""
+        self.require(P.SUPPLIERS_EDIT)
+        reason = lifecycle.reason_text(reason)
+        with self.db.session() as s:
+            sup = s.get(Supplier, supplier_id)
+            if sup is None:
+                raise NotFoundError("Supplier not found.")
+            plan = self._supplier_plan(s, sup)
+            plan.check()
+            lifecycle.record_removal(s, self.ctx, plan, "SUPPLIER", reason)
+            if plan.permanent:
+                s.delete(sup)
+            else:
+                sup.is_active = False
+        return plan
+
+    def restore_supplier(self, supplier_id: int, reason: str | None = None) -> Supplier:
+        self.require(P.SUPPLIERS_EDIT)
+        reason = lifecycle.reason_text(reason)
+        with self.db.session() as s:
+            sup = s.get(Supplier, supplier_id)
+            if sup is None:
+                raise NotFoundError("Supplier not found.")
+            if sup.is_active:
+                raise ValidationError(f"Supplier {sup.name} is already active.")
+            sup.is_active = True
+            s.flush()
+            lifecycle.record_restore(s, self.ctx, EntityType.SUPPLIER.value, sup.id, sup.name, "SUPPLIER", reason)
             return sup
 
     # -- categories ---------------------------------------------------------

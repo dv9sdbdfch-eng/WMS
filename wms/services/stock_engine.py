@@ -5,6 +5,10 @@ production) calls ``StockEngine.post`` for each line, inside its own
 transaction. ``post`` writes one immutable ``StockMovement`` and updates the
 ``StockLevel`` balance of the bins involved. If anything fails, the caller's
 transaction rolls back and neither the movement nor the balance changes.
+
+``post`` also records what the product, bins, project, supplier and user were called at that
+moment (the ``*_snapshot`` columns), so history never changes when master data is renamed or
+removed from active use later.
 """
 
 from __future__ import annotations
@@ -16,11 +20,11 @@ from decimal import Decimal
 from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
-from wms.core.enums import MovementType
+from wms.core.enums import CLOSED_SITE_STATUSES, MovementType, SiteStatus
 from wms.core.exceptions import InsufficientStockError, ValidationError
 from wms.core.numbers import ZERO, to_qty, utcnow
 from wms.core.permissions import P
-from wms.db.models import Bin, Product, StockLevel, StockMovement
+from wms.db.models import Bin, Product, Site, StockLevel, StockMovement, Supplier
 from wms.services import audit
 from wms.services.base import AppContext
 
@@ -95,10 +99,19 @@ class StockEngine:
             raise ValidationError("From and To bins must be different.")
         if not allow_inactive:
             if not product.is_active:
-                raise ValidationError(f"Product {product.internal_code} is inactive.")
+                raise ValidationError(f"Product {product.internal_code} is inactive - it has been removed from "
+                                      f"active use. Restore it first if it is needed again.")
             for b in (from_bin, to_bin):
                 if b is not None and not b.is_active:
-                    raise ValidationError(f"Bin {b.full_code} is inactive.")
+                    raise ValidationError(f"Bin {b.full_code} is inactive - it has been removed from active "
+                                          f"use. Restore it first if it is needed again.")
+        site = self.s.get(Site, site_id) if site_id else None
+        supplier = self.s.get(Supplier, supplier_id) if supplier_id else None
+        if not allow_inactive:
+            self._check_site(site, MovementType(movement_type))
+            if supplier is not None and not supplier.is_active:
+                raise ValidationError(f"Supplier {supplier.name} has been archived. Restore it first if you "
+                                      f"still deal with them.")
 
         is_override = False
         if from_bin is not None:
@@ -133,6 +146,14 @@ class StockEngine:
             reversal_of_id=reversal_of_id,
             is_override=is_override,
             override_reason=override_reason if is_override else None,
+            product_code_snapshot=product.internal_code,
+            product_name_snapshot=product.name,
+            from_bin_name_snapshot=from_bin.full_code if from_bin else None,
+            to_bin_name_snapshot=to_bin.full_code if to_bin else None,
+            site_number_snapshot=site.project_number if site else None,
+            site_name_snapshot=site.name if site else None,
+            supplier_name_snapshot=supplier.name if supplier else None,
+            user_name_snapshot=self.ctx.user.full_name,
         )
         self.s.add(mv)
         self.s.flush()
@@ -149,16 +170,35 @@ class StockEngine:
             )
         return mv
 
+    @staticmethod
+    def _check_site(site: Site | None, movement_type: MovementType) -> None:
+        """Completed / cancelled projects take no new material; archived ones take nothing at all.
+        (Leftover material can still come back from a completed project as a return.)"""
+        if site is None:
+            return
+        closed = site.status == SiteStatus.ARCHIVED.value or (
+            site.status in CLOSED_SITE_STATUSES and movement_type is not MovementType.RETURN_FROM_SITE)
+        if closed:
+            raise ValidationError(f"Project {site.project_number} is {SiteStatus(site.status).label.lower()} - "
+                                  f"reopen it before posting to it.", "site_id")
+
     def reverse(self, mv: StockMovement, reason: str, occurred_at: datetime | None = None,
                 override_reason: str | None = None) -> StockMovement:
-        """Post the mirror image of ``mv`` (swap From/To)."""
+        """Post the mirror image of ``mv`` (swap From/To).
+
+        A reversal may take stock out of any bin, but it never puts stock back into a bin that has
+        been removed from active use: such a bin must stay empty, so it is restored first."""
         product = self.s.get(Product, mv.product_id)
+        to_bin = self.s.get(Bin, mv.from_bin_id) if mv.from_bin_id else None
+        if to_bin is not None and not to_bin.is_active:
+            raise ValidationError(f"Bin {to_bin.full_code} has been removed from active use. Restore the bin "
+                                  f"first, then reverse this document.")
         return self.post(
             movement_type=MovementType(mv.movement_type),
             product=product,
             quantity=mv.quantity,
             from_bin=self.s.get(Bin, mv.to_bin_id) if mv.to_bin_id else None,
-            to_bin=self.s.get(Bin, mv.from_bin_id) if mv.from_bin_id else None,
+            to_bin=to_bin,
             occurred_at=occurred_at or utcnow(),
             unit_cost=mv.unit_cost,
             site_id=mv.site_id,

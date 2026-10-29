@@ -31,16 +31,16 @@ class MovementDetailDialog(QDialog):
         from wms.ui.dialogs.documents import _form
         unit = mv.product.unit.code
         rows = [("Type", MovementType(mv.movement_type).label + ("  (reversal)" if mv.reversal_of_id else "")),
-                ("Product", f"{mv.product.internal_code} - {mv.product.name}"),
+                ("Product", f"{mv.product_code} - {mv.product_name}"),
                 ("Quantity", f"{fmt_qty(mv.quantity)} {unit}  ({_direction(mv)})"),
-                ("From bin", mv.from_bin.full_code if mv.from_bin else ""),
-                ("To bin", mv.to_bin.full_code if mv.to_bin else ""),
-                ("Site / project", mv.site.display if mv.site else ""),
-                ("Supplier", mv.supplier.name if mv.supplier else ""),
+                ("From bin", mv.from_bin_code),
+                ("To bin", mv.to_bin_code),
+                ("Site / project", mv.site_label),
+                ("Supplier", mv.supplier_label),
                 ("Unit cost", fmt_money(mv.unit_cost) if mv.unit_cost is not None else ""),
                 ("Document", f"{mv.doc_number or ''}"), ("Reference", mv.reference or ""),
                 ("Date of movement", fmt_datetime(mv.occurred_at)), ("Recorded at", fmt_datetime(mv.recorded_at)),
-                ("User", mv.user.full_name), ("Notes", mv.notes or "")]
+                ("User", mv.user_label), ("Notes", mv.notes or "")]
         if mv.is_override:
             rows.append(("Negative stock override", mv.override_reason or "Yes"))
         lay.addLayout(_form(rows))
@@ -79,17 +79,17 @@ class MovementsPage(ListPage):
     def columns(self):
         return [Col("Date / Time", lambda m: m.occurred_at, DATETIME, 130),
                 Col("Type", lambda m: MovementType(m.movement_type).label, width=150),
-                Col("Code", lambda m: m.product.internal_code, width=110),
-                Col("Product", lambda m: m.product.name, width=200),
+                Col("Code", lambda m: m.product_code, width=110),
+                Col("Product", lambda m: m.product_name, width=200),
                 Col("Qty", lambda m: m.quantity, QTY, 80),
                 Col("Unit", lambda m: m.product.unit.code, width=50),
-                Col("From", lambda m: m.from_bin.full_code if m.from_bin else "", width=180),
-                Col("To", lambda m: m.to_bin.full_code if m.to_bin else "", width=180),
-                Col("Site", lambda m: m.site.project_number if m.site else "", width=90),
+                Col("From", lambda m: m.from_bin_code, width=180),
+                Col("To", lambda m: m.to_bin_code, width=180),
+                Col("Site", lambda m: m.site_number, width=90),
                 Col("Document", lambda m: m.doc_number or "", width=110),
                 Col("Ref", lambda m: m.reference or "", width=90),
                 Col("Cost", lambda m: m.unit_cost, MONEY, 80),
-                Col("User", lambda m: m.user.full_name, width=120),
+                Col("User", lambda m: m.user_label, width=120),
                 Col("Notes", lambda m: m.notes or "")]
 
     def refresh(self):

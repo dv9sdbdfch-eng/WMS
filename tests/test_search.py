@@ -399,8 +399,9 @@ def test_renamed_supplier_and_bin_keep_history_findable(w):
     w.svc.reference.save_supplier(w.egger.id, {"code": "EGG", "name": "Egger UK Ltd"})
     assert M(w, supplier_id=w.egger.id, movement_types=["GOODS_IN"]).total == 3
     assert M(w, text="Egger UK", movement_types=["GOODS_IN"]).total == 3
+    # History shows the name the supplier had when the goods arrived; the new name still finds it.
     route = movement_route(M(w, dn_number="74821").rows[0])
-    assert route[0] == "Egger UK Ltd"
+    assert route[0] == "Egger"
 
 
 def test_movement_route_and_sign_read_like_the_specification(w):

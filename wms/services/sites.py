@@ -8,13 +8,14 @@ from decimal import Decimal
 
 from sqlalchemy import func, or_, select
 
-from wms.core.enums import MovementType, SiteStatus
+from wms.core.enums import OPEN_SITE_STATUSES, EntityType, MovementType, SiteStatus
 from wms.core.exceptions import ConcurrencyError, DuplicateError, NotFoundError, ValidationError
 from wms.core.numbers import ZERO
 from wms.core.permissions import P
-from wms.db.models import Product, Site, StockMovement
-from wms.services import audit
+from wms.db.models import FinishedProductInfo, GoodsIssue, Product, ProductionOrder, Site, StockMovement, StockReturn
+from wms.services import audit, lifecycle
 from wms.services.base import BaseService, clean_code, clean_str, like_pattern
+from wms.services.lifecycle import RemovalPlan
 
 SITE_FIELDS = ("project_number", "name", "customer", "address", "postcode", "project_manager", "contact_name",
                "contact_phone", "contact_email", "status", "start_date", "end_date", "notes")
@@ -52,7 +53,7 @@ class SiteService(BaseService):
             return list(s.scalars(q))
 
     def open_sites(self) -> list[Site]:
-        return self.list(statuses=[SiteStatus.PLANNED.value, SiteStatus.ACTIVE.value, SiteStatus.ON_HOLD.value])
+        return self.list(statuses=list(OPEN_SITE_STATUSES))
 
     def get(self, site_id: int) -> Site:
         with self.db.read_session() as s:
@@ -73,8 +74,11 @@ class SiteService(BaseService):
         if start and end and end < start:
             raise ValidationError("End date cannot be before the start date.", "end_date")
         with self.db.session() as s:
-            dup = s.scalar(select(Site.id).where(func.upper(Site.project_number) == number))
-            if dup and dup != site_id:
+            dup = s.scalar(select(Site).where(func.upper(Site.project_number) == number))
+            if dup is not None and dup.id != site_id:
+                if dup.status == SiteStatus.ARCHIVED.value:
+                    raise DuplicateError(f"Project number '{number}' belongs to archived project {dup.name}. "
+                                         f"Restore it instead of creating it again, or choose another number.")
                 raise DuplicateError(f"Project number '{number}' already exists.")
             if site_id:
                 site = s.get(Site, site_id)
@@ -99,6 +103,73 @@ class SiteService(BaseService):
                              site.display, old=o, new=n)
             saved_id = site.id
         return self.get(saved_id)
+
+    # -- completing / archiving / restoring projects -------------------------------
+    def _plan(self, s, site: Site) -> RemovalPlan:
+        plan = RemovalPlan("Project", EntityType.SITE.value, site.id, site.display,
+                           already_archived=site.status == SiteStatus.ARCHIVED.value)
+        plan.history = lifecycle.count(s, StockMovement.id, StockMovement.site_id == site.id)
+        plan.references = sum(lifecycle.count(s, col, col == site.id) for col in (
+            GoodsIssue.site_id, StockReturn.site_id, ProductionOrder.site_id, FinishedProductInfo.site_id))
+        return plan
+
+    def removal_plan(self, site_id: int) -> RemovalPlan:
+        with self.db.read_session() as s:
+            site = s.get(Site, site_id)
+            if site is None:
+                raise NotFoundError("Site not found.")
+            return self._plan(s, site)
+
+    def remove(self, site_id: int, reason: str | None = None) -> RemovalPlan:
+        """Delete a project that never had material, or archive one with history (all of it is kept)."""
+        self.require(P.SITES_EDIT)
+        reason = lifecycle.reason_text(reason)
+        with self.db.session() as s:
+            site = s.get(Site, site_id)
+            if site is None:
+                raise NotFoundError("Site not found.")
+            plan = self._plan(s, site)
+            plan.check()
+            lifecycle.record_removal(s, self.ctx, plan, "SITE", reason)
+            if plan.permanent:
+                s.delete(site)
+            else:
+                site.status = SiteStatus.ARCHIVED.value
+        return plan
+
+    def set_status(self, site_id: int, status: str, reason: str | None = None) -> Site:
+        """Complete, reopen or archive a project. Its history is never touched."""
+        self.require(P.SITES_EDIT)
+        status = SiteStatus(status).value
+        reason = lifecycle.reason_text(reason)
+        with self.db.session() as s:
+            site = s.get(Site, site_id)
+            if site is None:
+                raise NotFoundError("Site not found.")
+            old = site.status
+            if old == status:
+                return site
+            site.status = status
+            if status == SiteStatus.COMPLETED.value and site.end_date is None:
+                site.end_date = date.today()
+            s.flush()
+            if status == SiteStatus.ARCHIVED.value:
+                plan = self._plan(s, site)
+                plan.archive_only = True
+                lifecycle.record_removal(s, self.ctx, plan, "SITE", reason)
+            elif old == SiteStatus.ARCHIVED.value:
+                lifecycle.record_restore(s, self.ctx, EntityType.SITE.value, site.id, site.display, "SITE", reason)
+            else:
+                audit.record(s, self.ctx, "SITE_STATUS_CHANGED", EntityType.SITE.value, site.id, site.display,
+                             reason, old={"status": old}, new={"status": status})
+        return self.get(site_id)
+
+    def restore(self, site_id: int, reason: str | None = None) -> Site:
+        """Bring an archived (or completed) project back so material can be issued to it again."""
+        site = self.get(site_id)
+        if site.status in OPEN_SITE_STATUSES:
+            raise ValidationError(f"Project {site.project_number} is already active.")
+        return self.set_status(site_id, SiteStatus.ACTIVE.value, reason)
 
     def movements(self, site_id: int, date_from: date | None = None, date_to: date | None = None) -> list[StockMovement]:
         """Every Goods Out and return for this site, newest first."""

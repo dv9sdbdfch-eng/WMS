@@ -85,6 +85,9 @@ class StockOpsService(BaseService):
             ret = StockReturn(
                 return_number=next_number(s, seq), return_type=rtype.value, return_date=rdate,
                 site_id=site.id if site else None, supplier_id=supplier.id if supplier else None,
+                site_number_snapshot=site.project_number if site else None,
+                site_name_snapshot=site.name if site else None,
+                supplier_name_snapshot=supplier.name if supplier else None,
                 reference=clean_str(header.get("reference"), max_len=80), reason=clean_str(header.get("reason")),
                 notes=clean_str(header.get("notes")), user_id=self.user.id, status=DocumentStatus.POSTED.value,
                 client_token=header.get("client_token") or None,
@@ -323,6 +326,12 @@ class StockOpsService(BaseService):
                                                                     Site.project_number.ilike(like, escape="\\")))),
                 StockMovement.from_bin_id.in_(select(Bin.id).where(Bin.full_code.ilike(like, escape="\\"))),
                 StockMovement.to_bin_id.in_(select(Bin.id).where(Bin.full_code.ilike(like, escape="\\"))),
+                # names as they were at the time (bins, projects, products renamed or removed since)
+                *(col.ilike(like, escape="\\") for col in (
+                    StockMovement.product_code_snapshot, StockMovement.product_name_snapshot,
+                    StockMovement.from_bin_name_snapshot, StockMovement.to_bin_name_snapshot,
+                    StockMovement.site_number_snapshot, StockMovement.site_name_snapshot,
+                    StockMovement.supplier_name_snapshot)),
             ))
         with self.db.read_session() as s:
             return list(s.scalars(q))

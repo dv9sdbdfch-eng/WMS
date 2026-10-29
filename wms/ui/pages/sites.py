@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from PySide6.QtWidgets import QComboBox
 
-from wms.core.enums import SiteStatus
+from wms.core.enums import CLOSED_SITE_STATUSES, OPEN_SITE_STATUSES, SiteStatus
 from wms.core.permissions import P
 from wms.ui.pages.base import ListPage
 from wms.ui.widgets.common import DATE, Col, button
 
-_OPEN = [SiteStatus.PLANNED.value, SiteStatus.ACTIVE.value, SiteStatus.ON_HOLD.value]
+_OPEN = list(OPEN_SITE_STATUSES)
 
 
 class SitesPage(ListPage):
@@ -24,11 +24,11 @@ class SitesPage(ListPage):
             self.add_action(button("New site / project", self.new, primary=True, shortcut="Ctrl+N"))
         self.status = QComboBox()
         self.status.addItem("Open (planned, active, on hold)", _OPEN)
-        self.status.addItem("All", None)
+        self.status.addItem("All (include completed / archived)", None)
         for val, text in SiteStatus.choices():
             self.status.addItem(text, [val])
         self.add_filter(self.status, self.status.currentIndexChanged)
-        self.table.set_row_style(lambda s: "muted" if s.status in ("COMPLETED", "CANCELLED") else None)
+        self.table.set_row_style(lambda s: "muted" if s.status in CLOSED_SITE_STATUSES else None)
 
     def columns(self):
         return [Col("Project No.", lambda s: s.project_number, width=110),
