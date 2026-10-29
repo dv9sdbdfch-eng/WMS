@@ -375,6 +375,20 @@ class DataTable(QTableView):
     def items(self) -> list:
         return list(self.model_.items)
 
+    def allow_multi_select(self) -> None:
+        """Ctrl / Shift + click selects several rows (export the selected products)."""
+        self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+
+    def selected_items(self) -> list:
+        """The selected rows, in the order shown on screen."""
+        rows = sorted({i.row() for i in self.selectionModel().selectedRows()})
+        return [self.model_.items[self.proxy.mapToSource(self.proxy.index(r, 0)).row()] for r in rows]
+
+    def shown_items(self) -> list:
+        """Every row in the order shown on screen (after the person sorted a column)."""
+        return [self.model_.items[self.proxy.mapToSource(self.proxy.index(r, 0)).row()]
+                for r in range(self.proxy.rowCount())]
+
     def _rows_text(self, rows: Iterable[int]) -> str:
         cols = range(self.model_.columnCount())
         lines = []

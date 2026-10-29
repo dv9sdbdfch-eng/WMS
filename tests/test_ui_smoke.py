@@ -653,3 +653,91 @@ def test_ready_made_views_menu(ui, sample):
     page.open_builtin(views["Outstanding Purchase Orders"])
     assert win.nav.currentItem().data(Qt.ItemDataRole.UserRole) == "purchase_orders"
     assert not _errors(msgs), msgs
+
+
+def test_excel_import_wizard_and_exports(ui, sample, qtbot, tmp_path):
+    """Stage 6 on screen: workbook -> worksheet -> columns -> preview (action per row) -> import with a
+    backup first; then export all / filtered / selected products, search results and a product's history."""
+    app, win, msgs, _ = ui
+    from openpyxl import Workbook, load_workbook
+
+    from wms.ui.dialogs.excel_import import ExcelImportDialog
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Materials"
+    ws.append(["Code", "Name / Description", "Product Number", "Supplier", "Unit"])
+    ws.append(["H3311", "Egger Halifax oak", "H3311 ST10", "Egger UK Ltd", "SHEET"])
+    ws.append(["MDF-18", "MDF renamed by Excel", "", "", "SHEET"])
+    ws.append(["U708", "Light grey", "", "New Boards Ltd", "BOXES"])
+    wb.create_sheet("Notes")
+    path = tmp_path / "materials.xlsx"
+    wb.save(path)
+
+    dlg = ExcelImportDialog(app, win)
+    qtbot.addWidget(dlg)
+    dlg.next()  # no file chosen
+    assert dlg.stack.currentIndex() == 0 and _errors(msgs)
+    msgs.clear()
+    dlg.path.setText(str(path))
+    dlg.next()
+    assert dlg.stack.currentIndex() == 1 and dlg.sheet.currentData() == "Materials"
+    assert dlg.sample.rowCount() == 3 and "No photos found" in dlg.sheet_summary.text()
+    dlg.next()
+    assert dlg.map_combos["internal_code"].currentData() == 0 and dlg.map_combos["name"].currentData() == 1
+    assert dlg.map_combos["photo"].currentData() is None
+    dlg.next()
+    assert dlg.stack.currentIndex() == 3 and dlg.preview.rowCount() == 3
+    assert "1 new, 0 to update, 1 skipped, 1 with errors" in dlg.preview_summary.text()
+    # Choose "Update existing" for MDF-18 in the Action column
+    action = dlg.preview.cellWidget(1, 1)
+    action.setCurrentIndex(action.findData("UPDATE"))
+    assert "1 new, 1 to update, 0 skipped" in dlg.preview_summary.text()
+    dlg.only_problems.setChecked(True)
+    assert dlg.preview.rowCount() == 1  # U708: unknown unit (and a new-supplier note)
+    dlg.next()
+    assert dlg.stack.currentIndex() == 4, msgs
+    assert "Pre-import backup successfully created" in dlg.done_text.text()
+    assert any(title == "Import from Excel" and "1 row(s) with errors will NOT be imported" in text
+               for _, title, text in msgs)
+    assert app.services.products.get(sample.mdf.id).name == "MDF renamed by Excel"
+    assert app.services.search.exact_product("H3311").supplier.name == "Egger UK Ltd"
+    assert app.services.search.exact_product("U708") is None
+
+    win.go("products")
+    page = win.page("products")
+    page.refresh()
+    assert page.export_excel("selected", str(tmp_path / "none.xlsx")) is None
+    assert any("Select one or more" in text for _, _, text in msgs)
+    page.search.setText("MDF")
+    page.refresh()
+    page.export_excel("shown", str(tmp_path / "shown.xlsx"))
+    rows = [r[0].value for r in load_workbook(tmp_path / "shown.xlsx").active.iter_rows(min_row=6)]
+    assert rows[:1] == ["MDF-18"] and "H3311" not in rows
+    page.search.setText("")
+    page.refresh()
+    page.table.selectRow(0)
+    page.table.selectionModel().select(page.table.proxy.index(2, 0),
+                                       page.table.selectionModel().SelectionFlag.Select
+                                       | page.table.selectionModel().SelectionFlag.Rows)
+    assert len(page.table.selected_items()) == 2
+    page.export_excel("selected", str(tmp_path / "sel.xlsx"))
+    page.export_excel("all", str(tmp_path / "all.xlsx"))
+    ws = load_workbook(tmp_path / "all.xlsx").active
+    assert ws["A3"].value == "All products - 4 product(s)"
+    assert len([r for r in ws.iter_rows(min_row=6) if r[0].value and r[0].value != "Total"]) == 4
+
+    search = _search_page(win)
+    search.search_for("egger")
+    out = search.export_products(str(tmp_path / "search.xlsx"))
+    assert out is not None
+    codes = {r[0].value for r in load_workbook(out).active.iter_rows(min_row=6)}
+    assert {"H3311", "MDF-18"} <= codes
+
+    from wms.ui.dialogs.product_dialog import ProductDialog
+    sample.receive(sample.mdf, 5)
+    card = ProductDialog(app, sample.mdf.id)
+    qtbot.addWidget(card)
+    out = card.export_history(str(tmp_path / "history.xlsx"))
+    ws = load_workbook(out).active
+    assert ws.title == "History MDF-18" and ws["A5"].value == "Date / Time" and ws["C6"].value == "MDF-18"
+    assert not _errors(msgs), msgs

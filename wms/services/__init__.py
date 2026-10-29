@@ -59,6 +59,11 @@ class Services:
         return ReservationService(self.ctx)
 
     @cached_property
+    def excel_import(self):
+        from wms.services.excel_import import ExcelImportService
+        return ExcelImportService(self.ctx)
+
+    @cached_property
     def goods_out(self):
         from wms.services.goods_out import GoodsOutService
         return GoodsOutService(self.ctx)

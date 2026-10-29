@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 
-from sqlalchemy import Date, ForeignKey, String, Text
+from sqlalchemy import Date, ForeignKey, Index, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from wms.db.base import ActiveMixin, Base, IdMixin, TimestampMixin, VersionMixin, fk
@@ -45,6 +45,12 @@ class Product(IdMixin, TimestampMixin, ActiveMixin, VersionMixin, Base):
     def __repr__(self) -> str:
         return f"<Product {self.internal_code}>"
 
+
+
+# Codes and barcodes are matched ignoring case (scans, duplicate checks, Excel import): without
+# these the check behind every save reads the whole product table.
+Index("ix_products_code_upper", func.upper(Product.internal_code))
+Index("ix_products_barcode_upper", func.upper(Product.barcode))
 
 class FinishedProductInfo(Base):
     """Extra fields for products with item_type FINISHED (1:1)."""

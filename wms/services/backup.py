@@ -92,15 +92,25 @@ class BackupService(BaseService):
             raise ValidationError("Built-in backup works for the local SQLite database. "
                                   "Back up a central PostgreSQL server with pg_dump on the server.")
 
-    def create(self, note: str = "", destination: Path | None = None, automatic: bool = False) -> Path:
+    def create_safety(self, note: str) -> Path:
+        """A backup the program takes itself before a bulk change (Excel import). Anyone allowed to
+        make that change gets one - it only protects their own work - and it is never pruned."""
+        return self.create(note, automatic=True, kind="safety")
+
+    def create(self, note: str = "", destination: Path | None = None, automatic: bool = False,
+               kind: str | None = None) -> Path:
         if not automatic:
             self.require(P.BACKUP_RUN)
         self._require_sqlite()
         dest_dir = Path(destination) if destination else self.backup_dir
         dest_dir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-        kind = "auto" if automatic else "manual"
+        kind = kind or ("auto" if automatic else "manual")
         target = dest_dir / f"StoreWMS_{stamp}_{kind}.zip"
+        n = 1
+        while target.exists():  # two backups in the same second (import straight after a manual backup)
+            n += 1
+            target = dest_dir / f"StoreWMS_{stamp}-{n}_{kind}.zip"
         with tempfile.TemporaryDirectory() as tmp:
             snap = Path(tmp) / DB_NAME
             src = sqlite3.connect(str(self.ctx.config.db_path))
