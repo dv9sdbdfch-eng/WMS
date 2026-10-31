@@ -44,6 +44,9 @@ class ReportsPage(Page):
 
     def __init__(self, app, parent=None):
         super().__init__(app, parent)
+        if app.can(P.STOCK_VIEW):
+            self.add_link("Stock Movement History", "movements", tooltip="Every stock transaction (the ledger), "
+                          "with reversal of transfers")
         self.defs = app.services.reports.definitions()
         split = QSplitter()
         self.list = QListWidget()

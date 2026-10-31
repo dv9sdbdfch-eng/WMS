@@ -37,6 +37,24 @@ class Page(QWidget):
     def add_action(self, widget) -> None:
         self.actions.addWidget(widget)
 
+    def add_link(self, text: str, page_key: str, preset: dict | None = None, tooltip: str | None = None):
+        """A button that opens a related screen (spec 3 / 42: screens without their own sidebar entry
+        are reached from where they belong). ``preset`` is passed to that screen's ``apply_preset``."""
+        from wms.ui.widgets.common import button
+
+        def go():
+            mw = getattr(self, "main_window", None)
+            if mw is None:
+                return
+            mw.go(page_key)
+            page = mw.page(page_key)
+            if preset and page is not None and hasattr(page, "apply_preset"):
+                page.apply_preset(preset)
+
+        b = button(text, go, tooltip=tooltip)
+        self.add_action(b)
+        return b
+
     def on_show(self) -> None:
         if self.dirty:
             self.refresh()
@@ -71,7 +89,7 @@ class ListPage(Page):
             self.filters.addWidget(label("To", "Muted"))
             self.filters.addWidget(self.date_to)
         self.body.addLayout(self.filters)
-        self.table = DataTable(self.columns())
+        self.table = DataTable(self.columns(), settings_key=type(self).__name__)
         self.table.activated_item.connect(self._open)
         self.body.addWidget(self.table, 1)
         self.count = label("", "Muted")
@@ -113,10 +131,17 @@ class ListPage(Page):
         """Show a ready-made selection (a Dashboard counter): {"status": "OVERDUE"} picks that entry
         of the page's ``status`` drop-down. The search text is cleared so nothing hides the records."""
         from PySide6.QtWidgets import QComboBox
+
+        from wms.ui.widgets.common import OptionalDateEdit
         self.search.setText("")
+        if self.date_filter:  # a preset shows exactly its records: no leftover date range
+            for d in (self.date_from, self.date_to):
+                d.set_value(None)
         for name, value in preset.items():
             widget = getattr(self, name, None)
-            if isinstance(widget, QComboBox):
+            if isinstance(widget, OptionalDateEdit):
+                widget.set_value(value)
+            elif isinstance(widget, QComboBox):
                 i = widget.findData(value)
                 if i >= 0:
                     widget.blockSignals(True)

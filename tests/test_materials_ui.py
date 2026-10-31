@@ -52,6 +52,44 @@ def test_filters_chips_count_and_clear(ui, sample):  # noqa: F811
     assert not _errors(msgs), msgs
 
 
+def test_materials_header_columns_button_project_banner_and_assign(ui, sample):  # noqa: F811
+    """UI refactor spec 18-23, 36, 38: search on its own line, primary filters under it, Columns
+    menu, a project banner when a project is chosen, Assign Project for ticked rows."""
+    app, win, msgs, _ = ui
+    sample.receive(sample.mdf, 25)
+    app.services.materials.set_required(sample.site.id, [(sample.mdf.id, "40")])
+    page = page_of(win)
+    v = page.view
+    assert v.layout().itemAt(0).widget() is v.search  # search line first
+    assert [c.title for c in v.model.cols if c.title][:8] == ["Photo", "Code", "Material", "Product Number",
+                                                              "Supplier", "On Hand", "Available", "Bin"]
+    # Columns menu: the same choices as right-clicking the header
+    v._fill_column_menu(v.columns_menu)
+    brand = next(a for a in v.columns_menu.actions() if a.text() == "Brand")
+    brand.trigger()
+    assert "brand" in [c.key for c in v.model.cols]
+    brand.trigger()
+    assert "brand" not in [c.key for c in v.model.cols]
+    # choosing a project turns the list into the project's material workspace
+    assert v.project_bar.isHidden()
+    v.project.set_value(sample.site.id)
+    assert not v.project_bar.isHidden()
+    assert v.project_title.text().startswith("PROJECT: RIVERSIDE APARTMENTS")
+    assert v.project_figures["required"].text() == "Required: <b>40</b>"
+    assert v.project_figures["remaining"].text() == "Remaining: <b>40</b>"
+    assert [c.key for c in v.model.cols if c.key in ("required", "proj_reserved", "issued", "returned",
+                                                     "remaining")] == ["required", "proj_reserved", "issued",
+                                                                      "returned", "remaining"]
+    assert "photo" not in [c.key for c in v.model.cols]  # project emphasis: its own column choice
+    v.project.set_value(None)
+    assert v.project_bar.isHidden() and "photo" in [c.key for c in v.model.cols]
+    # bulk toolbar only while something is ticked; Assign Project is on it
+    assert v.sel_bar.isHidden()
+    tick(v, 0)
+    assert not v.sel_bar.isHidden() and not v.sel_project.isHidden()
+    assert not _errors(msgs), msgs
+
+
 def test_more_filters_views_and_columns(ui, sample, monkeypatch):  # noqa: F811
     app, win, msgs, _ = ui
     page = page_of(win)
@@ -144,7 +182,7 @@ def test_project_tab_add_set_remove_and_export(ui, sample, tmp_path, monkeypatch
     assert dlg.tabs.currentWidget() is dlg.summary_tab
     v = dlg.materials
     assert v.count.text() == "0 materials on this project" and not v.project.isVisible()
-    assert {c.key for c in v.model.cols} >= {"required", "proj_reserved", "issued", "returned", "net"}
+    assert {c.key for c in v.model.cols} >= {"required", "proj_reserved", "issued", "returned", "remaining"}
     # put two materials on the list (as "Add materials..." does after the picker)
     rows = app.services.materials.rows_for([sample.mdf.id, sample.edge.id])
     pl = mv.ProjectListDialog(app, rows, sample.site.id, dlg)
@@ -221,17 +259,30 @@ def test_dashboard_style_preset(ui, sample):  # noqa: F811
 def test_sidebar_is_grouped_and_less_used_groups_fold(ui, sample):  # noqa: F811
     app, win, msgs, opened = ui
     groups = list(win.sections)
-    assert groups == ["HOME", "STOCK", "OPERATIONS", "PROJECTS", "PURCHASING", "INVENTORY CONTROL", "MORE", "ADMIN"]
+    assert groups == ["HOME", "WAREHOUSE", "OPERATIONS", "PROJECTS", "PURCHASING", "MORE", "ADMIN"]
     texts = {s: [i.text() for i in items] for s, items in win.section_items.items()}
-    assert texts["OPERATIONS"] == ["Goods In", "Goods Out", "Transfer", "Returns"]
-    assert texts["PROJECTS"] == ["Projects", "Reservations"]
-    assert texts["ADMIN"] == ["Users", "Audit Log", "Backup", "Settings"]
+    assert texts == {
+        "HOME": ["Dashboard"],
+        "WAREHOUSE": ["Materials", "Locations & Bins"],
+        "OPERATIONS": ["Goods In", "Goods Out", "Transfer"],
+        "PROJECTS": ["Projects"],
+        "PURCHASING": ["Purchase Orders", "Deliveries"],
+        "MORE": ["Stocktake", "Returns", "Finished Products", "Reports", "Import / Export", "Archived Records"],
+        "ADMIN": ["Users", "Audit Log", "Backup & Restore", "Settings"],
+    }
     # less frequent groups start folded; a click on the heading opens / closes them
     assert win.is_folded("MORE") and win.is_folded("ADMIN") and not win.is_folded("OPERATIONS")
     win._nav_clicked(win.sections["MORE"])
     assert not win.is_folded("MORE") and win.sections["MORE"].text() == "▾  MORE"
     win._nav_clicked(win.sections["MORE"])
     assert win.is_folded("MORE")
+    # daily groups never fold
+    win._nav_clicked(win.sections["OPERATIONS"])
+    assert not win.is_folded("OPERATIONS") and win.sections["OPERATIONS"].text() == "OPERATIONS"
+    # the folded state is remembered for the next start
+    win._set_folded("ADMIN", False)
+    assert win._folded_groups() == {"MORE"}
+    win._set_folded("ADMIN", True)
     # going to a screen in a folded group opens that group
     win.go("users")
     assert not win.is_folded("ADMIN") and win.stack.currentWidget() is win.page("users")
@@ -239,11 +290,60 @@ def test_sidebar_is_grouped_and_less_used_groups_fold(ui, sample):  # noqa: F811
     transfer = next(i for i in win.section_items["OPERATIONS"] if i.text() == "Transfer")
     win.nav.setCurrentItem(transfer)
     assert "TransferDialog" in opened and win.nav.currentItem().data(Qt.ItemDataRole.UserRole) == "users"
-    backup = next(i for i in win.section_items["ADMIN"] if i.text() == "Backup")
+    backup = next(i for i in win.section_items["ADMIN"] if i.text() == "Backup & Restore")
     win.nav.setCurrentItem(backup)
     assert win.page("settings").tabs.tabText(win.page("settings").tabs.currentIndex()) == "Backup and restore"
     win._set_folded("MORE", False)
-    archive = next(i for i in win.section_items["MORE"] if i.text() == "Archive")
+    archive = next(i for i in win.section_items["MORE"] if i.text() == "Archived Records")
     win.nav.setCurrentItem(archive)
     assert win.page("products").view.filter.status == "ARCHIVED"
+    assert not _errors(msgs), msgs
+
+
+def test_screens_without_a_sidebar_entry_open_in_context(ui, sample):  # noqa: F811
+    """Spec 3: Reservations, Low Stock and Delivery Problems left the sidebar but are one click from
+    where they belong, and the sidebar shows that place."""
+    app, win, msgs, opened = ui
+    keys = {i.data(Qt.ItemDataRole.UserRole) for items in win.section_items.values() for i in items}
+    assert not keys & {"reservations", "low_stock", "discrepancies", "search", "movements"}
+    for key, parent in (("reservations", "sites"), ("low_stock", "products"),
+                        ("discrepancies", "delivery_notes"), ("movements", "reports")):
+        win.go(parent)
+        page = win.page(parent)
+        link = next(page.actions.itemAt(i).widget() for i in range(page.actions.count())
+                    if page.actions.itemAt(i).widget() is not None
+                    and page.actions.itemAt(i).widget().text().startswith(win.titles[key].split()[0]))
+        link.click()
+        assert win.stack.currentWidget() is win.page(key), key
+        assert win.nav.currentItem().data(Qt.ItemDataRole.UserRole) == parent
+        # one click back
+        back = win.page(key).actions.itemAt(0).widget()
+        assert back.text().startswith("‹  Back to")
+        back.click()
+        assert win.stack.currentWidget() is page
+    # Materials offers reordering while it shows low stock
+    win.go("products")
+    mats = win.page("products")
+    assert mats.reorder_btn.isHidden()
+    mats.apply_preset({"stock": "LOW_STOCK"})
+    assert not mats.reorder_btn.isHidden()
+    assert not _errors(msgs), msgs
+
+
+def test_top_bar_quick_actions_and_user_menu(ui, sample):  # noqa: F811
+    app, win, msgs, opened = ui
+    assert [b.text() for b in win.quick.values()] == ["+  Goods In", "−  Goods Out", "⇄  Transfer"]
+    assert "(F2)" in win.quick["goods_in"].toolTip()
+    win.quick["goods_out"].click()
+    assert win.stack.currentWidget() is win.page("goods_out")
+    win.quick["transfer"].click()
+    assert "TransferDialog" in opened
+    actions = [a.text() for a in win.user_menu.actions() if a.text()]
+    assert actions[-5:] == ["My Account", "Change Password...", "Settings", "Keyboard Shortcuts", "Log Out"]
+    # no permanent account buttons in the top bar any more
+    from PySide6.QtWidgets import QPushButton
+    texts = [b.text() for b in win.findChildren(QPushButton)]
+    assert "Change password" not in texts and "Log out" not in texts
+    next(a for a in win.user_menu.actions() if a.text() == "Settings").trigger()
+    assert win.stack.currentWidget() is win.page("settings")
     assert not _errors(msgs), msgs

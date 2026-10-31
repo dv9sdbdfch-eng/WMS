@@ -19,10 +19,18 @@ Incoming) are joined into the statement only when a stock filter or stock sort n
 plain page they are fetched for that page's rows only, with one grouped query each - never one
 query per row.
 
-Project figures (spec section 6) are four separate things and are never mixed up:
-Required (project material list), Reserved (active reservations still to issue), Issued and
-Returned (posted movements, reversals netted off). Net = Issued - Returned. None of them changes
-stock; only Goods In / Out / Transfer / Return / Adjustment / Stocktake do.
+Project figures (spec section 6; UI refactor spec 24) are separate things and are never mixed up:
+
+* Required   - the project material list (``project_materials``; Excel / manual entry);
+* Reserved   - active reservations for the project still to be issued (stock stays in its bin);
+* Issued     - posted Goods Out to the project (reversals netted off);
+* Returned   - posted returns from the project (reversals netted off);
+* Net Issued - Issued - Returned (what is physically on the project now);
+* Remaining  - Required - Net Issued - Reserved, never below 0: what is neither on site nor set
+               aside yet, i.e. still to be reserved or issued. Blank when the material is not on
+               the project's list (no Required quantity).
+
+None of them changes stock; only Goods In / Out / Transfer / Return / Adjustment / Stocktake do.
 """
 
 from __future__ import annotations
@@ -100,9 +108,17 @@ ITEM_TYPES = {"RAW": "Materials and components", "FINISHED": "Finished products"
 #: sort keys the table header understands (column -> key)
 SORT_KEYS = ("code", "name", "product_no", "supplier", "category", "brand", "qty", "available", "reserved",
              "incoming", "bin", "status", "received", "issued_date", "updated", "created",
-             "required", "proj_reserved", "issued", "returned", "net")
+             "required", "proj_reserved", "issued", "returned", "net", "remaining")
 STOCK_SORTS = {"qty", "available", "reserved", "incoming", "status"}
-PROJECT_SORTS = {"required", "proj_reserved", "issued", "returned", "net"}
+PROJECT_SORTS = {"required", "proj_reserved", "issued", "returned", "net", "remaining"}
+
+
+def remaining_qty(required: Decimal | None, net_issued: Decimal, reserved: Decimal) -> Decimal | None:
+    """Remaining = Required - Net Issued - Reserved, never below 0 (see the module docstring)."""
+    if required is None:
+        return None
+    left = required - net_issued - reserved
+    return left if left > 0 else ZERO
 
 RECENT_DAYS = 30
 
@@ -236,6 +252,10 @@ class MaterialRow:
         return self.issued - self.returned
 
     @property
+    def remaining(self) -> Decimal | None:
+        return remaining_qty(self.required, self.net, self.proj_reserved)
+
+    @property
     def reorder_point(self) -> Decimal | None:
         p = self.product
         level = p.reorder_level if p.reorder_level and p.reorder_level > 0 else None
@@ -281,6 +301,7 @@ class ProjectSummary:
     reserved: Decimal
     issued: Decimal
     returned: Decimal
+    remaining: Decimal = ZERO  # sum of each material's Remaining (not the totals' difference)
 
     @property
     def net(self) -> Decimal:
@@ -429,6 +450,8 @@ class _Project:
         self.issued = _q(func.coalesce(self.mov.c.issued, 0))
         self.returned = _q(func.coalesce(self.mov.c.returned, 0))
         self.net = _q(self.issued - self.returned)
+        left = self.required - self.net - self.reserved
+        self.remaining = _q(case((self.req.c.pid.is_(None), None), (left > 0, left), else_=0))
 
     def join(self, q):
         return (q.outerjoin(self.req, self.req.c.pid == Product.id)
@@ -580,7 +603,7 @@ class MaterialsService(BaseService):
                    "incoming": st.incoming, "status": status}[key]
         elif key in PROJECT_SORTS and pj is not None:
             col = {"required": pj.required, "proj_reserved": pj.reserved, "issued": pj.issued,
-                   "returned": pj.returned, "net": pj.net}[key]
+                   "returned": pj.returned, "net": pj.net, "remaining": pj.remaining}[key]
         else:
             col = {
                 "name": func.lower(Product.name),
@@ -688,9 +711,11 @@ class MaterialsService(BaseService):
                 raise NotFoundError("Project not found.")
             pj = _Project(site_id)
             q = pj.join(select(func.count(Product.id), func.sum(pj.required), func.sum(pj.reserved),
-                               func.sum(pj.issued), func.sum(pj.returned)).select_from(Product)).where(pj.associated())
-            n, req, res, iss, ret = s.execute(q).one()
-            return ProjectSummary(site, n or 0, _q_value(req), _q_value(res), _q_value(iss), _q_value(ret))
+                               func.sum(pj.issued), func.sum(pj.returned), func.sum(pj.remaining))
+                        .select_from(Product)).where(pj.associated())
+            n, req, res, iss, ret, rem = s.execute(q).one()
+            return ProjectSummary(site, n or 0, _q_value(req), _q_value(res), _q_value(iss), _q_value(ret),
+                                  _q_value(rem))
 
     # ---- choices for the filter drop-downs ------------------------------------------------------
     def bin_choices(self, include_archived: bool = False) -> list[Bin]:

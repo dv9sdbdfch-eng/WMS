@@ -93,6 +93,31 @@ QPushButton#Link {{ background: transparent; border: none; color: {ACCENT}; padd
 QPushButton#Link:hover {{ text-decoration: underline; }}
 QFrame#SelectionBar {{ background: #EFF8FF; border: 1px solid #B2DDFF; border-radius: 6px; }}
 QLabel#Count {{ color: #344054; font-weight: 600; }}
+QFrame#ProjectBar {{ background: #EFF8FF; border: 1px solid #B2DDFF; border-radius: 6px; }}
+QLabel#ProjectTitle {{ color: #175CD3; font-weight: 600; }}
+QLabel#ProjectFigure {{ color: #344054; }}
+QLabel#AlertGroup {{ color: {MUTED}; font-size: 8pt; font-weight: 600; }}
+QPushButton#AlertCritical, QPushButton#AlertAction, QPushButton#AlertData {{ text-align: left; padding: 5px 12px;
+    border-radius: 6px; }}
+QPushButton#AlertCritical {{ background: #FEF3F2; border: 1px solid #FDA29B; color: {DANGER}; font-weight: 600; }}
+QPushButton#AlertAction {{ background: #FFFAEB; border: 1px solid #FEC84B; color: {WARNING}; font-weight: 600; }}
+QPushButton#AlertData {{ background: white; border: 1px solid #E4E7EC; color: #475467; }}
+QPushButton#AlertCritical:hover, QPushButton#AlertAction:hover, QPushButton#AlertData:hover {{
+    border-color: {ACCENT}; }}
+QPushButton#AlertCritical:focus, QPushButton#AlertAction:focus, QPushButton#AlertData:focus {{
+    border: 2px solid {ACCENT}; }}
+QFrame#TodayBar {{ background: white; border: 1px solid #E4E7EC; border-radius: 6px; }}
+QPushButton#TodayItem, QPushButton#TodayZero {{ background: transparent; border: none; padding: 3px 8px; }}
+QPushButton#TodayItem {{ color: #101828; font-weight: 600; }}
+QPushButton#TodayZero {{ color: #98A2B3; }}
+QPushButton#TodayItem:hover, QPushButton#TodayZero:hover {{ color: {ACCENT}; text-decoration: underline; }}
+QPushButton#QuickAction {{ background: {ACCENT}; border: 1px solid {ACCENT}; color: white; font-weight: 600;
+    padding: 6px 12px; min-width: 96px; }}
+QPushButton#QuickAction:hover {{ background: #285F99; }}
+QToolButton#UserMenu {{ background: transparent; border: 1px solid transparent; border-radius: 6px;
+    padding: 6px 10px; color: #344054; }}
+QToolButton#UserMenu:hover {{ background: #F2F4F7; border-color: #D0D5DD; }}
+QToolButton#UserMenu::menu-indicator {{ image: none; width: 0; }}
 """
 
 

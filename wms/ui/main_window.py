@@ -15,7 +15,9 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
+    QPushButton,
     QStackedWidget,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -28,28 +30,24 @@ log = logging.getLogger(__name__)
 
 
 ACTION = "action:"  # sidebar entries that run something instead of opening a screen
-#: groups shown folded until opened (spec 3: less frequently used groups are collapsible)
+#: groups that fold (spec 4: less frequently used groups are collapsible; daily work never needs a click to open)
+COLLAPSIBLE = ("MORE", "ADMIN")
 FOLDED_BY_DEFAULT = {"MORE", "ADMIN"}
 
 
 def _nav():
-    """(section, key, label, permission, page factory)."""
+    """(section, key, label, permission, page factory) - the permanent sidebar (spec 2)."""
     from wms.ui.pages import (
         dashboard,
         delivery_notes,
-        discrepancies,
         finished,
         goods_in,
         goods_out,
         locations,
-        low_stock,
         materials,
-        movements,
         purchase_orders,
         reports,
-        reservations,
         returns,
-        search,
         settings,
         sites,
         stocktake,
@@ -57,31 +55,46 @@ def _nav():
     )
     return [
         ("HOME", "dashboard", "Dashboard", None, dashboard.DashboardPage),
-        ("HOME", "search", "Search", None, search.SearchPage),
-        ("STOCK", "products", "Materials", P.PRODUCTS_VIEW, materials.MaterialsPage),
-        ("STOCK", "finished", "Finished Products", P.PRODUCTS_VIEW, finished.FinishedPage),
-        ("STOCK", "locations", "Locations & Bins", P.LOCATIONS_VIEW, locations.LocationsPage),
+        ("WAREHOUSE", "products", "Materials", P.PRODUCTS_VIEW, materials.MaterialsPage),
+        ("WAREHOUSE", "locations", "Locations & Bins", P.LOCATIONS_VIEW, locations.LocationsPage),
         ("OPERATIONS", "goods_in", "Goods In", P.GOODS_IN_POST, goods_in.GoodsInPage),
         ("OPERATIONS", "goods_out", "Goods Out", P.GOODS_OUT_VIEW, goods_out.GoodsOutPage),
         ("OPERATIONS", ACTION + "transfer", "Transfer", P.STOCK_TRANSFER, None),
-        ("OPERATIONS", "returns", "Returns", P.GOODS_OUT_VIEW, returns.ReturnsPage),
         ("PROJECTS", "sites", "Projects", P.SITES_VIEW, sites.SitesPage),
-        ("PROJECTS", "reservations", "Reservations", P.STOCK_VIEW, reservations.ReservationsPage),
         ("PURCHASING", "purchase_orders", "Purchase Orders", P.PURCHASING_VIEW, purchase_orders.PurchaseOrdersPage),
         ("PURCHASING", "delivery_notes", "Deliveries", P.GOODS_IN_VIEW, delivery_notes.DeliveryNotesPage),
-        ("PURCHASING", "discrepancies", "Delivery Problems", P.PURCHASING_VIEW, discrepancies.DiscrepanciesPage),
-        ("INVENTORY CONTROL", "stocktake", "Stocktake", P.STOCKTAKE_COUNT, stocktake.StocktakePage),
-        ("INVENTORY CONTROL", "low_stock", "Low Stock", P.PRODUCTS_VIEW, low_stock.LowStockPage),
+        ("MORE", "stocktake", "Stocktake", P.STOCKTAKE_COUNT, stocktake.StocktakePage),
+        ("MORE", "returns", "Returns", P.GOODS_OUT_VIEW, returns.ReturnsPage),
+        ("MORE", "finished", "Finished Products", P.PRODUCTS_VIEW, finished.FinishedPage),
         ("MORE", "reports", "Reports", P.REPORTS_VIEW, reports.ReportsPage),
-        ("MORE", "movements", "Stock Movements", P.STOCK_VIEW, movements.MovementsPage),
         ("MORE", ACTION + "import_export", "Import / Export", P.PRODUCTS_VIEW, None),
-        ("MORE", ACTION + "archive", "Archive", P.PRODUCTS_VIEW, None),
+        ("MORE", ACTION + "archive", "Archived Records", P.PRODUCTS_VIEW, None),
         ("ADMIN", "users", "Users", P.USERS_MANAGE, users.UsersPage),
         ("ADMIN", "audit", "Audit Log", P.AUDIT_VIEW, users.AuditPage),
-        ("ADMIN", ACTION + "backup", "Backup", None, None),
+        ("ADMIN", ACTION + "backup", "Backup & Restore", None, None),
         ("ADMIN", "settings", "Settings", None, settings.SettingsPage),
     ]
 
+
+def _hidden():
+    """Screens without a permanent sidebar place (spec 3). They are opened from where they belong
+    (Dashboard alerts, the screen named in ``parent``, the global search) and the sidebar then
+    highlights ``parent`` so the person still knows where they are.
+
+    (key, label, permission, page factory, parent sidebar key)"""
+    from wms.ui.pages import discrepancies, low_stock, movements, reservations, search
+    return [
+        ("search", "Search", None, search.SearchPage, None),
+        ("low_stock", "Reorder Required", P.PRODUCTS_VIEW, low_stock.LowStockPage, "products"),
+        ("reservations", "Reservations", P.STOCK_VIEW, reservations.ReservationsPage, "sites"),
+        ("discrepancies", "Delivery Problems", P.PURCHASING_VIEW, discrepancies.DiscrepanciesPage, "delivery_notes"),
+        ("movements", "Stock Movements", P.STOCK_VIEW, movements.MovementsPage, "reports"),
+    ]
+
+
+#: the three everyday operations: top bar buttons, keys and tooltips (spec 7)
+QUICK_ACTIONS = (("goods_in", "+  Goods In", "F2"), ("goods_out", "−  Goods Out", "F3"),
+                 ("transfer", "⇄  Transfer", "F4"))
 
 
 class MainWindow(QMainWindow):
@@ -93,6 +106,8 @@ class MainWindow(QMainWindow):
         self.resize(1440, 900)
         self.pages: dict[str, QWidget] = {}
         self.factories = {}
+        self.hidden_parent: dict[str, str | None] = {}
+        self.titles: dict[str, str] = {}
 
         root = QWidget()
         rl = QHBoxLayout(root)
@@ -102,7 +117,7 @@ class MainWindow(QMainWindow):
         # Sidebar
         side = QWidget()
         side.setObjectName("Sidebar")
-        side.setFixedWidth(232)
+        side.setFixedWidth(220)
         sl = QVBoxLayout(side)
         sl.setContentsMargins(0, 0, 0, 12)
         sl.setSpacing(0)
@@ -121,13 +136,16 @@ class MainWindow(QMainWindow):
                 continue
             if section not in self.sections:
                 head = QListWidgetItem(section)
-                head.setFlags(Qt.ItemFlag.ItemIsEnabled)  # clickable (fold / unfold), never "selected"
+                # clickable only where it folds; never "selected"
+                head.setFlags(Qt.ItemFlag.ItemIsEnabled)
                 head.setData(Qt.ItemDataRole.UserRole + 1, section)
                 f = head.font()
                 f.setPointSize(8)
                 f.setBold(True)
                 head.setFont(f)
                 head.setForeground(QColor("#8FA6BF"))
+                if section in COLLAPSIBLE:
+                    head.setToolTip("Click to show or hide this group")
                 self.nav.addItem(head)
                 self.sections[section] = head
                 self.section_items[section] = []
@@ -135,10 +153,17 @@ class MainWindow(QMainWindow):
             item.setData(Qt.ItemDataRole.UserRole, key)
             self.nav.addItem(item)
             self.section_items[section].append(item)
+            self.titles[key] = text
             if factory is not None:
                 self.factories[key] = factory
+        for key, text, perm, factory, parent in _hidden():
+            if perm and not app.can(perm):
+                continue
+            self.factories[key] = factory
+            self.hidden_parent[key] = parent
+            self.titles[key] = text
         for section in self.sections:
-            self._set_folded(section, section in folded, save=False)
+            self._set_folded(section, section in folded and section in COLLAPSIBLE, save=False)
         self.nav.itemClicked.connect(self._nav_clicked)
         self.nav.currentItemChanged.connect(self._nav_changed)
         sl.addWidget(self.nav, 1)
@@ -153,7 +178,8 @@ class MainWindow(QMainWindow):
         top = QWidget()
         top.setObjectName("TopBar")
         tl = QHBoxLayout(top)
-        tl.setContentsMargins(24, 10, 24, 10)
+        tl.setContentsMargins(20, 8, 20, 8)
+        tl.setSpacing(8)
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search everything (Ctrl+K): code, barcode, name, supplier, DN number, "
                                        "project, bin, reference...")
@@ -161,11 +187,36 @@ class MainWindow(QMainWindow):
         self.search.setObjectName("GlobalSearch")
         self.search.returnPressed.connect(self.global_search)
         tl.addWidget(self.search, 1)
-        tl.addSpacing(16)
-        self.user_label = label(f"{app.user.full_name}  ·  {app.user.role.name}", "Muted")
-        tl.addWidget(self.user_label)
-        tl.addWidget(button("Change password", self.change_password))
-        tl.addWidget(button("Log out", self.logout))
+        tl.addSpacing(8)
+        # spec 7: the three everyday operations, same size and look, on every screen
+        self.quick: dict[str, QPushButton] = {}
+        can_run = {"goods_in": "goods_in" in self.factories,
+                   "goods_out": "goods_out" in self.factories and app.can(P.GOODS_OUT_POST),
+                   "transfer": app.can(P.STOCK_TRANSFER)}
+        for key, text, sc in QUICK_ACTIONS:
+            if not can_run[key]:
+                continue
+            b = button(text, lambda k=key: self.quick_action(k), tooltip=f"{text.split(maxsplit=1)[1]} ({sc})")
+            b.setObjectName("QuickAction")
+            self.quick[key] = b
+            tl.addWidget(b)
+        tl.addSpacing(8)
+        # spec 5: account actions live in one drop-down, not as permanent buttons
+        self.user_button = QToolButton()
+        self.user_button.setObjectName("UserMenu")
+        self.user_button.setText(f"{app.user.full_name}  ▾")
+        self.user_button.setToolTip(f"Signed in as {app.user.username} ({app.user.role.name})")
+        self.user_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.user_menu = QMenu(self.user_button)
+        self.user_menu.addSection(f"{app.user.full_name} · {app.user.role.name}")
+        self.user_menu.addAction("My Account", self.my_account)
+        self.user_menu.addAction("Change Password...", self.change_password)
+        self.user_menu.addAction("Settings", lambda: self.go("settings"))
+        self.user_menu.addAction("Keyboard Shortcuts", self.show_shortcuts)
+        self.user_menu.addSeparator()
+        self.user_menu.addAction("Log Out", self.logout)
+        self.user_button.setMenu(self.user_menu)
+        tl.addWidget(self.user_button)
         ml.addWidget(top)
         self.stack = QStackedWidget()
         ml.addWidget(self.stack, 1)
@@ -174,19 +225,17 @@ class MainWindow(QMainWindow):
 
         app.main_window = self
         QShortcut(QKeySequence("Ctrl+K"), self, self.focus_search)
-        QShortcut(QKeySequence("Ctrl+F"), self, self.focus_search)
+        QShortcut(QKeySequence("Ctrl+F"), self, self.focus_search)  # kept: people already use it
         QShortcut(QKeySequence("F5"), self, self.refresh_current)
-        # Warehouse keys (spec 16 / 39.39): the three everyday operations without the mouse.
+        # Warehouse keys (spec 7 / 48): the three everyday operations without the mouse.
         hints = []
-        for key, page, text in (("F2", "goods_in", "Goods In"), ("F3", "goods_out", "Goods Out")):
-            if page in self.factories:
-                QShortcut(QKeySequence(key), self, lambda p=page: self.go(p))
-                hints.append(f"{key} {text}")
-        if app.can(P.STOCK_TRANSFER):
-            QShortcut(QKeySequence("F4"), self, self.transfer)
-            hints.append("F4 Transfer")
+        for key, text, sc in QUICK_ACTIONS:
+            if key in self.quick:
+                QShortcut(QKeySequence(sc), self, lambda k=key: self.quick_action(k))
+                hints.append(f"{sc} {text.split(maxsplit=1)[1]}")
         QShortcut(QKeySequence("Ctrl+D"), self, lambda: self.go("dashboard"))
         hints += ["Ctrl+K Search / scan", "Ctrl+D Dashboard", "F5 Refresh"]
+        self.shortcut_hints = hints
         self.keys_hint = label("   ·   ".join(hints), "Muted")
         self.statusBar().addPermanentWidget(self.keys_hint)
         self.statusBar().showMessage("Ready")
@@ -194,14 +243,44 @@ class MainWindow(QMainWindow):
         self.go("dashboard")
 
     # -- navigation ---------------------------------------------------------
+    def nav_item(self, key: str) -> QListWidgetItem | None:
+        for items in self.section_items.values():
+            for item in items:
+                if item.data(Qt.ItemDataRole.UserRole) == key:
+                    return item
+        return None
+
     def go(self, key: str):
+        """Show a screen: a sidebar entry, or a screen without its own entry (``_hidden``)."""
+        if key in self.hidden_parent:
+            self._highlight(self.hidden_parent[key])
+            self._show_page(key)
+            return
         for section, items in self.section_items.items():
             for item in items:
                 if item.data(Qt.ItemDataRole.UserRole) == key:
                     if item.isHidden():
                         self._set_folded(section, False)
-                    self.nav.setCurrentItem(item)
+                    if self.nav.currentItem() is item and self.stack.currentWidget() is not self.pages.get(key):
+                        self._show_page(key)  # coming back from a screen opened from this one
+                    else:
+                        self.nav.setCurrentItem(item)
                     return
+
+    def _highlight(self, key: str | None) -> None:
+        """Select ``key`` in the sidebar without opening it (context for a screen opened from it)."""
+        item = self.nav_item(key) if key else None
+        if item is not None and item.isHidden():
+            for section, items in self.section_items.items():
+                if item in items:
+                    self._set_folded(section, False)
+        self.nav.blockSignals(True)
+        if item is None:
+            self.nav.setCurrentRow(-1)
+            self.nav.clearSelection()
+        else:
+            self.nav.setCurrentItem(item)
+        self.nav.blockSignals(False)
 
     # -- sidebar groups -----------------------------------------------------
     @staticmethod
@@ -216,7 +295,7 @@ class MainWindow(QMainWindow):
             saved = None
         if saved is None:
             return set(FOLDED_BY_DEFAULT)
-        return {x for x in str(saved).split(",") if x}
+        return {x for x in str(saved).split(",") if x in COLLAPSIBLE}
 
     def is_folded(self, section: str) -> bool:
         items = self.section_items.get(section) or []
@@ -225,7 +304,8 @@ class MainWindow(QMainWindow):
     def _set_folded(self, section: str, folded: bool, save: bool = True) -> None:
         for item in self.section_items.get(section, []):
             item.setHidden(folded)
-        self.sections[section].setText(f"{'▸' if folded else '▾'}  {section}")
+        if section in COLLAPSIBLE:
+            self.sections[section].setText(f"{'▸' if folded else '▾'}  {section}")
         if save:
             try:
                 self._qs().setValue("sidebar/folded",
@@ -234,12 +314,17 @@ class MainWindow(QMainWindow):
                 pass
 
     def toggle_section(self, section: str) -> None:
-        self._set_folded(section, not self.is_folded(section))
+        if section in COLLAPSIBLE:
+            self._set_folded(section, not self.is_folded(section))
 
     def _nav_clicked(self, item) -> None:
         section = item.data(Qt.ItemDataRole.UserRole + 1)
         if section:
             self.toggle_section(section)
+            return
+        key = item.data(Qt.ItemDataRole.UserRole)
+        if key and not key.startswith(ACTION) and self.stack.currentWidget() is not self.pages.get(key):
+            self._show_page(key)  # the highlighted parent of a screen opened from it: go back to it
 
     def run_action(self, name: str) -> None:
         """Sidebar entries that are not screens: Transfer (a dialog), Import / Export, Archive, Backup."""
@@ -250,16 +335,21 @@ class MainWindow(QMainWindow):
             page = self.page("products")
             m = QMenu(self)
             if self.app.can(P.PRODUCTS_EDIT):
+                m.addSection("Material master data")
                 m.addAction("Import Materials from Excel...", lambda: page.import_excel())
-                if self.app.can(P.SITES_EDIT):
-                    m.addAction("Import Project Material List...", lambda: page.import_project_list())
                 m.addAction("Download Excel Template...", lambda: page.download_template())
+                if self.app.can(P.SITES_EDIT):
+                    m.addSection("Project requirements")
+                    m.addAction("Import Project Material List...", lambda: page.import_project_list())
             if self.app.can(P.REPORTS_EXPORT):
-                m.addSeparator()
+                m.addSection("Export")
                 m.addAction("Export Current View...", lambda: page.export_excel("CURRENT"))
                 m.addAction("Export All Materials...", lambda: page.export_excel("ALL"))
+                if self.app.can(P.REPORTS_VIEW):
+                    m.addAction("Other reports and exports...", lambda: self.go("reports"))
             if self.isVisible() and m.actions():
-                m.popup(self.nav.mapToGlobal(self.nav.visualItemRect(self.nav.currentItem()).topRight()))
+                item = self.nav_item(ACTION + name) or self.nav.currentItem()
+                m.popup(self.nav.mapToGlobal(self.nav.visualItemRect(item).topRight()))
             self.import_export_menu = m
         elif name == "archive":
             self.go("products")
@@ -285,18 +375,27 @@ class MainWindow(QMainWindow):
             self.nav.blockSignals(False)
             self.run_action(key[len(ACTION):])
             return
+        self._show_page(key)
+
+    def _show_page(self, key: str) -> None:
         page = self.pages.get(key)
         if page is None:
             page = self.factories[key](self.app)
             page.main_window = self
             self.pages[key] = page
             self.stack.addWidget(page)
+            parent = self.hidden_parent.get(key)
+            if parent and parent in self.factories:
+                # opened from another screen: one click back to it
+                back = button(f"‹  Back to {self.titles.get(parent, parent)}", lambda p=parent: self.go(p))
+                back.setObjectName("Link")
+                page.actions.insertWidget(0, back)
         self.stack.setCurrentWidget(page)
         try:
             page.on_show()
         except Exception:  # noqa: BLE001
             log.exception("Page refresh failed")
-        self.statusBar().showMessage(f"{item.text()}  -  {datetime.now():%d/%m/%Y %H:%M}")
+        self.statusBar().showMessage(f"{self.titles.get(key, key)}  -  {datetime.now():%d/%m/%Y %H:%M}")
 
     def _data_changed(self):
         for p in self.pages.values():
@@ -318,6 +417,12 @@ class MainWindow(QMainWindow):
         if page is not None:
             page.search_for(text) if text else page.focus_box()
 
+    def quick_action(self, key: str) -> None:
+        if key == "transfer":
+            self.transfer()
+        else:
+            self.go(key)
+
     def transfer(self):
         from wms.ui.dialogs.stock_dialogs import TransferDialog
         if TransferDialog(self.app, None, self).exec():
@@ -330,6 +435,21 @@ class MainWindow(QMainWindow):
         else:
             self.search.setFocus()
             self.search.selectAll()
+
+    # -- account ---------------------------------------------------------------
+    def my_account(self):
+        u = self.app.user
+        last = getattr(u, "last_login_at", None)
+        lines = [f"Name: {u.full_name}", f"User name: {u.username}", f"Role: {u.role.name}",
+                 f"E-mail: {getattr(u, 'email', None) or '-'}"]
+        if last:
+            lines.append(f"Last sign-in: {last.astimezone():%d/%m/%Y %H:%M}")
+        QMessageBox.information(self, "My Account", "\n".join(lines) + "\n\nUse Change Password in this "
+                                "menu to change your password.")
+
+    def show_shortcuts(self):
+        QMessageBox.information(self, "Keyboard Shortcuts", "\n".join(self.shortcut_hints + [
+            "Enter in the search box: open all results", "Ctrl+N: new record on the current screen"]))
 
     def change_password(self):
         from wms.ui.login import ChangePasswordDialog

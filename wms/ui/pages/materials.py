@@ -45,13 +45,23 @@ class MaterialsPage(Page):
             self.add_action(exp)
         if app.can(P.PRODUCTS_EDIT):
             self.add_action(button("Add Material", self.new, primary=True, shortcut="Ctrl+N"))
+        # Low Stock is a state of Materials (spec 3); reordering it is one click away while it is shown
+        self.reorder_btn = self.add_link("Reorder Required...", "low_stock",
+                                         tooltip="Suggested quantities and draft purchase orders per supplier")
+        self.reorder_btn.setVisible(False)
+        self.actions.insertWidget(0, self.reorder_btn)
         self.view = MaterialsView(app, self)
+        self.view.filter_changed.connect(self._filter_changed)
         self.body.addWidget(self.view, 1)
         # the old Products screen's names, used by shortcuts and the Search screen
         self.search = self.view.search
 
     def refresh(self) -> None:
         self.view.refresh()
+
+    def _filter_changed(self) -> None:
+        self.reorder_btn.setVisible(self.view.filter.stock in ("LOW_STOCK", "OUT_OF_STOCK")
+                                    and self.app.can(P.PRODUCTS_VIEW))
 
     def apply_preset(self, preset: dict) -> None:
         """Dashboard counters: {"stock": "LOW_STOCK"} etc. - any MaterialFilter field."""

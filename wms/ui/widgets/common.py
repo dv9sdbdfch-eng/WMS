@@ -19,7 +19,7 @@ from PySide6.QtCore import (
     QTimer,
     Signal,
 )
-from PySide6.QtGui import QBrush, QColor, QGuiApplication, QKeySequence, QShortcut
+from PySide6.QtGui import QBrush, QColor, QFont, QGuiApplication, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -162,6 +162,9 @@ class Col:
     kind: str = TEXT
     width: int | None = None
     sort: str | None = None  # server-side sort key (tables created with server_sort=True)
+    #: a single click on a non-empty cell of this column opens a related record (spec 16):
+    #: link(item) is called; the cell is drawn as a link
+    link: Callable[[Any], None] | None = None
 
 
 class ObjectTableModel(QAbstractTableModel):
@@ -224,12 +227,24 @@ class ObjectTableModel(QAbstractTableModel):
             if v is None:
                 return "" if col.kind in (TEXT, BOOL) else float("-inf")
             return v
+        if role == Qt.ItemDataRole.ToolTipRole:
+            # the full value, for cells cut off by a narrow column (spec 17)
+            text = format_value(self.raw(index.row(), index.column()), col.kind)
+            if len(text) > 12:
+                return text + ("\nClick to open" if col.link else "")
+            return "Click to open" if col.link and text else None
+        if role == Qt.ItemDataRole.FontRole and col.link:
+            f = QFont()
+            f.setUnderline(True)
+            return f
         if role == Qt.ItemDataRole.TextAlignmentRole and col.kind in (QTY, MONEY, INT):
             return int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         if role == Qt.ItemDataRole.BackgroundRole and self.row_style:
             if self.row_style(self.items[index.row()]) == "low":
                 return QBrush(QColor(theme.LOW_STOCK_BG))
         if role == Qt.ItemDataRole.ForegroundRole:
+            if col.link:
+                return QBrush(QColor(theme.ACCENT))
             v = self.raw(index.row(), index.column())
             if col.kind == QTY and isinstance(v, Decimal) and v < 0:
                 return QBrush(QColor(theme.NEGATIVE_FG))
@@ -267,7 +282,8 @@ class DataTable(QTableView):
     selection_changed_item = Signal(object)
     sort_requested = Signal(str, bool)
 
-    def __init__(self, columns: Sequence[Col], parent=None, server_sort: bool = False):
+    def __init__(self, columns: Sequence[Col], parent=None, server_sort: bool = False,
+                 settings_key: str | None = None):
         super().__init__(parent)
         self.model_ = ObjectTableModel(columns, self)
         self.proxy = QSortFilterProxyModel(self)
@@ -301,6 +317,12 @@ class DataTable(QTableView):
         for i, c in enumerate(columns):
             if c.width:
                 self.setColumnWidth(i, c.width)
+        self.settings_key = None
+        if settings_key:
+            self.remember_widths(settings_key)
+        if any(c.link for c in columns):
+            self.setMouseTracking(True)
+            self.clicked.connect(self._cell_clicked)
         QShortcut(QKeySequence(Qt.Key.Key_Return), self, self._emit_activated,
                   context=Qt.ShortcutContext.WidgetShortcut)
         QShortcut(QKeySequence.StandardKey.Copy, self, self.copy_selection, context=Qt.ShortcutContext.WidgetShortcut)
@@ -308,6 +330,55 @@ class DataTable(QTableView):
         self.customContextMenuRequested.connect(self._menu)
         self._extra_actions: list[tuple[str, Callable]] = []
         self._sorted_once = False
+
+    # -- links and remembered widths (spec 16 / 17) ---------------------------------------
+    def _cell_clicked(self, idx) -> None:
+        if not idx.isValid():
+            return
+        col = self.model_.columns[idx.column()]
+        if col.link is None or not idx.data():
+            return
+        item = self.model_.items[self.proxy.mapToSource(idx).row()]
+        try:
+            col.link(item)
+        except Exception as exc:  # noqa: BLE001
+            show_error(self, exc)
+
+    def mouseMoveEvent(self, event):  # noqa: N802 - pointing hand over link cells
+        idx = self.indexAt(event.position().toPoint())
+        link = idx.isValid() and self.model_.columns[idx.column()].link is not None and bool(idx.data())
+        self.viewport().setCursor(Qt.CursorShape.PointingHandCursor if link else Qt.CursorShape.ArrowCursor)
+        super().mouseMoveEvent(event)
+
+    @staticmethod
+    def _qs():
+        from PySide6.QtCore import QSettings
+        return QSettings(QSettings.Format.IniFormat, QSettings.Scope.UserScope, "WMS", "WMS")
+
+    def remember_widths(self, key: str) -> None:
+        """Keep the column widths the person set (per PC), under ``key``."""
+        self.settings_key = key
+        try:
+            saved = self._qs().value(f"tables/{key}")
+            widths = dict(x.split("=", 1) for x in str(saved).split(";") if "=" in x) if saved else {}
+        except Exception:  # noqa: BLE001 - a convenience only
+            widths = {}
+        for i, c in enumerate(self.model_.columns):
+            w = widths.get(c.title)
+            if w and w.isdigit() and 20 <= int(w) <= 2000:
+                self.setColumnWidth(i, int(w))
+        self.horizontalHeader().sectionResized.connect(self._save_widths)
+
+    def _save_widths(self, *_):
+        if not self.settings_key:
+            return
+        cols = self.model_.columns
+        last = len(cols) - 1
+        text = ";".join(f"{c.title}={self.columnWidth(i)}" for i, c in enumerate(cols) if i != last and c.title)
+        try:
+            self._qs().setValue(f"tables/{self.settings_key}", text)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _header_clicked(self, section: int) -> None:
         key = self.model_.columns[section].sort

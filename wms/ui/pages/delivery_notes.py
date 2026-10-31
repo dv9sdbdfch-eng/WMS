@@ -5,6 +5,7 @@ from __future__ import annotations
 from PySide6.QtWidgets import QComboBox
 
 from wms.core.numbers import fmt_money
+from wms.core.permissions import P
 from wms.ui.pages.base import ListPage
 from wms.ui.widgets.common import DATE, DATETIME, INT, MONEY, Col, PickCombo
 
@@ -16,12 +17,19 @@ class DeliveryNotesPage(ListPage):
 
     def __init__(self, app, parent=None):
         super().__init__(app, parent)
+        if app.can(P.PURCHASING_VIEW):
+            self.problems_btn = self.add_link("Delivery Problems", "discrepancies", tooltip="Short, over, damaged, "
+                                              "rejected or wrong goods until they are resolved")
         self.supplier = PickCombo("All suppliers")
         self.add_filter(self.supplier, self.supplier.picked)
         self.status = QComboBox()
         for text, val in (("All statuses", None), ("Posted", "POSTED"), ("Reversed", "REVERSED")):
             self.status.addItem(text, val)
         self.add_filter(self.status, self.status.currentIndexChanged)
+        self.scan = QComboBox()
+        for text, val in (("Scan: any", None), ("Scan missing", "MISSING"), ("Scan attached", "PRESENT")):
+            self.scan.addItem(text, val)
+        self.add_filter(self.scan, self.scan.currentIndexChanged)
         self.table.set_row_style(lambda r: "muted" if r[0].status == "REVERSED" else None)
 
     def columns(self):
@@ -44,7 +52,7 @@ class DeliveryNotesPage(ListPage):
     def fetch(self):
         d1, d2 = self.dates()
         return self.app.services.goods_in.search(self.search.text(), self.supplier.value(), d1, d2,
-                                                 self.status.currentData())
+                                                 self.status.currentData(), scan=self.scan.currentData())
 
     def describe(self, rows):
         total = sum((r[2] for r in rows if r[0].status == "POSTED"), 0)

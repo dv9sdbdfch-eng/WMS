@@ -257,11 +257,35 @@ def test_dashboard_shows_actionable_alerts(ui, sample):
     win.go("dashboard")
     dash = win.page("dashboard")
     dash.refresh()
-    assert dash.tiles["low_stock"].objectName() == "TileDanger"
-    assert dash.tiles["no_bin"].text().endswith("Products without bin")
-    # Every counter opens the list of exactly those records
+    # one ACTION REQUIRED list, grouped by priority; zero counters are not shown (spec 9-11)
+    assert list(dash.group_rows) == ["critical", "action", "data"]
+    assert dash.tiles["negative_stock"].objectName() == "AlertCritical"
+    assert dash.tiles["negative_stock"].text().startswith("!  1   Negative Bin Balances")
+    assert dash.tiles["low_stock"].objectName() == "AlertAction"
+    assert dash.tiles["no_photo"].objectName() == "AlertData"
+    assert dash.tiles["no_scan"].text().endswith("Delivery Notes Missing Scan")
+    assert "partial_po" not in dash.tiles and "no_bin" not in dash.tiles  # zero: hidden
+    assert not hasattr(dash, "t_alerts")  # the separate "Needs attention" table is gone
+    # Low Stock opens Materials already filtered to Low Stock (spec 12, scenario D)
     dash.tiles["low_stock"].click()
-    assert win.page("low_stock").isVisible()
+    mats = win.page("products")
+    assert win.stack.currentWidget() is mats and mats.view.filter.stock == "LOW_STOCK"
+    assert mats.view.model.total == low.count
+    # Missing scan opens Deliveries filtered to notes without a scan: the same number
+    win.go("dashboard")
+    dash.tiles["no_scan"].click()
+    dn = win.page("delivery_notes")
+    assert dn.scan.currentData() == "MISSING"
+    assert len(dn.table.items()) == next(a.count for a in d.alerts if a.key == "no_scan")
+    # TODAY is one compact line; each figure opens today's list
+    win.go("dashboard")
+    assert dash.today_tiles["Goods Out"].text() == "Goods Out   1"
+    assert dash.today_tiles["Returns"].objectName() == "TodayZero"
+    dash.today_tiles["Goods In"].click()
+    assert dn.date_from.value() == date.today() and len(dn.table.items()) == 1
+    win.go("dashboard")
+    dash.today_tiles["Goods Out"].click()
+    assert win.page("goods_out").tabs.currentWidget() is win.page("goods_out").history
     win.go("dashboard")
     dash.open_action("no_photo")
     search = win.page("search")
@@ -774,11 +798,14 @@ def test_backup_health_schedule_and_test_restore_on_screen(ui, sample, cfg, tmp_
     dash = win.page("dashboard")
     dash.refresh()
     assert dash.backup_line.text() == "Last successful backup: Never"
-    assert "No backup has been made yet" in dash.t_alerts.items()[0].text
+    assert dash.tiles["backup"].objectName() == "AlertCritical"
+    assert dash.tiles["backup"].text() == "!  No Backup Made Yet"
+    assert "No backup has been made yet" in dash.tiles["backup"].toolTip()
     path = win.scheduled_backup()
     assert path is not None and path.name.endswith("_auto.zip")
     dash.refresh()
     assert dash.backup_line.text().startswith("Last successful backup: Today")
+    assert "backup" not in dash.tiles  # healthy: no entry, just the quiet line
     assert win.scheduled_backup() is None  # not due again yet
 
     cfg.backup_dir = str(tmp_path / "file-in-the-way" / "x")
@@ -791,7 +818,7 @@ def test_backup_health_schedule_and_test_restore_on_screen(ui, sample, cfg, tmp_
     assert any(title == "Automatic backup failed" for kind, title, _ in msgs if kind == "warning")
     msgs.clear()
     dash.refresh()
-    assert "FAILED" in dash.t_alerts.items()[0].text
+    assert "FAILED" in dash.tiles["backup"].toolTip() and dash.tiles["backup"].text() == "!  Backup Failed"
 
     cfg.backup_dir = str(tmp_path / "backups")
     win.go("settings")
@@ -806,4 +833,32 @@ def test_backup_health_schedule_and_test_restore_on_screen(ui, sample, cfg, tmp_
     result = page._test_restore()
     assert result is not None and result.ok
     assert any(title == "Test restore" and "OK - restorable" in text for _, title, text in msgs)
+    assert not _errors(msgs), msgs
+
+
+def test_recent_activity_cells_open_related_records(ui, sample):
+    """Spec 16 / scenario E: from Recent Activity open the product, its project, its bin and the document."""
+    from datetime import date
+
+    from wms.services.goods_out import IssueLine
+    app, win, msgs, opened = ui
+    sample.receive(sample.mdf, 10)
+    app.services.goods_out.post({"site_id": sample.site.id, "issue_date": date.today()},
+                                [IssueLine(sample.mdf.id, "3")])
+    win.go("dashboard")
+    dash = win.page("dashboard")
+    dash.refresh()
+    t = dash.t_mv
+    row = next(r for r in range(t.proxy.rowCount()) if t.proxy.index(r, 1).data() == "Goods Out")
+    titles = [c.title for c in t.model_.columns]
+    for col, dialog in (("Code", "ProductDialog"), ("Project / Supplier", "SiteDialog"),
+                        ("Bin", "BinContentsDialog"), ("Document", "GoodsIssueDialog")):
+        opened.clear()
+        t._cell_clicked(t.proxy.index(row, titles.index(col)))
+        assert opened == [dialog], (col, opened)
+    # plain cells are not links; the full value is in the tooltip
+    opened.clear()
+    t._cell_clicked(t.proxy.index(row, titles.index("Product")))
+    assert opened == []
+    assert t.proxy.index(row, titles.index("Product")).data(3) == "MDF 18mm 2440x1220"
     assert not _errors(msgs), msgs
