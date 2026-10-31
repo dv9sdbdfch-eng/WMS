@@ -51,6 +51,14 @@ class SettingsPage(Page):
         self._add(self._about(), "About", None)
         self.body.addWidget(self.tabs, 1)
 
+    def show_tab(self, title: str) -> bool:
+        """Open a tab by its title (sidebar: Admin > Backup)."""
+        for i in range(self.tabs.count()):
+            if self.tabs.tabText(i) == title:
+                self.tabs.setCurrentIndex(i)
+                return True
+        return False
+
     def _add(self, w, title, loader):
         self.tabs.addTab(w, title)
         self._tabs.append(loader)
