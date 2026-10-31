@@ -336,11 +336,11 @@ class MainWindow(QMainWindow):
             m = QMenu(self)
             if self.app.can(P.PRODUCTS_EDIT):
                 m.addSection("Material master data")
-                m.addAction("Import Materials from Excel...", lambda: page.import_excel())
+                m.addAction("Import Material Master Data...", lambda: page.import_excel())
                 m.addAction("Download Excel Template...", lambda: page.download_template())
                 if self.app.can(P.SITES_EDIT):
                     m.addSection("Project requirements")
-                    m.addAction("Import Project Material List...", lambda: page.import_project_list())
+                    m.addAction("Import Project Material Requirements...", lambda: page.import_project_list())
             if self.app.can(P.REPORTS_EXPORT):
                 m.addSection("Export")
                 m.addAction("Export Current View...", lambda: page.export_excel("CURRENT"))
@@ -449,7 +449,10 @@ class MainWindow(QMainWindow):
 
     def show_shortcuts(self):
         QMessageBox.information(self, "Keyboard Shortcuts", "\n".join(self.shortcut_hints + [
-            "Enter in the search box: open all results", "Ctrl+N: new record on the current screen"]))
+            "Enter in the search box: open all results", "Ctrl+N: new record on the current screen",
+            "Ctrl+S: post / save the current form", "Ctrl+Shift+S: save Goods In as a draft",
+            "Click a blue code, bin, project or document in a table: open that record",
+            "Double-click a row: open the record"]))
 
     def change_password(self):
         from wms.ui.login import ChangePasswordDialog

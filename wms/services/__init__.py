@@ -44,6 +44,11 @@ class Services:
         return MaterialsService(self.ctx)
 
     @cached_property
+    def drafts(self):
+        from wms.services.drafts import DraftService
+        return DraftService(self.ctx)
+
+    @cached_property
     def attachments(self):
         from wms.services.attachments import AttachmentService
         return AttachmentService(self.ctx)

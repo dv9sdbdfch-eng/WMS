@@ -162,6 +162,18 @@ Protected tables (database triggers, see `wms.db.engine`):
 * UNIQUE INDEX ix_delivery_notes_client_token (client_token)
 * UNIQUE INDEX uq_delivery_notes_supplier_number (supplier_id, dn_number_norm) WHERE status = 'POSTED'
 
+## document_drafts
+
+| Column | Type | Null | Key / reference |
+|---|---|---|---|
+| kind | String(30) | no | indexed |
+| title | String(160) | no |  |
+| data | Text | no |  |
+| created_by_id | Integer | no | FK users.id, indexed |
+| id | Integer | no | PK |
+| created_at | UTCDateTime | no |  |
+| updated_at | UTCDateTime | no |  |
+
 ## finished_product_info
 
 | Column | Type | Null | Key / reference |

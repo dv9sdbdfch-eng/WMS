@@ -75,6 +75,33 @@ PROJECT_COLUMNS = [
     Col("Available in Stock", QTY, 12, lambda r: _qty(r.available)),
 ]
 
+#: screen column key (widgets/materials_view.py) -> export column, for "Export Current View" with the
+#: columns the person chose (spec 37). Titles stay the importer's names, so a file still round-trips.
+_BY_TITLE = {c.title: c for c in MATERIAL_COLUMNS + PROJECT_COLUMNS}
+SCREEN_COLUMNS = {
+    "code": _BY_TITLE["Code"], "name": _BY_TITLE["Material"], "product_no": _BY_TITLE["Product Number"],
+    "supplier": _BY_TITLE["Supplier"], "required": _BY_TITLE["Required"],
+    "proj_reserved": Col("Project Reserved", QTY, 11, lambda r: _qty(r.proj_reserved)),
+    "issued": _BY_TITLE["Issued"], "returned": _BY_TITLE["Returned"], "net": _BY_TITLE["Net Issued"],
+    "remaining": Col("Remaining", QTY, 11, lambda r: _qty(r.remaining)),
+    "qty": _BY_TITLE["On Hand"], "available": _BY_TITLE["Available"], "bin": _BY_TITLE["Bins"],
+    "status": _BY_TITLE["Stock Status"], "unit": _BY_TITLE["Unit"], "reserved": _BY_TITLE["Reserved"],
+    "incoming": _BY_TITLE["Incoming"], "description": _BY_TITLE["Description"], "barcode": _BY_TITLE["Barcode"],
+    "brand": _BY_TITLE["Brand"], "category": _BY_TITLE["Category"], "default_bin": _BY_TITLE["Default Bin"],
+    "bins": _BY_TITLE["Bins"], "updated": _BY_TITLE["Last Changed"],
+}
+
+
+def columns_for(keys: list[str]) -> list[Col]:
+    """Export columns for the screen's visible columns, in screen order (no duplicates, Code first)."""
+    out: list[Col] = []
+    for k in ["code", *keys]:
+        c = SCREEN_COLUMNS.get(k)
+        if c is not None and c not in out:
+            out.append(c)
+    return out
+
+
 FORMATS = {QTY: "#,##0.###", DATE: "dd/mm/yyyy", DATETIME: "dd/mm/yyyy hh:mm"}
 
 
@@ -145,8 +172,11 @@ class ExportCancelled(Exception):
 
 def export_materials(svc: MaterialsService, path: Path, scope: str, f: MaterialFilter | None = None,
                      ids: list[int] | None = None, filters_text: str = "", company: str = "",
-                     progress: Callable[[int, int | None], bool] | None = None) -> int:
-    """Write the Materials list for one of the three scopes. Returns the number of rows."""
+                     progress: Callable[[int, int | None], bool] | None = None,
+                     columns: list[str] | None = None) -> int:
+    """Write the Materials list for one of the three scopes. Returns the number of rows.
+    ``columns``: the screen's visible column keys - Current View / Selected then export those
+    columns only (spec 37); All Materials always has every column."""
     f = (f or MaterialFilter()).copy()
     stamp = f"{company + ' - ' if company else ''}Exported {datetime.now():%d/%m/%Y %H:%M}"
     if scope == SELECTED:
@@ -160,11 +190,13 @@ def export_materials(svc: MaterialsService, path: Path, scope: str, f: MaterialF
     else:
         total = svc.count(f)
         chunks, what = svc.iter_rows(f), f"Current view: {total} - {filters_text or 'no filters'}"
-    columns = list(MATERIAL_COLUMNS)
+    cols = list(MATERIAL_COLUMNS)
     if f.site_id and scope != ALL:
-        columns = PROJECT_COLUMNS + [c for c in MATERIAL_COLUMNS
-                                     if c.title in ("Barcode", "Category", "On Hand", "Bins", "Stock Status")]
-    return write_workbook(Path(path), "Materials", [stamp, what], columns, chunks, total, progress)
+        cols = PROJECT_COLUMNS + [c for c in MATERIAL_COLUMNS
+                                  if c.title in ("Barcode", "Category", "On Hand", "Bins", "Stock Status")]
+    if columns and scope != ALL:
+        cols = columns_for(columns) or cols
+    return write_workbook(Path(path), "Materials", [stamp, what], cols, chunks, total, progress)
 
 
 def export_project(svc: MaterialsService, site_id: int, path: Path, company: str = "",

@@ -6,9 +6,11 @@ from decimal import Decimal
 
 from openpyxl import Workbook, load_workbook
 from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QPushButton
 from test_ui_smoke import _errors, ui  # noqa: F401 - the shared screen fixture
 
 from wms.services.materials import MaterialFilter
+from wms.ui.dialogs.site_dialog import SiteDialog
 from wms.ui.widgets import materials_view as mv
 
 D = Decimal
@@ -212,6 +214,38 @@ def test_project_tab_add_set_remove_and_export(ui, sample, tmp_path, monkeypatch
     assert not _errors(msgs), msgs
 
 
+def test_project_page_structure_and_contextual_actions(ui, sample):  # noqa: F811
+    """UI refactor spec 26-27, 42: header facts, tab order, the list's own actions, Goods Out /
+    Reserve from the project, Remaining on the Overview."""
+    app, win, msgs, opened = ui
+    from wms.ui.dialogs.site_dialog import SiteDialog
+    app.services.materials.set_required(sample.site.id, [(sample.mdf.id, "30")])
+    dlg = SiteDialog(app, sample.site.id)
+    assert [dlg.tabs.tabText(i) for i in range(dlg.tabs.count())][:5] == \
+        ["Overview", "Materials", "Movements", "Documents", "Reservations"]
+    assert dlg.facts.text().startswith("P-1001   ·   Active")
+    assert dlg.cards["remaining"].value_label.text() == "30"
+    texts = [b.text() for b in dlg.findChildren(QPushButton)]
+    for t in ("+  Add Material", "Import Excel...", "Export Excel", "−  Goods Out to this Project",
+              "Reserve Stock..."):
+        assert t in texts, t
+    assert [a.text() for a in dlg.export_btn.menu().actions()] == \
+        ["Export Project Material List...", "Export Current View...", "Export Selected..."]
+    # the same list and figures as Materials -> Project = Riverside (one implementation, spec 25)
+    dlg.tabs.setCurrentWidget(dlg.summary_tab)
+    page = page_of(win)
+    page.view.project.set_value(sample.site.id)
+    assert [r.id for r in page.view.model.rows] == [r.id for r in dlg.materials.model.rows]
+    figures = ("materials", "required", "reserved", "issued", "returned", "remaining")
+    assert [getattr(page.view.project_summary, k) for k in figures] == \
+        [getattr(dlg.materials.project_summary, k) for k in figures]
+    # Goods Out to this project: the Goods Out screen opens with the project chosen
+    dlg.goods_out()
+    go = win.page("goods_out")
+    assert win.stack.currentWidget() is go and go.site.value() == sample.site.id
+    assert not _errors(msgs), msgs
+
+
 def test_import_project_list_wizard(ui, sample, tmp_path):  # noqa: F811
     app, win, msgs, _ = ui
     from wms.ui.dialogs.excel_import import ExcelImportDialog
@@ -236,13 +270,104 @@ def test_import_project_list_wizard(ui, sample, tmp_path):  # noqa: F811
     dlg.next()  # Resolve: EGGER is matched to Egger UK Ltd, Worktops Direct is new
     assert dlg.stack.currentIndex() == 4 and dlg.sup_table.rowCount() == 2
     dlg.set_supplier("Worktops Direct", "IGNORE")
-    dlg.next()
+    dlg.next()  # Compare with the current (empty) list: both lines are Added
     assert dlg.stack.currentIndex() == 5, msgs
+    assert [c.label for c in dlg.compare_lines] == ["Added", "Added"]
+    dlg.next()
+    assert dlg.stack.currentIndex() == 6, msgs
     assert "Project material lines: 2" in dlg.done_text.text()
     summ = app.services.materials.project_summary(sample.site.id)
     assert (summ.materials, summ.required) == (2, D(32))
     assert app.services.search.exact_product("NEW-9").supplier_id is None
     assert app.services.products.get(sample.mdf.id).supplier_id == sample.supplier.id
+    assert not _errors(msgs), msgs
+
+
+def test_revised_project_schedule_compare_match_and_stock_unchanged(ui, sample, tmp_path):  # noqa: F811
+    """Scenario C (spec 29-33, 53): Project -> Materials -> Import Excel of a revised schedule,
+    compare (added / removed / changed / unchanged), confirm selected changes, stock unchanged."""
+    app, win, msgs, _ = ui
+    from wms.ui.dialogs.excel_import import ExcelImportDialog
+    sample.receive(sample.mdf, 25)
+    svc = app.services
+    units = {u.code: u for u in svc.reference.units()}
+    oak = svc.products.save(None, {"item_type": "RAW_MATERIAL", "internal_code": "H3311-ST10",
+                                   "name": "Halifax Oak", "unit_id": units["SHEET"].id})
+    hinge = svc.products.save(None, {"item_type": "RAW_MATERIAL", "internal_code": "HNG-1",
+                                     "name": "Hinge", "unit_id": units["EA"].id})
+    svc.materials.set_required(sample.site.id, [(sample.mdf.id, "50"), (sample.edge.id, "10"), (hinge.id, "8")])
+    stock_before = {p: svc.products.row(p).on_hand for p in (sample.mdf.id, sample.edge.id, oak.id, hinge.id)}
+    moves_before = len(svc.products.movements(sample.mdf.id))
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["Internal Code", "Description", "Unit", "Required Quantity"])
+    ws.append(["MDF-18", "MDF 18mm 2440x1220", "SHEET", 60])   # 50 -> 60
+    ws.append(["EDGE-W22", "ABS edging white 22mm", "M", 10])   # unchanged
+    ws.append(["H3311 ST10", "Halifax Oak", "SHEET", 12])        # similar code to H3311-ST10
+    # HNG-1 is gone from the revised file
+    path = tmp_path / "Riverside Materials rev B.xlsx"
+    wb.save(path)
+
+    project = SiteDialog(app, sample.site.id, tab="materials")
+    dlg = ExcelImportDialog(app, project, project_id=sample.site.id)
+    assert dlg.windowTitle() == "Import Riverside Apartments Project Material Requirements"
+    assert "does NOT change stock" in dlg.purpose.text() and "Goods Out" in dlg.purpose.text()
+    dlg.path.setText(str(path))
+    dlg.next()
+    dlg.next()
+    dlg.next()
+    assert dlg.stack.currentIndex() == 3
+    oak_row = next(r for r in dlg.plan.rows if r.code == "H3311 ST10")
+    assert oak_row.match_kind == "SIMILAR_CODE" and oak_row.existing_id == oak.id
+    assert oak_row.action == "SKIP"  # a suggestion is never merged on its own
+    assert dlg.plan.choices(oak_row) == ["SKIP", "LINK", "UPDATE", "CREATE"]
+    dlg.set_action(oak_row.row, "LINK")  # [Match]
+    assert oak_row.status == "MATCHED"
+    dlg.next()  # no suppliers / projects to resolve: straight to Compare
+    assert dlg.stack.currentIndex() == 5
+    got = {c.code: (c.label, c.current, c.new, c.difference) for c in dlg.compare_lines}
+    assert got == {"H3311 ST10": ("Added", None, D(12), D(12)),
+                   "MDF-18": ("Quantity changed", D(50), D(60), D(10)),
+                   "EDGE-W22": ("Unchanged", D(10), D(10), D(0)),
+                   "HNG-1": ("Removed", D(8), None, D(-8))}
+    # removals are not applied unless ticked; tick it, and untick nothing else
+    assert not dlg.compare_ticks[[c.code for c in dlg.compare_lines].index("HNG-1")].isChecked()
+    dlg.set_compare("HNG-1", True)
+    dlg.next()
+    assert dlg.stack.currentIndex() == 6, msgs
+    assert "Taken off the project list: 1" in dlg.done_text.text()
+    req = {r.product.internal_code: r.required for r in svc.materials.page(MaterialFilter(site_id=sample.site.id))
+           if r.required is not None}
+    assert req == {"MDF-18": D(60), "EDGE-W22": D(10), "H3311-ST10": D(12)}
+    # warehouse stock did NOT change and no movement was created
+    assert {p: svc.products.row(p).on_hand for p in stock_before} == stock_before
+    assert len(svc.products.movements(sample.mdf.id)) == moves_before
+    assert not _errors(msgs), msgs
+
+
+def test_scenario_b_project_then_supplier_then_export_current_view(ui, sample, tmp_path):  # noqa: F811
+    """Scenario B (spec 35, 37, 53): Materials -> Project -> Supplier -> Export Current View gives
+    exactly the rows on screen, with the columns on screen."""
+    app, win, msgs, _ = ui
+    svc = app.services
+    sample.receive(sample.mdf, 25)
+    svc.materials.set_required(sample.site.id, [(sample.mdf.id, "20"), (sample.edge.id, "100")])
+    page = page_of(win)
+    v = page.view
+    v.project.set_value(sample.site.id)
+    assert codes(v) == ["EDGE-W22", "MDF-18"]
+    v.supplier.set_value(sample.supplier.id)  # Egger UK Ltd
+    assert codes(v) == ["MDF-18"] and set(v.chip_buttons) == {"site_id", "supplier_id"}
+    out = page.export_excel("CURRENT", str(tmp_path / "current.xlsx"))
+    ws = load_workbook(out).active
+    header_row = next(r for r in range(1, 10) if ws.cell(r, 1).value == "Code")
+    header = [c.value for c in ws[header_row] if c.value]
+    shown = [c.title for c in v.model.cols if c.key not in ("select", "photo")]
+    assert header == ["Code", "Material", "Supplier", "Required", "Project Reserved", "Issued", "Returned",
+                      "Remaining", "Available"]
+    assert len(header) == len(shown)
+    data = [r[0].value for r in ws.iter_rows(min_row=header_row + 1) if r[0].value]
+    assert data == codes(v) == ["MDF-18"]
     assert not _errors(msgs), msgs
 
 

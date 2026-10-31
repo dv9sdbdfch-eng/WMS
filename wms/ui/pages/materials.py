@@ -25,9 +25,9 @@ class MaterialsPage(Page):
             imp = QPushButton("Import")
             imp.setAutoDefault(False)
             m = QMenu(imp)
-            m.addAction("Import Materials from Excel...", lambda: self.import_excel())
+            m.addAction("Import Material Master Data...", lambda: self.import_excel())
             if app.can(P.SITES_EDIT):
-                m.addAction("Import Project Material List...", lambda: self.import_project_list())
+                m.addAction("Import Project Material Requirements...", lambda: self.import_project_list())
             m.addSeparator()
             m.addAction("Download Excel Template...", lambda: self.download_template())
             imp.setMenu(m)
@@ -99,5 +99,5 @@ class MaterialsPage(Page):
                 return None
         out = copy_template(Path(path))
         info(self, "Excel template", f"Template saved:\n{out}\n\nFill one row per material and import it with "
-                                     f"Import → Import Materials from Excel.")
+                                     f"Import → Import Material Master Data.")
         return out

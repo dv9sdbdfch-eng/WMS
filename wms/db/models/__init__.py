@@ -14,6 +14,7 @@ from wms.db.models.documents import (
     StockReturn,
     StockTransfer,
 )
+from wms.db.models.drafts import DocumentDraft
 from wms.db.models.locations import Bin, Location
 from wms.db.models.products import BomItem, FinishedProductInfo, Product
 from wms.db.models.projects import ProjectMaterial
@@ -26,6 +27,7 @@ from wms.db.models.system import Attachment, AuditLog, NumberSequence, RecentSea
 from wms.db.models.users import Role, RolePermission, User
 
 __all__ = [
+    "DocumentDraft",
     "Attachment",
     "AuditLog",
     "Bin",

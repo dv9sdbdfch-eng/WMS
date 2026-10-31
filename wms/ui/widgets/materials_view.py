@@ -294,6 +294,12 @@ class MaterialsModel(QAbstractTableModel):
             return r.bins_detail
         if role == Qt.ItemDataRole.ToolTipRole and c.key == "required" and r.required is None:
             return "Not on the project's material list (reserved or issued only)"
+        if role == Qt.ItemDataRole.ToolTipRole and c.kind not in (QTY,):
+            try:  # spec 39: a cut-off name / supplier / notes shows in full on hover
+                text = format_value(c.get(r), c.kind)
+            except Exception:  # noqa: BLE001
+                return None
+            return text if len(text) > 12 else None
         return None
 
     def setData(self, index, value, role=Qt.ItemDataRole.EditRole):  # noqa: N802
@@ -341,6 +347,7 @@ class MaterialsView(QWidget):
         self.can_edit = app.can(P.PRODUCTS_EDIT) and not picker
         self.can_export = app.can(P.REPORTS_EXPORT) and not picker
         self.can_edit_project = app.can(P.SITES_EDIT) and not picker
+        self.export_visible = True  # Export Current View / Selected use the visible columns (spec 37)
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -1094,10 +1101,12 @@ class MaterialsView(QWidget):
             if not path.lower().endswith(".xlsx"):
                 path += ".xlsx"
         f, text, company = self.filter.copy(), self.filters_text(), self.app.ctx.config.company_name
+        # spec 37: the table is the report - the columns on screen are the columns in the file
+        keys = [c.key for c in self.model.cols if c.key not in (SELECT, PHOTO)] if self.export_visible else None
         try:
             tasks.with_progress(self, "Export to Excel",
                                 lambda progress: export_materials(self.svc, Path(path), scope, f, ids, text,
-                                                                  company, progress),
+                                                                  company, progress, keys),
                                 "Writing materials...")
         except ExportCancelled:
             return None
