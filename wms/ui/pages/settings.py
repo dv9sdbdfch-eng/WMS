@@ -398,7 +398,7 @@ class SettingsPage(Page):
         lay.addWidget(label(f"Store WMS  v{__version__}", "PageTitle"))
         lay.addWidget(label("Warehouse management for furniture manufacturing: materials, deliveries, issues to "
                             "site, finished products, full movement history and audit trail.", "Muted", wrap=True))
-        lay.addWidget(label("Keyboard: Ctrl+K search everything · F5 refresh · Ctrl+N new · Ctrl+S post / save",
+        lay.addWidget(label("Keyboard: Ctrl+K search everything · F5 refresh · Ctrl+N new · Ctrl+S post / save · Ctrl+Shift+S save Goods In draft",
                             "Muted", wrap=True))
         lay.addStretch(1)
         return w

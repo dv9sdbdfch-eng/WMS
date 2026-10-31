@@ -449,7 +449,10 @@ class MainWindow(QMainWindow):
 
     def show_shortcuts(self):
         QMessageBox.information(self, "Keyboard Shortcuts", "\n".join(self.shortcut_hints + [
-            "Enter in the search box: open all results", "Ctrl+N: new record on the current screen"]))
+            "Enter in the search box: open all results", "Ctrl+N: new record on the current screen",
+            "Ctrl+S: post / save the current form", "Ctrl+Shift+S: save Goods In as a draft",
+            "Click a blue code, bin, project or document in a table: open that record",
+            "Double-click a row: open the record"]))
 
     def change_password(self):
         from wms.ui.login import ChangePasswordDialog

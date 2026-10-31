@@ -25,6 +25,7 @@ from wms.ui.widgets.common import (
     h,
     info,
     label,
+    related_bar,
     run,
     run_with_override,
 )
@@ -111,6 +112,17 @@ class DeliveryNoteDialog(QDialog):
         banner = _status_banner(dn)
         if banner:
             self.lay.addWidget(banner)
+        self.related_tabs = None
+        n_problems = len(app.services.purchasing.discrepancies(delivery_note_id=dn.id))
+        self.related = [
+            (f"Supplier {dn.supplier_label}", lambda: app.open_entity("SUPPLIER", dn.supplier_id, self)),
+            (f"Purchase Order {dn.purchase_order.po_number}" if dn.purchase_order else "",
+             lambda: app.open_entity("PURCHASE_ORDER", dn.purchase_order_id, self)),
+            (f"{len(dn.lines)} material(s)", lambda: self.related_tabs.setCurrentIndex(0)),
+            ("Stock transactions", lambda: self.related_tabs.setCurrentIndex(1)),
+            (f"{n_problems} delivery problem(s)" if n_problems else "", lambda: self.related_tabs.setCurrentIndex(2)),
+        ]
+        self.lay.addLayout(related_bar(self.related))
         split = QSplitter()
         left = QWidget()
         ll = QVBoxLayout(left)
@@ -124,11 +136,13 @@ class DeliveryNoteDialog(QDialog):
                             ("Total value", fmt_money(total)), ("Notes", dn.notes or "")]))
         tabs = QTabWidget()
         lines = DataTable([Col("#", lambda l: l.line_no, width=40),
-                           Col("Code", lambda l: l.product_code, width=110),
+                           Col("Code", lambda l: l.product_code, width=110,
+                               link=lambda l: app.open_entity("PRODUCT", l.product_id, self)),
                            Col("Product", lambda l: l.product_name, width=220),
                            Col("Qty received", lambda l: l.quantity, QTY, 100),
                            Col("Unit", lambda l: l.product.unit.code, width=55),
-                           Col("Bin", lambda l: l.bin_code, width=200),
+                           Col("Bin", lambda l: l.bin_code, width=200,
+                               link=lambda l: app.open_entity("BIN", l.bin_id, self) if l.bin_id else None),
                            Col("Unit cost", lambda l: l.unit_cost, MONEY, 85),
                            Col("Notes", lambda l: l.notes or "")])
         lines.set_items(dn.lines)
@@ -143,6 +157,7 @@ class DeliveryNoteDialog(QDialog):
         probs.set_items(problems)
         probs.activated_item.connect(lambda d: DiscrepancyDialog(app, d.id, self).exec())
         tabs.addTab(probs, f"Delivery problems ({len(problems)})")
+        self.related_tabs = tabs
         ll.addWidget(tabs, 1)
         split.addWidget(left)
 
@@ -243,12 +258,19 @@ class GoodsIssueDialog(QDialog):
         banner = _status_banner(gi)
         if banner:
             lay.addWidget(banner)
+        self.related = [
+            (f"Project {gi.site_label}", lambda: app.open_entity("SITE", gi.site_id, self, tab="materials")),
+            (f"{len(gi.lines)} material(s)", None),
+        ]
+        lay.addLayout(related_bar(self.related))
         lay.addLayout(_form([("Date", fmt_date(gi.issue_date)), ("Site / project", gi.site_label),
                              ("Reference / job no.", gi.reference or ""), ("Requested by", gi.requested_by or ""),
                              ("Issued by", gi.issued_by), ("Entered by", f"{gi.user.full_name}, "
                                                                          f"{fmt_datetime(gi.created_at)}"),
                              ("Notes", gi.notes or "")]))
-        t = DataTable([Col("#", lambda l: l.line_no, width=40), Col("Code", lambda l: l.product_code, width=110),
+        t = DataTable([Col("#", lambda l: l.line_no, width=40),
+                       Col("Code", lambda l: l.product_code, width=110,
+                           link=lambda l: app.open_entity("PRODUCT", l.product_id, self)),
                        Col("Product", lambda l: l.product_name, width=260), Col("Qty", lambda l: l.quantity, QTY, 90),
                        Col("Unit", lambda l: l.product.unit.code, width=55),
                        Col("From bin", lambda l: l.bin_code, width=220),

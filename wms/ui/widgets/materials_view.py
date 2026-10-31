@@ -294,6 +294,12 @@ class MaterialsModel(QAbstractTableModel):
             return r.bins_detail
         if role == Qt.ItemDataRole.ToolTipRole and c.key == "required" and r.required is None:
             return "Not on the project's material list (reserved or issued only)"
+        if role == Qt.ItemDataRole.ToolTipRole and c.kind not in (QTY,):
+            try:  # spec 39: a cut-off name / supplier / notes shows in full on hover
+                text = format_value(c.get(r), c.kind)
+            except Exception:  # noqa: BLE001
+                return None
+            return text if len(text) > 12 else None
         return None
 
     def setData(self, index, value, role=Qt.ItemDataRole.EditRole):  # noqa: N802

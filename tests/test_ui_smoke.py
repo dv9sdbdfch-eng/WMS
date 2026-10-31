@@ -862,3 +862,92 @@ def test_recent_activity_cells_open_related_records(ui, sample):
     assert opened == []
     assert t.proxy.index(row, titles.index("Product")).data(3) == "MDF 18mm 2440x1220"
     assert not _errors(msgs), msgs
+
+
+def test_goods_in_draft_saves_reopens_and_never_touches_stock(ui, sample):
+    """Spec 40: a half-entered delivery can be kept as a draft; stock changes only on posting."""
+    app, win, msgs, _ = ui
+    on_hand = {r.product.id: r.on_hand for r in app.services.products.list()}
+    moves = len(app.services.stock.movements())
+    win.go("goods_in")
+    page = win.page("goods_in")
+    page.supplier.set_value(sample.supplier.id)
+    page.dn_number.setText("DN 9001")
+    page.lines.clear()
+    page.lines.add_row(sample.mdf.id, Decimal("7"))
+    page.lines.add_row(sample.edge.id, Decimal("25.5"), sample.bin1.id)
+    assert page.save_draft()
+    assert not _errors(msgs), msgs
+    assert page.draft_banner.isVisibleTo(page)
+    drafts = app.services.drafts.list("GOODS_IN")
+    assert len(drafts) == 1 and drafts[0].lines == 2 and "DN 9001" in drafts[0].title
+    # saving again updates the same draft
+    page.notes.setText("Pallet 2 still on the lorry")
+    assert page.save_draft()
+    assert len(app.services.drafts.list("GOODS_IN")) == 1
+    # nothing posted, nothing moved
+    assert {r.product.id: r.on_hand for r in app.services.products.list()} == on_hand
+    assert len(app.services.stock.movements()) == moves
+    assert app.services.goods_in.search("9001") == []
+    # start a fresh form, then reopen the draft
+    page.clear()
+    assert page.dn_number.text() == "" and not page.draft_banner.isVisibleTo(page)
+    page._fill_drafts()
+    assert any("DN 9001" in a.text() for a in page.drafts_menu.actions())
+    assert page.open_draft(drafts[0].id)
+    assert page.dn_number.text() == "DN 9001"
+    assert page.notes.text() == "Pallet 2 still on the lorry"
+    vals = page.lines.values(validate=False)
+    assert [(v.product_id, v.quantity) for v in vals] == [(sample.mdf.id, Decimal("7")),
+                                                           (sample.edge.id, Decimal("25.5"))]
+    # posting receives the stock and removes the draft
+    page.post()
+    assert not _errors(msgs), msgs
+    assert len(app.services.goods_in.search("9001")) == 1
+    assert app.services.drafts.list("GOODS_IN") == []
+    rows = {r.product.id: r for r in app.services.products.list()}
+    assert rows[sample.mdf.id].on_hand == on_hand[sample.mdf.id] + 7
+
+
+def test_draft_service_rules(svc, sample):
+    from wms.core.exceptions import NotFoundError, ValidationError
+    d = svc.drafts.save("GOODS_IN", "Draft A", {"lines": [{"product_id": sample.mdf.id, "quantity": "2"}]})
+    info, data = svc.drafts.load(d.id)
+    assert info.title == "Draft A" and data["lines"][0]["quantity"] == "2"
+    with pytest.raises(ValidationError):
+        svc.drafts.save("NOPE", "x", {})
+    svc.drafts.delete(d.id)
+    with pytest.raises(NotFoundError):
+        svc.drafts.load(d.id)
+    # saving over a draft that was deleted meanwhile keeps the work as a new draft
+    again = svc.drafts.save("GOODS_IN", "Draft B", {"lines": []}, d.id)
+    assert [x.id for x in svc.drafts.list("GOODS_IN")] == [again.id]
+    actions = {a.action for a in svc.audit.search(entity_type="DRAFT")}
+    assert {"DRAFT_SAVED", "DRAFT_DELETED"} <= actions
+
+
+def test_documents_show_related_records(ui, sample):
+    """Spec 41-42: a delivery note links to its supplier, materials, stock transactions; an issue to its project."""
+    app, win, msgs, opened = ui
+    from datetime import date
+
+    from PySide6.QtWidgets import QPushButton
+
+    from wms.services.goods_out import IssueLine
+    from wms.ui.dialogs.documents import DeliveryNoteDialog, GoodsIssueDialog
+    dn = sample.receive(sample.mdf, 10, sample.bin1)
+    dlg = DeliveryNoteDialog(app, dn.id, win)
+    texts = [b.text() for b in dlg.findChildren(QPushButton) if b.objectName() == "Link"]
+    assert any(t.startswith("Supplier ") for t in texts), texts
+    assert "1 material(s)" in texts and "Stock transactions" in texts
+    next(b for b in dlg.findChildren(QPushButton) if b.text() == "Stock transactions").click()
+    assert dlg.related_tabs.currentIndex() == 1
+    next(b for b in dlg.findChildren(QPushButton) if b.text().startswith("Supplier ")).click()
+    assert opened[-1] == "SupplierDialog"
+    gi = app.services.goods_out.post({"issue_date": date.today(), "site_id": sample.site.id},
+                                     [IssueLine(sample.mdf.id, "2", sample.bin1.id)])
+    dlg = GoodsIssueDialog(app, gi.id, win)
+    proj = next(b for b in dlg.findChildren(QPushButton) if b.text().startswith("Project "))
+    proj.click()
+    assert opened[-1] == "SiteDialog"
+    assert not _errors(msgs), msgs

@@ -5,7 +5,17 @@ from __future__ import annotations
 import uuid
 from datetime import date, timedelta
 
-from PySide6.QtWidgets import QFileDialog, QFormLayout, QLineEdit, QListWidget, QSplitter, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QFileDialog,
+    QFormLayout,
+    QLineEdit,
+    QListWidget,
+    QMenu,
+    QPushButton,
+    QSplitter,
+    QVBoxLayout,
+    QWidget,
+)
 
 from wms.core.exceptions import ValidationError
 from wms.services.goods_in import ReceiptLine
@@ -24,6 +34,18 @@ class GoodsInPage(Page):
     def __init__(self, app, parent=None):
         super().__init__(app, parent)
         self.add_action(button("Clear form", self.clear))
+        # spec 40: stop half-way through a long delivery and finish it later - a draft never touches stock
+        self.drafts_btn = QPushButton("Drafts")
+        self.drafts_btn.setAutoDefault(False)
+        self.drafts_btn.setToolTip("Open a delivery saved as a draft (not yet received)")
+        self.drafts_menu = QMenu(self.drafts_btn)
+        self.drafts_menu.aboutToShow.connect(self._fill_drafts)
+        self.drafts_btn.setMenu(self.drafts_menu)
+        self.add_action(self.drafts_btn)
+        self.add_action(button("Save Draft", self.save_draft, shortcut="Ctrl+Shift+S",
+                               tooltip="Keep this delivery to finish later (Ctrl+Shift+S). "
+                               "Stock is not changed until you post it."))
+        self._draft_id: int | None = None
         self.post_button = button("Post delivery", self.post, primary=True, shortcut="Ctrl+S")
         self.add_action(self.post_button)
         self._token = uuid.uuid4().hex  # one per filled-in form: the server refuses a second posting
@@ -55,6 +77,9 @@ class GoodsInPage(Page):
         self.dup_warning = label("", "Banner", wrap=True)
         self.dup_warning.hide()
         ll.addWidget(self.dup_warning)
+        self.draft_banner = label("", "InfoBanner", wrap=True)
+        self.draft_banner.hide()
+        ll.addWidget(self.draft_banner)
         ll.addWidget(label("Products received", "SectionTitle"))
         self.lines = LinesEditor(app, show_bin=True, bin_optional=True, show_cost=True)
         ll.addWidget(self.lines, 1)
@@ -166,8 +191,109 @@ class GoodsInPage(Page):
         from pathlib import Path
         self.preview.show_file(Path(self._paths[row]) if 0 <= row < len(self._paths) else None)
 
+    # -- drafts (spec 40) ------------------------------------------------------
+    def form_data(self) -> dict:
+        lines = []
+        for v in self.lines.values(validate=False):
+            lines.append({"product_id": v.product_id, "quantity": None if v.quantity is None else str(v.quantity),
+                          "bin_id": v.bin_id, "unit_cost": None if v.unit_cost is None else str(v.unit_cost),
+                          "notes": v.notes})
+        try:
+            d = self.date.value().isoformat()
+        except Exception:  # noqa: BLE001 - half-typed date: keep today's
+            d = date.today().isoformat()
+        return {"supplier_id": self.supplier.value(), "purchase_order_id": self.order.value(),
+                "dn_number": self.dn_number.text(), "delivery_date": d, "po_reference": self.po.text(),
+                "notes": self.notes.text(), "lines": lines, "files": list(self._paths)}
+
+    def save_draft(self) -> bool:
+        data = self.form_data()
+        if not data["lines"] and not data["supplier_id"] and not data["dn_number"].strip():
+            info(self, "Save Draft", "The form is empty - nothing to save.")
+            return False
+        sup = self.supplier.currentText() if data["supplier_id"] else "No supplier"
+        title = f"{sup} - DN {data['dn_number'].strip() or '(no number yet)'}"
+        saved = run(self, self.app.services.drafts.save, "GOODS_IN", title, data, self._draft_id)
+        if saved is None:
+            return False
+        self._draft_id = saved.id
+        self._show_draft_banner(saved)
+        mw = getattr(self, "main_window", None)
+        if mw is not None:
+            mw.statusBar().showMessage(f"Draft saved: {title} - stock not changed")
+        return True
+
+    def _show_draft_banner(self, d) -> None:
+        self.draft_banner.setText(f"Draft: {d.title} - saved {d.updated_at.astimezone():%d/%m/%Y %H:%M} by "
+                                  f"{d.created_by}. Not received yet: stock changes only when you post it.")
+        self.draft_banner.show()
+
+    def _fill_drafts(self) -> None:
+        m = self.drafts_menu
+        m.clear()
+        drafts = run(self, self.app.services.drafts.list, "GOODS_IN") or []
+        if not drafts:
+            m.addAction("No drafts").setEnabled(False)
+            return
+        for d in drafts:
+            m.addAction(f"{d.title}  ·  {d.lines} line(s)  ·  {d.updated_at.astimezone():%d/%m %H:%M}  ·  "
+                        f"{d.created_by}", lambda i=d.id: self.open_draft(i))
+        if self._draft_id:
+            m.addSeparator()
+            m.addAction("Delete this draft", self.delete_draft)
+
+    def open_draft(self, draft_id: int) -> bool:
+        got = run(self, self.app.services.drafts.load, draft_id)
+        if got is None:
+            return False
+        d, data = got
+        self.clear()
+        from decimal import Decimal
+        if data.get("supplier_id"):
+            self.supplier.set_value(data["supplier_id"])
+            self._order_options()
+        if data.get("purchase_order_id"):
+            self._loaded_po = data["purchase_order_id"]  # do not reload the order's lines over the draft
+            self.order.set_value(data["purchase_order_id"])
+        self.dn_number.setText(data.get("dn_number") or "")
+        try:
+            self.date.set_value(date.fromisoformat(data.get("delivery_date") or ""))
+        except ValueError:
+            pass
+        self.po.setText(data.get("po_reference") or "")
+        self.notes.setText(data.get("notes") or "")
+        self.lines.clear()
+        for ln in data.get("lines") or []:
+            qty = Decimal(ln["quantity"]) if ln.get("quantity") else None
+            self.lines.add_row(ln.get("product_id"), qty, ln.get("bin_id"))
+            r = self.lines.table.rowCount() - 1
+            if ln.get("unit_cost"):
+                self.lines.table.cellWidget(r, self.lines._col("Unit Cost")).set_value(Decimal(ln["unit_cost"]))
+            if ln.get("notes"):
+                self.lines.table.cellWidget(r, self.lines._col("Notes")).setText(ln["notes"])
+        if not self.lines.table.rowCount():
+            self.lines.add_row()
+        from pathlib import Path
+        for p in data.get("files") or []:
+            if Path(p).exists() and p not in self._paths:  # a file on another PC is simply not found
+                self._paths.append(p)
+                self.files.addItem(p.replace("\\", "/").rsplit("/", 1)[-1])
+        self._draft_id = d.id
+        self._show_draft_banner(d)
+        self._check_duplicate()
+        return True
+
+    def delete_draft(self) -> None:
+        if self._draft_id and confirm(self, "Delete draft", "Delete this draft? The form stays filled in.",
+                                      yes="Delete"):
+            run(self, self.app.services.drafts.delete, self._draft_id)
+            self._draft_id = None
+            self.draft_banner.hide()
+
     # -- posting -------------------------------------------------------------
     def clear(self):
+        self._draft_id = None
+        self.draft_banner.hide()
         self._loaded_po = None
         self.order.set_value(None)
         self.dn_number.clear()
@@ -227,6 +353,11 @@ class GoodsInPage(Page):
                   "po_reference": self.po.text(), "notes": self.notes.text(), "client_token": self._token}
         lines = [ReceiptLine(v.product_id, v.quantity, v.bin_id, v.unit_cost, v.notes) for v in values]
         dn = run(self, self.app.services.goods_in.post, header, lines, list(self._paths))
+        if dn and self._draft_id:
+            try:
+                self.app.services.drafts.delete(self._draft_id, "posted")
+            except Exception:  # noqa: BLE001 - the delivery is posted; a leftover draft is harmless
+                pass
         if dn:
             self.app.changed()
             text = f"Delivery note {dn.dn_number} has been posted: {len(dn.lines)} line(s) added to stock."

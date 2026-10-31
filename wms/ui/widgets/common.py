@@ -709,6 +709,29 @@ def button(text: str, slot: Callable | None = None, primary: bool = False, dange
     return b
 
 
+def related_bar(items: Sequence[tuple[str, Callable | None]]) -> QHBoxLayout:
+    """'Related:  Supplier EGGER  ·  Purchase Order PO-1028  ·  7 materials ...' - each a link to
+    the related record (UI refactor spec 41-42), so nobody has to search for it again."""
+    lay = QHBoxLayout()
+    lay.setSpacing(2)
+    lay.addWidget(label("Related:", "Muted"))
+    first = True
+    for text, slot in items:
+        if not text:
+            continue
+        if not first:
+            lay.addWidget(label("·", "Muted"))
+        first = False
+        if slot is None:
+            lay.addWidget(label(text, "Muted"))
+        else:
+            b = button(text, slot)
+            b.setObjectName("Link")
+            lay.addWidget(b)
+    lay.addStretch(1)
+    return lay
+
+
 def label(text: str, name: str | None = None, wrap: bool = False) -> QLabel:
     lab = QLabel(text)
     if name:
