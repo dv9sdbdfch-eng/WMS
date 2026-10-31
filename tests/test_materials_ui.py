@@ -6,6 +6,7 @@ from decimal import Decimal
 
 from openpyxl import Workbook, load_workbook
 from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QPushButton
 from test_ui_smoke import _errors, ui  # noqa: F401 - the shared screen fixture
 
 from wms.services.materials import MaterialFilter
@@ -209,6 +210,38 @@ def test_project_tab_add_set_remove_and_export(ui, sample, tmp_path, monkeypatch
     tick(v, edge_row)
     assert v.remove_from_project()
     assert codes(v) == ["MDF-18"]
+    assert not _errors(msgs), msgs
+
+
+def test_project_page_structure_and_contextual_actions(ui, sample):  # noqa: F811
+    """UI refactor spec 26-27, 42: header facts, tab order, the list's own actions, Goods Out /
+    Reserve from the project, Remaining on the Overview."""
+    app, win, msgs, opened = ui
+    from wms.ui.dialogs.site_dialog import SiteDialog
+    app.services.materials.set_required(sample.site.id, [(sample.mdf.id, "30")])
+    dlg = SiteDialog(app, sample.site.id)
+    assert [dlg.tabs.tabText(i) for i in range(dlg.tabs.count())][:5] == \
+        ["Overview", "Materials", "Movements", "Documents", "Reservations"]
+    assert dlg.facts.text().startswith("P-1001   ·   Active")
+    assert dlg.cards["remaining"].value_label.text() == "30"
+    texts = [b.text() for b in dlg.findChildren(QPushButton)]
+    for t in ("+  Add Material", "Import Excel...", "Export Excel", "−  Goods Out to this Project",
+              "Reserve Stock..."):
+        assert t in texts, t
+    assert [a.text() for a in dlg.export_btn.menu().actions()] == \
+        ["Export Project Material List...", "Export Current View...", "Export Selected..."]
+    # the same list and figures as Materials -> Project = Riverside (one implementation, spec 25)
+    dlg.tabs.setCurrentWidget(dlg.summary_tab)
+    page = page_of(win)
+    page.view.project.set_value(sample.site.id)
+    assert [r.id for r in page.view.model.rows] == [r.id for r in dlg.materials.model.rows]
+    figures = ("materials", "required", "reserved", "issued", "returned", "remaining")
+    assert [getattr(page.view.project_summary, k) for k in figures] == \
+        [getattr(dlg.materials.project_summary, k) for k in figures]
+    # Goods Out to this project: the Goods Out screen opens with the project chosen
+    dlg.goods_out()
+    go = win.page("goods_out")
+    assert win.stack.currentWidget() is go and go.site.value() == sample.site.id
     assert not _errors(msgs), msgs
 
 
