@@ -30,7 +30,7 @@ QCheckBox::indicator:disabled {{ background: #F2F4F7; border-color: #D0D5DD; }}
 QCalendarWidget QWidget {{ background: white; color: {TEXT}; }}
 QWidget#Sidebar {{ background: {PRIMARY}; }}
 QListWidget#Nav {{ background: transparent; border: none; color: #DCE3EC; outline: 0; }}
-QListWidget#Nav::item {{ padding: 8px 14px; border-radius: 6px; margin: 1px 8px; }}
+QListWidget#Nav::item {{ padding: 5px 14px; border-radius: 6px; margin: 0px 8px; }}
 QListWidget#Nav::item:selected {{ background: #2E5583; color: white; }}
 QListWidget#Nav::item:hover:!selected {{ background: #284A73; }}
 QLabel#AppTitle {{ color: white; font-size: 13pt; font-weight: 600; padding: 14px 16px 4px 16px; }}

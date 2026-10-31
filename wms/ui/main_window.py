@@ -6,13 +6,14 @@ import logging
 from datetime import datetime
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtGui import QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QStackedWidget,
     QVBoxLayout,
@@ -24,6 +25,11 @@ from wms.core.permissions import P
 from wms.ui.widgets.common import button, label
 
 log = logging.getLogger(__name__)
+
+
+ACTION = "action:"  # sidebar entries that run something instead of opening a screen
+#: groups shown folded until opened (spec 3: less frequently used groups are collapsible)
+FOLDED_BY_DEFAULT = {"MORE", "ADMIN"}
 
 
 def _nav():
@@ -50,27 +56,32 @@ def _nav():
         users,
     )
     return [
-        ("", "dashboard", "Dashboard", None, dashboard.DashboardPage),
-        ("", "search", "Search", None, search.SearchPage),
+        ("HOME", "dashboard", "Dashboard", None, dashboard.DashboardPage),
+        ("HOME", "search", "Search", None, search.SearchPage),
         ("STOCK", "products", "Materials", P.PRODUCTS_VIEW, materials.MaterialsPage),
         ("STOCK", "finished", "Finished Products", P.PRODUCTS_VIEW, finished.FinishedPage),
-        ("STOCK", "locations", "Locations / Bins", P.LOCATIONS_VIEW, locations.LocationsPage),
-        ("STOCK", "reservations", "Reservations", P.STOCK_VIEW, reservations.ReservationsPage),
-        ("STOCK", "low_stock", "Reorder Required", P.PRODUCTS_VIEW, low_stock.LowStockPage),
-        ("STOCK", "stocktake", "Stocktake", P.STOCKTAKE_COUNT, stocktake.StocktakePage),
-        ("OPERATIONS", "purchase_orders", "Purchase Orders", P.PURCHASING_VIEW, purchase_orders.PurchaseOrdersPage),
+        ("STOCK", "locations", "Locations & Bins", P.LOCATIONS_VIEW, locations.LocationsPage),
         ("OPERATIONS", "goods_in", "Goods In", P.GOODS_IN_POST, goods_in.GoodsInPage),
-        ("OPERATIONS", "delivery_notes", "Delivery Notes", P.GOODS_IN_VIEW, delivery_notes.DeliveryNotesPage),
-        ("OPERATIONS", "discrepancies", "Delivery Problems", P.PURCHASING_VIEW, discrepancies.DiscrepanciesPage),
         ("OPERATIONS", "goods_out", "Goods Out", P.GOODS_OUT_VIEW, goods_out.GoodsOutPage),
+        ("OPERATIONS", ACTION + "transfer", "Transfer", P.STOCK_TRANSFER, None),
         ("OPERATIONS", "returns", "Returns", P.GOODS_OUT_VIEW, returns.ReturnsPage),
-        ("OPERATIONS", "movements", "Stock Movements", P.STOCK_VIEW, movements.MovementsPage),
-        ("OPERATIONS", "sites", "Sites / Projects", P.SITES_VIEW, sites.SitesPage),
-        ("ADMIN", "reports", "Reports", P.REPORTS_VIEW, reports.ReportsPage),
+        ("PROJECTS", "sites", "Projects", P.SITES_VIEW, sites.SitesPage),
+        ("PROJECTS", "reservations", "Reservations", P.STOCK_VIEW, reservations.ReservationsPage),
+        ("PURCHASING", "purchase_orders", "Purchase Orders", P.PURCHASING_VIEW, purchase_orders.PurchaseOrdersPage),
+        ("PURCHASING", "delivery_notes", "Deliveries", P.GOODS_IN_VIEW, delivery_notes.DeliveryNotesPage),
+        ("PURCHASING", "discrepancies", "Delivery Problems", P.PURCHASING_VIEW, discrepancies.DiscrepanciesPage),
+        ("INVENTORY CONTROL", "stocktake", "Stocktake", P.STOCKTAKE_COUNT, stocktake.StocktakePage),
+        ("INVENTORY CONTROL", "low_stock", "Low Stock", P.PRODUCTS_VIEW, low_stock.LowStockPage),
+        ("MORE", "reports", "Reports", P.REPORTS_VIEW, reports.ReportsPage),
+        ("MORE", "movements", "Stock Movements", P.STOCK_VIEW, movements.MovementsPage),
+        ("MORE", ACTION + "import_export", "Import / Export", P.PRODUCTS_VIEW, None),
+        ("MORE", ACTION + "archive", "Archive", P.PRODUCTS_VIEW, None),
         ("ADMIN", "users", "Users", P.USERS_MANAGE, users.UsersPage),
-        ("ADMIN", "audit", "Audit Trail", P.AUDIT_VIEW, users.AuditPage),
+        ("ADMIN", "audit", "Audit Log", P.AUDIT_VIEW, users.AuditPage),
+        ("ADMIN", ACTION + "backup", "Backup", None, None),
         ("ADMIN", "settings", "Settings", None, settings.SettingsPage),
     ]
+
 
 
 class MainWindow(QMainWindow):
@@ -100,24 +111,35 @@ class MainWindow(QMainWindow):
         self.nav = QListWidget()
         self.nav.setObjectName("Nav")
         self.nav.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        last_section = None
+        self.sections: dict[str, QListWidgetItem] = {}
+        self.section_items: dict[str, list[QListWidgetItem]] = {}
+        folded = self._folded_groups()
         for section, key, text, perm, factory in _nav():
             if perm and not app.can(perm):
                 continue
-            if section and section != last_section:
+            if key == ACTION + "backup" and not (app.can(P.BACKUP_RUN) or app.can(P.BACKUP_RESTORE)):
+                continue
+            if section not in self.sections:
                 head = QListWidgetItem(section)
-                head.setFlags(Qt.ItemFlag.NoItemFlags)
-                head.setForeground(Qt.GlobalColor.gray)
+                head.setFlags(Qt.ItemFlag.ItemIsEnabled)  # clickable (fold / unfold), never "selected"
+                head.setData(Qt.ItemDataRole.UserRole + 1, section)
                 f = head.font()
                 f.setPointSize(8)
                 f.setBold(True)
                 head.setFont(f)
+                head.setForeground(QColor("#8FA6BF"))
                 self.nav.addItem(head)
-                last_section = section
+                self.sections[section] = head
+                self.section_items[section] = []
             item = QListWidgetItem(text)
             item.setData(Qt.ItemDataRole.UserRole, key)
             self.nav.addItem(item)
-            self.factories[key] = factory
+            self.section_items[section].append(item)
+            if factory is not None:
+                self.factories[key] = factory
+        for section in self.sections:
+            self._set_folded(section, section in folded, save=False)
+        self.nav.itemClicked.connect(self._nav_clicked)
         self.nav.currentItemChanged.connect(self._nav_changed)
         sl.addWidget(self.nav, 1)
         sl.addWidget(label(f"v{__version__}", "AppSubtitle"))
@@ -173,10 +195,78 @@ class MainWindow(QMainWindow):
 
     # -- navigation ---------------------------------------------------------
     def go(self, key: str):
-        for i in range(self.nav.count()):
-            if self.nav.item(i).data(Qt.ItemDataRole.UserRole) == key:
-                self.nav.setCurrentRow(i)
-                return
+        for section, items in self.section_items.items():
+            for item in items:
+                if item.data(Qt.ItemDataRole.UserRole) == key:
+                    if item.isHidden():
+                        self._set_folded(section, False)
+                    self.nav.setCurrentItem(item)
+                    return
+
+    # -- sidebar groups -----------------------------------------------------
+    @staticmethod
+    def _qs():
+        from PySide6.QtCore import QSettings
+        return QSettings(QSettings.Format.IniFormat, QSettings.Scope.UserScope, "WMS", "WMS")
+
+    def _folded_groups(self) -> set[str]:
+        try:
+            saved = self._qs().value("sidebar/folded")
+        except Exception:  # noqa: BLE001 - a convenience only
+            saved = None
+        if saved is None:
+            return set(FOLDED_BY_DEFAULT)
+        return {x for x in str(saved).split(",") if x}
+
+    def is_folded(self, section: str) -> bool:
+        items = self.section_items.get(section) or []
+        return bool(items) and items[0].isHidden()
+
+    def _set_folded(self, section: str, folded: bool, save: bool = True) -> None:
+        for item in self.section_items.get(section, []):
+            item.setHidden(folded)
+        self.sections[section].setText(f"{'▸' if folded else '▾'}  {section}")
+        if save:
+            try:
+                self._qs().setValue("sidebar/folded",
+                                    ",".join(sorted(s for s in self.sections if self.is_folded(s))))
+            except Exception:  # noqa: BLE001
+                pass
+
+    def toggle_section(self, section: str) -> None:
+        self._set_folded(section, not self.is_folded(section))
+
+    def _nav_clicked(self, item) -> None:
+        section = item.data(Qt.ItemDataRole.UserRole + 1)
+        if section:
+            self.toggle_section(section)
+
+    def run_action(self, name: str) -> None:
+        """Sidebar entries that are not screens: Transfer (a dialog), Import / Export, Archive, Backup."""
+        if name == "transfer":
+            self.transfer()
+        elif name == "import_export":
+            self.go("products")
+            page = self.page("products")
+            m = QMenu(self)
+            if self.app.can(P.PRODUCTS_EDIT):
+                m.addAction("Import Materials from Excel...", lambda: page.import_excel())
+                if self.app.can(P.SITES_EDIT):
+                    m.addAction("Import Project Material List...", lambda: page.import_project_list())
+                m.addAction("Download Excel Template...", lambda: page.download_template())
+            if self.app.can(P.REPORTS_EXPORT):
+                m.addSeparator()
+                m.addAction("Export Current View...", lambda: page.export_excel("CURRENT"))
+                m.addAction("Export All Materials...", lambda: page.export_excel("ALL"))
+            if self.isVisible() and m.actions():
+                m.popup(self.nav.mapToGlobal(self.nav.visualItemRect(self.nav.currentItem()).topRight()))
+            self.import_export_menu = m
+        elif name == "archive":
+            self.go("products")
+            self.page("products").apply_preset({"status": "ARCHIVED"})
+        elif name == "backup":
+            self.go("settings")
+            self.page("settings").show_tab("Backup and restore")
 
     def page(self, key: str):
         """The page for ``key`` once it has been opened (see ``go``)."""
@@ -187,6 +277,13 @@ class MainWindow(QMainWindow):
             return
         key = item.data(Qt.ItemDataRole.UserRole)
         if key is None:
+            return
+        if key.startswith(ACTION):
+            # run it, and keep the screen that was showing selected
+            self.nav.blockSignals(True)
+            self.nav.setCurrentItem(_prev)
+            self.nav.blockSignals(False)
+            self.run_action(key[len(ACTION):])
             return
         page = self.pages.get(key)
         if page is None:
