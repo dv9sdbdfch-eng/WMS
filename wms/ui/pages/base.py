@@ -37,6 +37,24 @@ class Page(QWidget):
     def add_action(self, widget) -> None:
         self.actions.addWidget(widget)
 
+    def add_link(self, text: str, page_key: str, preset: dict | None = None, tooltip: str | None = None):
+        """A button that opens a related screen (spec 3 / 42: screens without their own sidebar entry
+        are reached from where they belong). ``preset`` is passed to that screen's ``apply_preset``."""
+        from wms.ui.widgets.common import button
+
+        def go():
+            mw = getattr(self, "main_window", None)
+            if mw is None:
+                return
+            mw.go(page_key)
+            page = mw.page(page_key)
+            if preset and page is not None and hasattr(page, "apply_preset"):
+                page.apply_preset(preset)
+
+        b = button(text, go, tooltip=tooltip)
+        self.add_action(b)
+        return b
+
     def on_show(self) -> None:
         if self.dirty:
             self.refresh()

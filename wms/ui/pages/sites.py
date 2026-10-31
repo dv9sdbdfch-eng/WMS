@@ -20,6 +20,8 @@ class SitesPage(ListPage):
 
     def __init__(self, app, parent=None):
         super().__init__(app, parent)
+        if app.can(P.STOCK_VIEW):
+            self.add_link("Reservations", "reservations", tooltip="Stock set aside for projects, not yet issued")
         if app.can(P.SITES_EDIT):
             self.add_action(button("New site / project", self.new, primary=True, shortcut="Ctrl+N"))
         self.status = QComboBox()

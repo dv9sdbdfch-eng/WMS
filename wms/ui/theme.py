@@ -93,6 +93,13 @@ QPushButton#Link {{ background: transparent; border: none; color: {ACCENT}; padd
 QPushButton#Link:hover {{ text-decoration: underline; }}
 QFrame#SelectionBar {{ background: #EFF8FF; border: 1px solid #B2DDFF; border-radius: 6px; }}
 QLabel#Count {{ color: #344054; font-weight: 600; }}
+QPushButton#QuickAction {{ background: {ACCENT}; border: 1px solid {ACCENT}; color: white; font-weight: 600;
+    padding: 6px 12px; min-width: 96px; }}
+QPushButton#QuickAction:hover {{ background: #285F99; }}
+QToolButton#UserMenu {{ background: transparent; border: 1px solid transparent; border-radius: 6px;
+    padding: 6px 10px; color: #344054; }}
+QToolButton#UserMenu:hover {{ background: #F2F4F7; border-color: #D0D5DD; }}
+QToolButton#UserMenu::menu-indicator {{ image: none; width: 0; }}
 """
 
 

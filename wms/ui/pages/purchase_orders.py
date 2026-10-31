@@ -18,6 +18,9 @@ class PurchaseOrdersPage(ListPage):
 
     def __init__(self, app, parent=None):
         super().__init__(app, parent)
+        if app.can(P.PRODUCTS_VIEW):
+            self.add_link("Reorder Required", "low_stock", tooltip="Materials at or below their reorder level - "
+                          "create draft orders from them")
         if app.can(P.PURCHASING_EDIT):
             self.add_action(button("New purchase order", self.new_order, primary=True, shortcut="Ctrl+N"))
         self.supplier = PickCombo("All suppliers")

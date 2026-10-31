@@ -8,10 +8,9 @@ from __future__ import annotations
 
 from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QPushButton
 
-from wms.core.permissions import P
 from wms.services.search import signed_qty
 from wms.ui.pages.base import Page
-from wms.ui.widgets.common import DATETIME, QTY, Col, DataTable, button, label
+from wms.ui.widgets.common import DATETIME, QTY, Col, DataTable, label
 
 #: TODAY counters and the list each one opens.
 TODAY_PAGES = {"Goods In": "delivery_notes", "Goods Out": "goods_out", "Transfers": "movements",
@@ -40,12 +39,7 @@ class DashboardPage(Page):
 
     def __init__(self, app, parent=None):
         super().__init__(app, parent)
-        if app.can(P.GOODS_IN_POST):
-            self.add_action(button("New Goods In", lambda: self.main_window.go("goods_in"), primary=True))
-        if app.can(P.GOODS_OUT_POST):
-            self.add_action(button("New Goods Out", lambda: self.main_window.go("goods_out"), primary=True))
-        if app.can(P.STOCK_TRANSFER):
-            self.add_action(button("Transfer", self.transfer))
+        # Goods In / Goods Out / Transfer are in the top bar on every screen (F2 / F3 / F4).
         # Problems described in words (backup, negative stock...). Double-click opens the screen that fixes it.
         self.t_alerts = DataTable([Col("", lambda a: "!" if a.level == "danger" else "", width=24),
                                    Col("Needs attention", lambda a: a.text)])

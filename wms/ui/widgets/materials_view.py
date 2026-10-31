@@ -310,6 +310,7 @@ class MaterialsView(QWidget):
     """See the module docstring. ``fixed_site_id`` turns it into a project's Materials tab."""
 
     changed = Signal()  # something was saved (bulk change, project list): parents refresh
+    filter_changed = Signal()  # a new filter is being shown (parents adapt their buttons)
 
     def __init__(self, app, parent=None, fixed_site_id: int | None = None, settings_key: str | None = None,
                  picker: bool = False):
@@ -639,6 +640,7 @@ class MaterialsView(QWidget):
         self.loading = True
         self.count.setText("Loading...")
         self._update_chips()
+        self.filter_changed.emit()
         self.model.sort = (f.sort, f.descending)
         self.model.headerDataChanged.emit(Qt.Orientation.Horizontal, 0, max(len(self.model.cols) - 1, 0))
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 from PySide6.QtWidgets import QComboBox
 
 from wms.core.numbers import fmt_money
+from wms.core.permissions import P
 from wms.ui.pages.base import ListPage
 from wms.ui.widgets.common import DATE, DATETIME, INT, MONEY, Col, PickCombo
 
@@ -16,6 +17,9 @@ class DeliveryNotesPage(ListPage):
 
     def __init__(self, app, parent=None):
         super().__init__(app, parent)
+        if app.can(P.PURCHASING_VIEW):
+            self.problems_btn = self.add_link("Delivery Problems", "discrepancies", tooltip="Short, over, damaged, "
+                                              "rejected or wrong goods until they are resolved")
         self.supplier = PickCombo("All suppliers")
         self.add_filter(self.supplier, self.supplier.picked)
         self.status = QComboBox()
