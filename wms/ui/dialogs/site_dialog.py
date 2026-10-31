@@ -19,8 +19,8 @@ from wms.core.permissions import P
 from wms.ui.dialogs.product_dialog import _changes
 from wms.ui.widgets.common import (
     DATETIME,
-    MONEY,
     QTY,
+    Card,
     Col,
     DataTable,
     OptionalDateEdit,
@@ -56,11 +56,11 @@ class SiteDialog(QDialog):
         lay.addWidget(self.header)
         self.tabs = QTabWidget()
         lay.addWidget(self.tabs, 1)
-        self.tabs.addTab(self._details(), "Details")
+        self.tabs.addTab(self._overview(), "Overview" if self.site else "Details")
         if self.site:
             self._build_history()
             if tab in ("materials", "summary"):
-                self.tabs.setCurrentWidget(self.summary_tab)
+                self.tabs.setCurrentWidget(self.summary_tab)  # loads the list (_tab_changed)
             elif tab == "history":
                 self.tabs.setCurrentWidget(self.history_tab)
             elif tab == "reservations":
@@ -76,6 +76,35 @@ class SiteDialog(QDialog):
             if self.site.status != SiteStatus.ARCHIVED.value:
                 extra.append(button("Delete project", self.delete, danger=True))
         lay.addLayout(h(*extra, None, button("Close", self.reject), self.btn_save))
+
+    def _overview(self) -> QWidget:
+        """Project figures on top (Required / Reserved / Issued / Returned / Net), details below."""
+        details = self._details()
+        if not self.site:
+            return details
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        self.cards = {k: Card(t) for k, t in (("materials", "Materials"), ("required", "Required"),
+                                              ("reserved", "Reserved"), ("issued", "Issued"),
+                                              ("returned", "Returned"), ("net", "Net issued"),
+                                              ("value", "Material value on site"))}
+        lay.addLayout(h(*self.cards.values()))
+        lay.addWidget(label("Required = the project's material list (a plan, never stock).  Reserved = held in the "
+                            "warehouse for it.  Issued / Returned = posted Goods Out and returns.", "Muted", wrap=True))
+        lay.addWidget(details, 1)
+        self._fill_cards()
+        return w
+
+    def _fill_cards(self) -> None:
+        from wms.core.numbers import fmt_qty
+        summ = run(self, self.app.services.materials.project_summary, self.site.id)
+        if summ is None:
+            return
+        value = sum((r.value for r in self.app.services.sites.material_summary(self.site.id)), 0)
+        self.cards["materials"].set_value(f"{summ.materials:,}")
+        for k in ("required", "reserved", "issued", "returned", "net"):
+            self.cards[k].set_value(fmt_qty(getattr(summ, k)))
+        self.cards["value"].set_value(fmt_money(value))
 
     def _details(self) -> QWidget:
         w = QWidget()
@@ -132,30 +161,30 @@ class SiteDialog(QDialog):
         ml = QVBoxLayout(mw)
         ml.addWidget(label("Positive quantities went to site; negative quantities came back.", "Muted"))
         ml.addWidget(self.movements, 1)
-        self.tabs.addTab(mw, "Movement History")
+        self.tabs.addTab(mw, "Movements")
         self.history_tab = mw
 
-        summary = app.services.sites.material_summary(sid)
-        st = DataTable([Col("Code", lambda r: r.product.internal_code, width=110),
-                        Col("Material", lambda r: r.product.name, width=260),
-                        Col("Issued", lambda r: r.issued, QTY, 90),
-                        Col("Returned", lambda r: r.returned, QTY, 90),
-                        Col("Net Qty", lambda r: r.net, QTY, 90),
-                        Col("Unit", lambda r: r.product.unit.code, width=50),
-                        Col("Last Movement", lambda r: r.last_movement, DATETIME, 130),
-                        Col("Value (at issue cost)", lambda r: r.value, MONEY, 130)])
-        st.set_items(summary)
-        st.activated_item.connect(lambda r: app.open_entity("PRODUCT", r.product.id, self, tab="history"))
+        # Materials: the same list, filters and export as the Materials screen, with the project fixed
+        from wms.ui.widgets.materials_view import MaterialsView
+        self.materials = MaterialsView(app, self, fixed_site_id=sid)
+        self.materials.changed.connect(self._fill_cards)
         sw = QWidget()
         sl = QVBoxLayout(sw)
-        sl.addWidget(label("What have we sent to this project? Issued minus returned, per material.", "Muted"))
-        sl.addWidget(st, 1)
-        sl.addLayout(h(label(f"{len(summary)} material(s)   ·   Total material value on site: "
-                             f"{fmt_money(sum((r.value for r in summary), 0))}", "SectionTitle"), None,
-                       button("Open complete movement history",
-                              lambda: self.tabs.setCurrentWidget(self.history_tab))))
-        self.tabs.insertTab(1, sw, "Material Summary")
+        open_site = self.site.status in OPEN_SITE_STATUSES
+        acts = []
+        if self.can_edit and open_site:
+            acts += [button("Add materials...", self.add_materials, primary=True),
+                     button("Import list from Excel...", self.import_list)]
+        if app.can(P.REPORTS_EXPORT):
+            acts.append(button("Export to Excel...", lambda: self.materials.export_project()))
+        sl.addLayout(h(label("What this project needs (Required) and what it has had (Reserved / Issued / "
+                             "Returned). Tick rows to set quantities or take them off the list.", "Muted"),
+                       None, *acts))
+        sl.addWidget(self.materials, 1)
+        self.tabs.insertTab(1, sw, "Materials")
         self.summary_tab = sw
+        self._materials_loaded = False
+        self.tabs.currentChanged.connect(self._tab_changed)
         from wms.ui.dialogs.reservations import ReservationsPanel
         self.reservations = ReservationsPanel(app, site_id=sid)
         self.tabs.insertTab(2, self.reservations, "Reservations")
@@ -170,6 +199,28 @@ class SiteDialog(QDialog):
                             Col("Changes", _changes)])
             at.set_items(app.services.audit.for_entity(EntityType.SITE.value, sid))
             self.tabs.addTab(at, "Audit")
+
+    def _tab_changed(self, _i: int) -> None:
+        if self.tabs.currentWidget() is self.summary_tab and not self._materials_loaded:
+            self._materials_loaded = True
+            self.materials.refresh()
+
+    def add_materials(self) -> bool:
+        """Choose existing materials, then their Required quantity (spec section 7). No stock moves."""
+        from wms.ui.widgets.materials_view import MaterialPickerDialog
+        pick = MaterialPickerDialog(self.app, self, "Add materials to the project list")
+        if pick.exec() != QDialog.DialogCode.Accepted:
+            return False
+        rows = pick.rows()
+        return bool(rows) and self.materials.add_to_project(self.site.id, rows)
+
+    def import_list(self) -> None:
+        from wms.ui.dialogs.excel_import import ExcelImportDialog
+        dlg = ExcelImportDialog(self.app, self, project_id=self.site.id)
+        dlg.exec()
+        if dlg.result is not None:
+            self.materials.refresh()
+            self._fill_cards()
 
     def complete(self):
         from wms.ui.widgets.common import confirm

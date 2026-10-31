@@ -215,6 +215,7 @@ class MaterialRow:
     incoming: Decimal = ZERO
     bins: list[BinStock] = field(default_factory=list)
     photo_id: int | None = None
+    photo_name: str | None = None  # stored file name of that photo (thumbnail in the table)
     # project figures - only filled when the list is filtered by a project
     required: Decimal | None = None
     proj_reserved: Decimal = ZERO
@@ -660,12 +661,14 @@ class MaterialsService(BaseService):
                 .where(StockLevel.product_id.in_(ids), StockLevel.quantity != ZERO)
                 .order_by(StockLevel.quantity.desc(), Bin.code)).unique():
             rows[pid].bins.append(BinStock(b.code, b.full_code, qty, b.is_active))
-        for pid, att_id in s.execute(
-                select(Attachment.entity_id, func.min(Attachment.id))
+        # the main photo (primary first, then the oldest) - one query for the whole page
+        for pid, att_id, stored in s.execute(
+                select(Attachment.entity_id, Attachment.id, Attachment.stored_name)
                 .where(Attachment.entity_type == EntityType.PRODUCT.value, Attachment.entity_id.in_(ids),
                        Attachment.kind == AttachmentKind.PHOTO.value, Attachment.is_deleted.is_(False))
-                .group_by(Attachment.entity_id)):
-            rows[pid].photo_id = att_id
+                .order_by(Attachment.is_primary.desc(), Attachment.id)):
+            if rows[pid].photo_id is None:
+                rows[pid].photo_id, rows[pid].photo_name = att_id, stored
         if site_id:
             pj = _Project(site_id)
             for pid, req in s.execute(select(pj.req.c.pid, pj.req.c.required).where(pj.req.c.pid.in_(ids))):
