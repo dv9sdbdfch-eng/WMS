@@ -1176,7 +1176,10 @@ class SearchService(BaseService):
     # ---- saved and recent searches (per user) --------------------------------------
     def saved_searches(self) -> list[SavedSearch]:
         with self.db.read_session() as s:
-            return list(s.scalars(select(SavedSearch).where(SavedSearch.user_id == self.user.id)
+            # Views saved on the Materials screen live in the same table, marked by their JSON.
+            return list(s.scalars(select(SavedSearch).where(SavedSearch.user_id == self.user.id,
+                                                            ~SavedSearch.criteria.startswith('{"materials":'),
+                                                            ~SavedSearch.criteria.startswith('{"import_profile":'))
                                   .order_by(func.lower(SavedSearch.name))))
 
     def save_search(self, name: str, c: SearchCriteria, replace: bool = False) -> SavedSearch:

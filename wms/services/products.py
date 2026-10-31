@@ -20,6 +20,7 @@ from wms.db.models import (
     FinishedProductInfo,
     Location,
     Product,
+    ProjectMaterial,
     StockCountLine,
     StockLevel,
     StockMovement,
@@ -483,6 +484,7 @@ class ProductService(BaseService):
         plan.references = (
             lifecycle.count(s, StockLevel.id, StockLevel.product_id == p.id)
             + lifecycle.count(s, StockCountLine.id, StockCountLine.product_id == p.id)
+            + lifecycle.count(s, ProjectMaterial.id, ProjectMaterial.product_id == p.id)
             + lifecycle.count(s, BomItem.id, or_(BomItem.parent_product_id == p.id,
                                                   BomItem.component_product_id == p.id))
             + lifecycle.count(s, Attachment.id, Attachment.entity_type == EntityType.PRODUCT.value,

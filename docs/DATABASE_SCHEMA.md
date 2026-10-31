@@ -318,6 +318,22 @@ Protected tables (database triggers, see `wms.db.engine`):
 | is_active | Boolean | no |  |
 | version | Integer | no |  |
 
+## project_materials
+
+| Column | Type | Null | Key / reference |
+|---|---|---|---|
+| site_id | Integer | no | FK sites.id, indexed |
+| product_id | Integer | no | FK products.id, indexed |
+| required_qty | Quantity | no |  |
+| notes | Text | yes |  |
+| created_by_id | Integer | yes | FK users.id, indexed |
+| id | Integer | no | PK |
+| created_at | UTCDateTime | no |  |
+| updated_at | UTCDateTime | no |  |
+
+* CHECK required_qty >= 0
+* UNIQUE (site_id, product_id)
+
 ## purchase_order_lines
 
 | Column | Type | Null | Key / reference |
@@ -564,6 +580,7 @@ Protected tables (database triggers, see `wms.db.engine`):
 * CHECK quantity > 0
 * INDEX ix_stock_movements_doc (doc_type, doc_id)
 * INDEX ix_stock_movements_product_time (product_id, occurred_at)
+* INDEX ix_stock_movements_product_type_time (product_id, movement_type, occurred_at)
 * UNIQUE INDEX uq_stock_movements_reversal_of (reversal_of_id) WHERE reversal_of_id IS NOT NULL
 
 ## stock_reservations

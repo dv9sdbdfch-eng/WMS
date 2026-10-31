@@ -703,16 +703,23 @@ def test_excel_import_wizard_and_exports(ui, sample, qtbot, tmp_path):
     assert dlg.map_combos["photo"].currentData() is None
     dlg.next()
     assert dlg.stack.currentIndex() == 3 and dlg.preview.rowCount() == 3
-    assert "1 new, 0 to update, 1 skipped, 1 with errors" in dlg.preview_summary.text()
-    # Choose "Update existing" for MDF-18 in the Action column
-    action = dlg.preview.cellWidget(1, 1)
+    assert "1 new, 0 to update, 1 already in the WMS / duplicate, 0 skipped, 1 with errors" \
+        in dlg.preview_summary.text()
+    # MDF-18 is already in the WMS: shown as DUPLICATE with what would change; choose Update
+    mdf_row = next(r for r in dlg.plan.rows if r.code == "MDF-18")
+    assert mdf_row.status == "DUPLICATE" and "MDF renamed by Excel" in mdf_row.changes_text
+    action = dlg.preview.cellWidget(1, 2)
     action.setCurrentIndex(action.findData("UPDATE"))
-    assert "1 new, 1 to update, 0 skipped" in dlg.preview_summary.text()
+    assert "1 new, 1 to update, 0 already in the WMS / duplicate" in dlg.preview_summary.text()
     dlg.only_problems.setChecked(True)
-    assert dlg.preview.rowCount() == 1  # U708: unknown unit (and a new-supplier note)
-    dlg.next()
-    assert dlg.stack.currentIndex() == 4, msgs
+    assert dlg.preview.rowCount() == 1  # U708: unknown unit (and a new supplier)
+    dlg.only_problems.setChecked(False)
+    dlg.next()  # unknown suppliers -> Resolve step
+    assert dlg.stack.currentIndex() == 4 and dlg.sup_table.rowCount() == 1  # New Boards Ltd: Create / Match
+    dlg.next()  # Import
+    assert dlg.stack.currentIndex() == 5, msgs
     assert "Pre-import backup successfully created" in dlg.done_text.text()
+    assert "New materials: 1" in dlg.done_text.text() and "Updated: 1" in dlg.done_text.text()
     assert any(title == "Import from Excel" and "1 row(s) with errors will NOT be imported" in text
                for _, title, text in msgs)
     assert app.services.products.get(sample.mdf.id).name == "MDF renamed by Excel"
@@ -723,24 +730,24 @@ def test_excel_import_wizard_and_exports(ui, sample, qtbot, tmp_path):
     page = win.page("products")
     page.refresh()
     assert page.export_excel("selected", str(tmp_path / "none.xlsx")) is None
-    assert any("Select one or more" in text for _, _, text in msgs)
+    assert any("Tick one or more" in text for _, _, text in msgs)
     page.search.setText("MDF")
-    page.refresh()
+    page.search.search.emit("MDF")
     page.export_excel("shown", str(tmp_path / "shown.xlsx"))
     rows = [r[0].value for r in load_workbook(tmp_path / "shown.xlsx").active.iter_rows(min_row=6)]
     assert rows[:1] == ["MDF-18"] and "H3311" not in rows
     page.search.setText("")
-    page.refresh()
-    page.table.selectRow(0)
-    page.table.selectionModel().select(page.table.proxy.index(2, 0),
-                                       page.table.selectionModel().SelectionFlag.Select
-                                       | page.table.selectionModel().SelectionFlag.Rows)
-    assert len(page.table.selected_items()) == 2
+    page.search.search.emit("")
+    view = page.view
+    view.model.setData(view.model.index(0, 0), Qt.CheckState.Checked.value, Qt.ItemDataRole.CheckStateRole)
+    view.model.setData(view.model.index(2, 0), Qt.CheckState.Checked.value, Qt.ItemDataRole.CheckStateRole)
+    assert len(view.checked_ids()) == 2 and view.sel_bar.isVisibleTo(page) and view.sel_label.text() == "2 selected"
     page.export_excel("selected", str(tmp_path / "sel.xlsx"))
+    assert len([r for r in load_workbook(tmp_path / "sel.xlsx").active.iter_rows(min_row=6) if r[0].value]) == 2
     page.export_excel("all", str(tmp_path / "all.xlsx"))
     ws = load_workbook(tmp_path / "all.xlsx").active
-    assert ws["A3"].value == "All products - 4 product(s)"
-    assert len([r for r in ws.iter_rows(min_row=6) if r[0].value and r[0].value != "Total"]) == 4
+    assert ws["A3"].value == "All materials (active and archived): 4"
+    assert len([r for r in ws.iter_rows(min_row=6) if r[0].value]) == 4
 
     search = _search_page(win)
     search.search_for("egger")

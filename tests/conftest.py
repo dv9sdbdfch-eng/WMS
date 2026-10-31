@@ -14,6 +14,22 @@ from wms.services import Services
 from wms.services.base import AppContext
 
 
+@pytest.fixture(autouse=True)
+def _quiet_ui(tmp_path):
+    """Screens: run background work inline (deterministic tests) and keep table settings
+    (column choices) in the test folder, not in the real user profile."""
+    try:
+        from PySide6.QtCore import QSettings
+
+        from wms.ui.widgets import tasks
+    except ImportError:  # pragma: no cover - service tests without Qt
+        yield
+        return
+    tasks.SYNC = True
+    QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(tmp_path / "qsettings"))
+    yield
+
+
 @pytest.fixture
 def cfg(tmp_path, monkeypatch):
     monkeypatch.setenv("WMS_DATA_DIR", str(tmp_path / "data"))

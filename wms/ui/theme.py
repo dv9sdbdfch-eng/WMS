@@ -84,6 +84,15 @@ QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 4px; color
 QTreeWidget::item {{ padding: 4px 2px; }}
 QListWidget::item {{ padding: 6px 8px; }}
 QStatusBar {{ background: white; border-top: 1px solid #E4E7EC; color: {MUTED}; }}
+QPushButton#Chip {{ background: #EFF8FF; border: 1px solid #B2DDFF; border-radius: 12px; padding: 3px 10px;
+    color: #175CD3; }}
+QPushButton#Chip:hover {{ background: #D1E9FF; }}
+QPushButton#ChipFixed {{ background: #F2F4F7; border: 1px solid #D0D5DD; border-radius: 12px; padding: 3px 10px;
+    color: #344054; }}
+QPushButton#Link {{ background: transparent; border: none; color: {ACCENT}; padding: 3px 6px; }}
+QPushButton#Link:hover {{ text-decoration: underline; }}
+QFrame#SelectionBar {{ background: #EFF8FF; border: 1px solid #B2DDFF; border-radius: 6px; }}
+QLabel#Count {{ color: #344054; font-weight: 600; }}
 """
 
 

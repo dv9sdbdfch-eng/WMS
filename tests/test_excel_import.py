@@ -17,7 +17,16 @@ from openpyxl.drawing.image import Image as XLImage
 from PIL import Image
 
 from wms.core.exceptions import PermissionDeniedError, ValidationError
-from wms.services.excel_import import CREATE, SKIP, UPDATE, ImportOptions, guess_mapping
+from wms.services.excel_import import (
+    CREATE,
+    DUPLICATE,
+    ERROR,
+    NEW,
+    SKIP,
+    UPDATE,
+    ImportOptions,
+    guess_mapping,
+)
 
 D = Decimal
 HEAD = ["Code", "Name / Description", "Product Number", "Product Photo", "Supplier", "Unit", "Min"]
@@ -206,20 +215,27 @@ def test_validation_and_duplicates(svc, sample, tmp_path):
     by = {r.row: r for r in plan.rows}
     assert by[4].action == SKIP and by[4].existing_id == sample.mdf.id and by[4].ok
     assert by[5].action == CREATE
-    assert "also on row 5" in by[6].problems and not by[6].ok
-    assert "no code" in by[7].problems
+    assert by[4].status == DUPLICATE and by[5].status == NEW
+    assert "also on row 5" in by[6].problems and by[6].status == DUPLICATE and by[6].action == SKIP
+    assert plan.choices(by[6]) == [SKIP]  # a duplicate inside the file can never be imported twice
+    assert "no code" in by[7].problems and by[7].status == ERROR
     assert "unknown unit 'PALLETS'" in by[8].problems
     assert "is not a number" in by[9].problems
     assert "must be a whole number" in by[10].problems
-    assert by[11].ok and "possible duplicate" in by[11].problems
+    # same product number as MDF-18 (Egger): found as a possible duplicate, NOT created silently
+    assert by[11].ok and "possible duplicate" in by[11].problems and by[11].existing_id == sample.mdf.id
+    assert by[11].match_kind == "PRODUCT_NO" and by[11].action == SKIP and by[11].status == DUPLICATE
+    assert plan.choices(by[11]) == [SKIP, UPDATE, CREATE]
+    assert ("Name", "MDF 18mm 2440x1220", "MDF 18mm (from Excel)") in by[4].changes
     c = plan.counts()
-    assert (c["create"], c["update"], c["skip"], c["errors"]) == (2, 0, 1, 5)
+    assert (c["create"], c["update"], c["duplicate"], c["skip"], c["errors"]) == (1, 0, 3, 0, 4)
+    by[11].action = CREATE  # the person decides it really is a different material
     # Update instead of skip: only mapped + filled columns change, stock and history stay
     sample.receive(sample.mdf, 7)
     plan = svc.excel_import.prepare(path, options(info, on_existing=UPDATE))
     assert next(r for r in plan.rows if r.row == 4).action == UPDATE
     result = svc.excel_import.run(plan)
-    assert (result.created, result.updated) == (2, 1)
+    assert (result.created, result.updated) == (1, 1)
     mdf = svc.products.get(sample.mdf.id)
     assert (mdf.name, mdf.min_stock) == ("MDF 18mm (from Excel)", D(12))
     assert mdf.supplier_code == "EG-MDF18" and mdf.unit_cost == D("24.50")  # not mapped / empty: unchanged

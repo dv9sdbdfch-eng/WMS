@@ -16,6 +16,7 @@ from wms.db.models.documents import (
 )
 from wms.db.models.locations import Bin, Location
 from wms.db.models.products import BomItem, FinishedProductInfo, Product
+from wms.db.models.projects import ProjectMaterial
 from wms.db.models.purchasing import DeliveryDiscrepancy, PurchaseOrder, PurchaseOrderLine
 from wms.db.models.reference import Category, ReasonCode, Supplier, Unit
 from wms.db.models.reservations import StockReservation
@@ -38,6 +39,7 @@ __all__ = [
     "GoodsIssueLine",
     "Location",
     "MovementReversal",
+    "ProjectMaterial",
     "NumberSequence",
     "Product",
     "ProductionLine",

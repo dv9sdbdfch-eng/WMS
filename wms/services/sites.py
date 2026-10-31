@@ -12,7 +12,16 @@ from wms.core.enums import OPEN_SITE_STATUSES, EntityType, MovementType, SiteSta
 from wms.core.exceptions import ConcurrencyError, DuplicateError, NotFoundError, ValidationError
 from wms.core.numbers import ZERO
 from wms.core.permissions import P
-from wms.db.models import FinishedProductInfo, GoodsIssue, Product, ProductionOrder, Site, StockMovement, StockReturn
+from wms.db.models import (
+    FinishedProductInfo,
+    GoodsIssue,
+    Product,
+    ProductionOrder,
+    ProjectMaterial,
+    Site,
+    StockMovement,
+    StockReturn,
+)
 from wms.services import audit, lifecycle
 from wms.services.base import BaseService, clean_code, clean_str, like_pattern
 from wms.services.lifecycle import RemovalPlan
@@ -110,7 +119,8 @@ class SiteService(BaseService):
                            already_archived=site.status == SiteStatus.ARCHIVED.value)
         plan.history = lifecycle.count(s, StockMovement.id, StockMovement.site_id == site.id)
         plan.references = sum(lifecycle.count(s, col, col == site.id) for col in (
-            GoodsIssue.site_id, StockReturn.site_id, ProductionOrder.site_id, FinishedProductInfo.site_id))
+            GoodsIssue.site_id, StockReturn.site_id, ProductionOrder.site_id, FinishedProductInfo.site_id,
+            ProjectMaterial.site_id))
         plan.references += lifecycle.attachment_count(s, EntityType.SITE.value, site.id)
         return plan
 

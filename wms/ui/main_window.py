@@ -37,8 +37,8 @@ def _nav():
         goods_out,
         locations,
         low_stock,
+        materials,
         movements,
-        products,
         purchase_orders,
         reports,
         reservations,
@@ -52,7 +52,7 @@ def _nav():
     return [
         ("", "dashboard", "Dashboard", None, dashboard.DashboardPage),
         ("", "search", "Search", None, search.SearchPage),
-        ("STOCK", "products", "Products", P.PRODUCTS_VIEW, products.ProductsPage),
+        ("STOCK", "products", "Materials", P.PRODUCTS_VIEW, materials.MaterialsPage),
         ("STOCK", "finished", "Finished Products", P.PRODUCTS_VIEW, finished.FinishedPage),
         ("STOCK", "locations", "Locations / Bins", P.LOCATIONS_VIEW, locations.LocationsPage),
         ("STOCK", "reservations", "Reservations", P.STOCK_VIEW, reservations.ReservationsPage),

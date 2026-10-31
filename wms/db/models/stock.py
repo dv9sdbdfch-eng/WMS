@@ -44,6 +44,8 @@ class StockMovement(IdMixin, Base):
               postgresql_where=text("reversal_of_id IS NOT NULL")),
         CheckConstraint("from_bin_id IS NOT NULL OR to_bin_id IS NOT NULL", name="has_bin"),
         Index("ix_stock_movements_product_time", "product_id", "occurred_at"),
+        # "Last received / last issued" per product (Materials sort and date filters).
+        Index("ix_stock_movements_product_type_time", "product_id", "movement_type", "occurred_at"),
         Index("ix_stock_movements_doc", "doc_type", "doc_id"),
     )
 
