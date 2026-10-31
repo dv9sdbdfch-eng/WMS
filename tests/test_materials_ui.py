@@ -52,6 +52,44 @@ def test_filters_chips_count_and_clear(ui, sample):  # noqa: F811
     assert not _errors(msgs), msgs
 
 
+def test_materials_header_columns_button_project_banner_and_assign(ui, sample):  # noqa: F811
+    """UI refactor spec 18-23, 36, 38: search on its own line, primary filters under it, Columns
+    menu, a project banner when a project is chosen, Assign Project for ticked rows."""
+    app, win, msgs, _ = ui
+    sample.receive(sample.mdf, 25)
+    app.services.materials.set_required(sample.site.id, [(sample.mdf.id, "40")])
+    page = page_of(win)
+    v = page.view
+    assert v.layout().itemAt(0).widget() is v.search  # search line first
+    assert [c.title for c in v.model.cols if c.title][:8] == ["Photo", "Code", "Material", "Product Number",
+                                                              "Supplier", "On Hand", "Available", "Bin"]
+    # Columns menu: the same choices as right-clicking the header
+    v._fill_column_menu(v.columns_menu)
+    brand = next(a for a in v.columns_menu.actions() if a.text() == "Brand")
+    brand.trigger()
+    assert "brand" in [c.key for c in v.model.cols]
+    brand.trigger()
+    assert "brand" not in [c.key for c in v.model.cols]
+    # choosing a project turns the list into the project's material workspace
+    assert v.project_bar.isHidden()
+    v.project.set_value(sample.site.id)
+    assert not v.project_bar.isHidden()
+    assert v.project_title.text().startswith("PROJECT: RIVERSIDE APARTMENTS")
+    assert v.project_figures["required"].text() == "Required: <b>40</b>"
+    assert v.project_figures["remaining"].text() == "Remaining: <b>40</b>"
+    assert [c.key for c in v.model.cols if c.key in ("required", "proj_reserved", "issued", "returned",
+                                                     "remaining")] == ["required", "proj_reserved", "issued",
+                                                                      "returned", "remaining"]
+    assert "photo" not in [c.key for c in v.model.cols]  # project emphasis: its own column choice
+    v.project.set_value(None)
+    assert v.project_bar.isHidden() and "photo" in [c.key for c in v.model.cols]
+    # bulk toolbar only while something is ticked; Assign Project is on it
+    assert v.sel_bar.isHidden()
+    tick(v, 0)
+    assert not v.sel_bar.isHidden() and not v.sel_project.isHidden()
+    assert not _errors(msgs), msgs
+
+
 def test_more_filters_views_and_columns(ui, sample, monkeypatch):  # noqa: F811
     app, win, msgs, _ = ui
     page = page_of(win)
@@ -144,7 +182,7 @@ def test_project_tab_add_set_remove_and_export(ui, sample, tmp_path, monkeypatch
     assert dlg.tabs.currentWidget() is dlg.summary_tab
     v = dlg.materials
     assert v.count.text() == "0 materials on this project" and not v.project.isVisible()
-    assert {c.key for c in v.model.cols} >= {"required", "proj_reserved", "issued", "returned", "net"}
+    assert {c.key for c in v.model.cols} >= {"required", "proj_reserved", "issued", "returned", "remaining"}
     # put two materials on the list (as "Add materials..." does after the picker)
     rows = app.services.materials.rows_for([sample.mdf.id, sample.edge.id])
     pl = mv.ProjectListDialog(app, rows, sample.site.id, dlg)

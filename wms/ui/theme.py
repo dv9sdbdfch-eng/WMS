@@ -93,6 +93,9 @@ QPushButton#Link {{ background: transparent; border: none; color: {ACCENT}; padd
 QPushButton#Link:hover {{ text-decoration: underline; }}
 QFrame#SelectionBar {{ background: #EFF8FF; border: 1px solid #B2DDFF; border-radius: 6px; }}
 QLabel#Count {{ color: #344054; font-weight: 600; }}
+QFrame#ProjectBar {{ background: #EFF8FF; border: 1px solid #B2DDFF; border-radius: 6px; }}
+QLabel#ProjectTitle {{ color: #175CD3; font-weight: 600; }}
+QLabel#ProjectFigure {{ color: #344054; }}
 QLabel#AlertGroup {{ color: {MUTED}; font-size: 8pt; font-weight: 600; }}
 QPushButton#AlertCritical, QPushButton#AlertAction, QPushButton#AlertData {{ text-align: left; padding: 5px 12px;
     border-radius: 6px; }}

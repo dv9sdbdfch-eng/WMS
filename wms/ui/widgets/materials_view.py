@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QInputDialog,
+    QLabel,
     QMenu,
     QPushButton,
     QScrollArea,
@@ -78,6 +79,16 @@ from wms.ui.widgets.common import (
 log = logging.getLogger(__name__)
 
 SELECT, PHOTO = "select", "photo"
+#: the project banner: (ProjectSummary attribute, label, tooltip) - definitions in services/materials.py
+PROJECT_FIGURES = (
+    ("materials", "Materials", "Materials on the list, reserved, issued or returned for this project"),
+    ("required", "Required", "Quantity the project needs (its material list). Changing it never changes stock."),
+    ("reserved", "Reserved", "Stock set aside for the project, still in the warehouse"),
+    ("issued", "Issued", "Sent from the warehouse to the project (Goods Out)"),
+    ("returned", "Returned", "Physically returned from the project"),
+    ("net", "Net Issued", "Issued - Returned"),
+    ("remaining", "Remaining", "Required - Net Issued - Reserved (never below 0): still to reserve or issue"),
+)
 THUMB = 36  # photo thumbnail size in the table, pixels
 
 
@@ -108,8 +119,9 @@ COLUMNS: list[MCol] = [
     MCol("proj_reserved", "Reserved", lambda r: r.proj_reserved, QTY, 85, "proj_reserved", project=True),
     MCol("issued", "Issued", lambda r: r.issued, QTY, 80, "issued", project=True),
     MCol("returned", "Returned", lambda r: r.returned, QTY, 85, "returned", project=True),
-    MCol("net", "Net", lambda r: r.net, QTY, 80, "net", project=True),
-    MCol("qty", "Stock", lambda r: r.on_hand, QTY, 85, "qty"),
+    MCol("net", "Net Issued", lambda r: r.net, QTY, 90, "net", project=True, default=False),
+    MCol("remaining", "Remaining", lambda r: r.remaining, QTY, 95, "remaining", project=True),
+    MCol("qty", "On Hand", lambda r: r.on_hand, QTY, 85, "qty"),
     MCol("available", "Available", lambda r: r.available, QTY, 90, "available"),
     MCol("bin", "Bin", lambda r: r.bin_text, width=90, sort="bin"),
     MCol("status", "Status", lambda r: r.status_label, width=100, sort="status"),
@@ -128,9 +140,9 @@ COLUMNS: list[MCol] = [
     MCol("updated", "Last Changed", lambda r: r.product.updated_at, DATETIME, 130, "updated", default=False),
 ]
 BY_KEY = {c.key: c for c in COLUMNS}
-#: shown by default on a project's Materials tab (spec section 6)
-PROJECT_DEFAULT = {SELECT, PHOTO, "code", "name", "product_no", "supplier", "required", "proj_reserved",
-                   "issued", "returned", "net", "available", "bin"}
+#: shown by default on a project's Materials tab (UI refactor spec 23)
+PROJECT_DEFAULT = {SELECT, "code", "name", "supplier", "required", "proj_reserved", "issued", "returned",
+                   "remaining", "available"}
 STATUS_COLOURS = {"OUT": theme.DANGER, "LOW": theme.WARNING, "ARCHIVED": "#98A2B3", "IN": theme.SUCCESS}
 
 
@@ -355,14 +367,46 @@ class MaterialsView(QWidget):
         self.views_menu = QMenu(self.views_btn)
         self.views_menu.aboutToShow.connect(self._fill_views)
         self.views_btn.setMenu(self.views_menu)
+        self.columns_btn = QPushButton("Columns")
+        self.columns_btn.setAutoDefault(False)
+        self.columns_btn.setToolTip("Choose the columns shown (and exported with Export Current View)")
+        self.columns_menu = QMenu(self.columns_btn)
+        self.columns_menu.aboutToShow.connect(lambda: self._fill_column_menu(self.columns_menu))
+        self.columns_btn.setMenu(self.columns_menu)
         self.project.setVisible(fixed_site_id is None)
         self.views_btn.setVisible(fixed_site_id is None and not picker)
-        top = h(self.search, self.project, self.supplier, self.bin, self.stock, self.more, self.views_btn)
-        top.setStretch(0, 3)
-        for i in (1, 2, 3):
+        self.columns_btn.setVisible(not picker)
+        # spec 18: the search on its own line, the primary filters under it (Project first)
+        lay.addWidget(self.search)
+        top = h(self.project, self.supplier, self.bin, self.stock, self.more, None, self.columns_btn,
+                self.views_btn)
+        for i in (0, 1, 2):
             top.setStretch(i, 2)
+        top.setStretch(3, 1)
         lay.addLayout(top)
-        self.search.setMinimumWidth(280)
+
+        # -- project context (spec 21 / 23): the same banner on Materials -> Project and Project -> Materials
+        self.project_bar = QFrame()
+        self.project_bar.setObjectName("ProjectBar")
+        pb = QHBoxLayout(self.project_bar)
+        pb.setContentsMargins(12, 6, 12, 6)
+        pb.setSpacing(14)
+        self.project_title = label("", "ProjectTitle")
+        pb.addWidget(self.project_title)
+        self.project_figures: dict[str, QLabel] = {}
+        for key, _text, tip in PROJECT_FIGURES:
+            lab = label("", "ProjectFigure")
+            lab.setToolTip(tip)
+            self.project_figures[key] = lab
+            pb.addWidget(lab)
+        pb.addStretch(1)
+        self.open_project_btn = button("Open Project", self.open_project)
+        self.open_project_btn.setObjectName("Link")
+        self.open_project_btn.setVisible(fixed_site_id is None and not picker)
+        pb.addWidget(self.open_project_btn)
+        self.project_bar.setVisible(False)
+        self.project_summary = None
+        lay.addWidget(self.project_bar)
 
         # -- chips + count ------------------------------------------------------------------
         self.chips_box = QWidget()
@@ -399,6 +443,10 @@ class MaterialsView(QWidget):
         self.sel_export = button("Export", lambda: self.export("SELECTED"))
         self.sel_export.setVisible(self.can_export)
         sb.addWidget(self.sel_export)
+        # spec 38: Assign Project (to its material list - Required only, never stock)
+        self.sel_project = button("Assign Project...", lambda: self.add_to_project())
+        self.sel_project.setVisible(self.can_edit_project and fixed_site_id is None)
+        sb.addWidget(self.sel_project)
         self.sel_supplier = button("Change Supplier...", lambda: self.bulk_change("supplier_id"))
         self.sel_category = button("Change Category...", lambda: self.bulk_change("category_id"))
         for b in (self.sel_supplier, self.sel_category):
@@ -444,7 +492,8 @@ class MaterialsView(QWidget):
         self.table.customContextMenuRequested.connect(self._row_menu)
         lay.addWidget(self.table, 1)
 
-        self.visible = self._load_visible()
+        # two column choices (spec 22 / 23): the normal list, and the list while a project is chosen
+        self._visible = {"normal": self._load_visible("normal"), "project": self._load_visible("project")}
         self.widths: dict[str, int] = self._load_widths()
         self._apply_columns()
 
@@ -452,17 +501,37 @@ class MaterialsView(QWidget):
     def _qs(self) -> QSettings:
         return QSettings(QSettings.Format.IniFormat, QSettings.Scope.UserScope, "WMS", "WMS")
 
-    def _load_visible(self) -> set[str]:
-        default = PROJECT_DEFAULT if self.fixed_site_id else {c.key for c in COLUMNS if c.default}
+    @property
+    def mode(self) -> str:
+        return "project" if (self.fixed_site_id or self.filter.site_id) else "normal"
+
+    @property
+    def visible(self) -> set[str]:
+        return self._visible[self.mode]
+
+    def _columns_key(self, mode: str) -> str:
+        # a project's own tab has always used "<key>/columns"
+        return f"{self.settings_key}/columns" if mode == "normal" or self.fixed_site_id \
+            else f"{self.settings_key}/project_columns"
+
+    def _default_visible(self, mode: str) -> set[str]:
+        return set(PROJECT_DEFAULT) if mode == "project" else {c.key for c in COLUMNS if c.default and not c.project}
+
+    def _load_visible(self, mode: str) -> set[str]:
+        default = self._default_visible("project" if self.fixed_site_id else mode)
         try:
-            saved = self._qs().value(f"{self.settings_key}/columns")
+            saved = self._qs().value(self._columns_key(mode))
         except Exception:  # noqa: BLE001
             saved = None
         if isinstance(saved, str) and saved:
             keys = {k for k in saved.split(",") if k in BY_KEY}
             if keys:
+                if "required" in keys:
+                    keys.add("remaining")  # new in v1.13: show it to people who already chose columns
+                if mode == "project" and not keys & {c.key for c in COLUMNS if c.project}:
+                    return default
                 return keys | {SELECT}
-        return set(default)
+        return default
 
     def _load_widths(self) -> dict[str, int]:
         out = {}
@@ -479,7 +548,7 @@ class MaterialsView(QWidget):
     def _save_settings(self) -> None:
         try:
             qs = self._qs()
-            qs.setValue(f"{self.settings_key}/columns", ",".join(sorted(self.visible)))
+            qs.setValue(self._columns_key(self.mode), ",".join(sorted(self.visible)))
             qs.setValue(f"{self.settings_key}/widths", ",".join(f"{k}={w}" for k, w in self.widths.items()))
         except Exception:  # noqa: BLE001 - settings are a convenience only
             log.debug("Could not save table settings", exc_info=True)
@@ -508,6 +577,11 @@ class MaterialsView(QWidget):
 
     def _column_menu(self, pos) -> None:
         m = QMenu(self)
+        self._fill_column_menu(m)
+        m.exec(self.table.horizontalHeader().mapToGlobal(pos))
+
+    def _fill_column_menu(self, m: QMenu) -> None:
+        m.clear()
         m.addSection("Columns")
         for c in COLUMNS:
             if c.key == SELECT or (c.project and not self.filter.site_id):
@@ -518,7 +592,6 @@ class MaterialsView(QWidget):
             a.toggled.connect(lambda on, k=c.key: self.toggle_column(k, on))
         m.addSeparator()
         m.addAction("Reset columns", lambda: self.reset_columns())
-        m.exec(self.table.horizontalHeader().mapToGlobal(pos))
 
     def toggle_column(self, key: str, on: bool) -> None:
         (self.visible.add if on else self.visible.discard)(key)
@@ -526,7 +599,7 @@ class MaterialsView(QWidget):
         self._apply_columns()
 
     def reset_columns(self) -> None:
-        self.visible = set(PROJECT_DEFAULT if self.fixed_site_id else {c.key for c in COLUMNS if c.default})
+        self._visible[self.mode] = self._default_visible(self.mode)
         self.widths = {}
         self._save_settings()
         self._apply_columns()
@@ -645,15 +718,17 @@ class MaterialsView(QWidget):
         self.model.headerDataChanged.emit(Qt.Orientation.Horizontal, 0, max(len(self.model.cols) - 1, 0))
 
         def work():
-            return self.svc.count(f), self.svc.page(f, 0, PAGE_SIZE)
+            summary = self.svc.project_summary(f.site_id) if f.site_id and self.app.can(P.SITES_VIEW) else None
+            return self.svc.count(f), self.svc.page(f, 0, PAGE_SIZE), summary
 
         tasks.background(work, lambda res: self._loaded(gen, res), lambda exc: self._failed(gen, exc))
 
     def _loaded(self, gen: int, res) -> None:
         if gen != self._gen:
             return  # the person changed the filter meanwhile
-        total, rows = res
+        total, rows, summary = res
         self.loading = False
+        self.show_project_summary(summary)
         self.model.reset(rows, total)
         self.table.scrollToTop()
         self._update_count()
@@ -700,6 +775,25 @@ class MaterialsView(QWidget):
         else:
             text = f"Showing {n:,} {word}"
         self.count.setText(text)
+
+    def show_project_summary(self, s) -> None:
+        """The project banner (spec 23). The figures are for the whole project, whatever other
+        filters narrow the table."""
+        self.project_summary = s
+        self.project_bar.setVisible(s is not None)
+        if s is None:
+            return
+        self.project_title.setText(f"PROJECT: {s.site.name.upper()}  ({s.site.project_number})")
+        for key, text, _tip in PROJECT_FIGURES:
+            v = getattr(s, key)
+            self.project_figures[key].setText(f"{text}: <b>{v:,}</b>" if isinstance(v, int) else
+                                              f"{text}: <b>{format_value(v, QTY) or '0'}</b>")
+
+    def open_project(self) -> None:
+        site_id = self.filter.site_id
+        if site_id:
+            self.app.open_entity("SITE", site_id, self, tab="materials")
+            self.refresh()
 
     def _project_name(self) -> str:
         t = self.project.currentText().split("  [")[0]
