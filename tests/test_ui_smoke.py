@@ -741,7 +741,7 @@ def test_excel_import_wizard_and_exports(ui, sample, qtbot, tmp_path):
     dlg.next()  # unknown suppliers -> Resolve step
     assert dlg.stack.currentIndex() == 4 and dlg.sup_table.rowCount() == 1  # New Boards Ltd: Create / Match
     dlg.next()  # Import
-    assert dlg.stack.currentIndex() == 5, msgs
+    assert dlg.stack.currentIndex() == 6, msgs  # Report (Compare is only for a project import)
     assert "Pre-import backup successfully created" in dlg.done_text.text()
     assert "New materials: 1" in dlg.done_text.text() and "Updated: 1" in dlg.done_text.text()
     assert any(title == "Import from Excel" and "1 row(s) with errors will NOT be imported" in text

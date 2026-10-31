@@ -35,13 +35,16 @@ from wms.core.enums import ItemType
 from wms.core.exceptions import ValidationError
 from wms.services.excel_import import (
     ACTION_LABELS,
+    COMPARE_LABELS,
     CREATE,
     DUPLICATE,
     ERROR,
     FIELDS,
     MATCH,
+    MATCHED,
     NEW,
     PROJECT_ACTIONS,
+    REMOVED,
     SKIP,
     SKIPPED,
     SUPPLIER_ACTIONS,
@@ -55,14 +58,16 @@ from wms.services.excel_import import (
 from wms.ui.widgets import tasks
 from wms.ui.widgets.common import PickCombo, button, confirm, h, info, label, run, show_error
 
-FILE, SHEET, COLUMNS, PREVIEW, RESOLVE, REPORT = range(6)
-STEPS = ["1. File", "2. Sheet", "3. Columns", "4. Preview and checks", "5. Resolve", "6. Report"]
+FILE, SHEET, COLUMNS, PREVIEW, RESOLVE, COMPARE, REPORT = range(7)
+STEPS = ["1. File", "2. Sheet", "3. Columns", "4. Preview and matching", "5. Resolve", "6. Compare", "7. Report"]
 NOT_IN_FILE = "- not in the file -"
 IGNORE_COLUMN = "- ignore -"
 ERROR_BG = QBrush(QColor("#FDE2E1"))
 WARN_BG = QBrush(QColor("#FFF4D6"))
 STATUS_BG = {NEW: QBrush(QColor("#ECFDF3")), UPDATE: QBrush(QColor("#EFF8FF")), DUPLICATE: WARN_BG,
-             ERROR: ERROR_BG, SKIPPED: QBrush(QColor("#F2F4F7"))}
+             ERROR: ERROR_BG, SKIPPED: QBrush(QColor("#F2F4F7")), MATCHED: QBrush(QColor("#EFF8FF"))}
+CHANGE_BG = {"ADDED": QBrush(QColor("#ECFDF3")), "REMOVED": ERROR_BG, "QTY": WARN_BG, "DETAIL": WARN_BG,
+             "UNCHANGED": QBrush()}
 PROJECT_FIELDS = ("project", "required_qty")
 
 
@@ -79,8 +84,14 @@ class ExcelImportDialog(QDialog):
         self.sheet_info = None  # SheetInfo of the chosen sheet / header row
         self.plan = None
         self.result = None
-        self.setWindowTitle("Import project material list from Excel" if self.project_mode
-                            else "Import materials from Excel")
+        # spec 28: say exactly what this import changes - two different operations
+        site = app.services.sites.get(project_id) if project_id else None
+        self.project_name = site.name if site else ""
+        if self.project_mode:
+            self.setWindowTitle(f"Import {site.name} Project Material Requirements" if site
+                                else "Import Project Material Requirements")
+        else:
+            self.setWindowTitle("Import Material Master Data")
         self.resize(1180, 760)
         lay = QVBoxLayout(self)
         self.step_label = label("", "SectionTitle")
@@ -92,6 +103,7 @@ class ExcelImportDialog(QDialog):
         self.stack.addWidget(self._columns_page())
         self.stack.addWidget(self._preview_page())
         self.stack.addWidget(self._resolve_page())
+        self.stack.addWidget(self._compare_page())
         self.stack.addWidget(self._report_page())
         self.back_btn = button("< Back", self.back)
         self.next_btn = button("Next >", self.next, primary=True)
@@ -103,6 +115,17 @@ class ExcelImportDialog(QDialog):
     def _file_page(self, project_id: int | None) -> QWidget:
         w = QWidget()
         lay = QVBoxLayout(w)
+        if self.project_mode:
+            what = f"the {self.project_name} " if self.project_name else "a project's "
+            self.purpose = label(f"Updates {what}material requirements (Required quantities on the project's "
+                                 f"material list). It does NOT change stock, does NOT reserve and does NOT create "
+                                 f"Goods Out - physical stock moves only through warehouse transactions.",
+                                 "InfoBanner", wrap=True)
+        else:
+            self.purpose = label("Creates or updates material master data (code, name, product number, supplier, "
+                                 "category, photo...). It does NOT change stock and does NOT touch any project.",
+                                 "InfoBanner", wrap=True)
+        lay.addWidget(self.purpose)
         lay.addWidget(label(
             "Choose the Excel workbook (.xlsx). It is only read - the WMS never changes it. Photos can be pictures "
             "pasted into the sheet, pictures placed in cells, file paths, hyperlinks or just file names: for file "
@@ -123,8 +146,9 @@ class ExcelImportDialog(QDialog):
         lay.addLayout(form)
         if self.project_mode:
             lay.addWidget(label("Every row goes on this project's material list with its Required Quantity. "
-                                "Materials that are not in the WMS yet are created first. Nothing is reserved or "
-                                "issued - use Reserve / Goods Out for that.", "InfoBanner", wrap=True))
+                                "Materials that are not in the WMS yet are created first. Before anything is saved "
+                                "you see the file compared with the current list (added, removed, changed).",
+                                "Muted", wrap=True))
         lay.addWidget(label("Starting from scratch? Save a blank template with the right columns, fill it in, "
                             "then import it.", "Muted", wrap=True))
         lay.addLayout(h(button("Download Excel template...", self._template), None))
@@ -211,7 +235,7 @@ class ExcelImportDialog(QDialog):
         self.only_problems.toggled.connect(lambda _: self._fill_preview())
         self.status_filter = QComboBox()
         self.status_filter.addItem("All statuses", None)
-        for s in (NEW, UPDATE, DUPLICATE, ERROR, SKIPPED):
+        for s in (NEW, UPDATE, MATCHED, DUPLICATE, ERROR, SKIPPED):
             self.status_filter.addItem(s, s)
         self.status_filter.currentIndexChanged.connect(lambda _: self._fill_preview())
         lay.addLayout(h(self.only_problems, self.status_filter, None,
@@ -221,9 +245,10 @@ class ExcelImportDialog(QDialog):
         self.preview.setWordWrap(False)
         lay.addWidget(self.preview, 1)
         lay.addWidget(label("NEW = a material the WMS does not have.  UPDATE = an existing material changes as shown "
-                            "in 'Changes'.  DUPLICATE = already in the WMS (same code or product number) or twice "
-                            "in the file - nothing is overwritten unless you choose Update.  ERROR = not imported; "
-                            "fix it in Excel.  Use 'Apply to similar' to give every row like it the same choice.",
+                            "in 'Changes'.  DUPLICATE = already in the WMS (same code), or a POSSIBLE match (same "
+                            "product number or a similar code) - nothing is merged unless you choose Match, Update "
+                            "or New.  MATCHED = you chose to use the existing material.  ERROR = not imported; fix "
+                            "it in Excel.  Use 'Apply to similar' to give every row like it the same choice.",
                             "Muted", wrap=True))
         return w
 
@@ -238,6 +263,29 @@ class ExcelImportDialog(QDialog):
         lay.addWidget(label("Projects", "SectionTitle"))
         self.proj_table = QTableWidget()
         lay.addWidget(self.proj_table, 1)
+        return w
+
+    def _compare_page(self) -> QWidget:
+        """Compare with Excel (spec 33): the project's list now against the file, before anything is saved."""
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        self.compare_summary = label("", wrap=True)
+        lay.addWidget(self.compare_summary)
+        self.compare_filter = QComboBox()
+        self.compare_filter.addItem("All changes", None)
+        for k, text in COMPARE_LABELS.items():
+            self.compare_filter.addItem(text, k)
+        self.compare_filter.currentIndexChanged.connect(lambda _: self._fill_compare_table())
+        lay.addLayout(h(label("Show", "Muted"), self.compare_filter, None))
+        self.compare_table = QTableWidget()
+        self.compare_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.compare_table.setWordWrap(False)
+        lay.addWidget(self.compare_table, 1)
+        lay.addWidget(label("Ticked lines are applied when you press Import. Removed lines are NOT taken off the "
+                            "project unless you tick them - a material missing from a revised spreadsheet may "
+                            "simply be a mistake. Nothing here changes stock.", "Muted", wrap=True))
+        self.compare_lines = []
+        self.compare_ticks: dict[int, QCheckBox] = {}
         return w
 
     def _report_page(self) -> QWidget:
@@ -257,13 +305,18 @@ class ExcelImportDialog(QDialog):
         p = self.plan
         return p is not None and bool(p.suppliers or p.projects)
 
+    def _needs_compare(self) -> bool:
+        return self.project_mode and (self.plan is None or bool(self.plan.options.project_id))
+
     def _show(self, i: int) -> None:
         self.stack.setCurrentIndex(i)
-        visible = [n for n in range(len(STEPS)) if n != RESOLVE or self._needs_resolve() or i == RESOLVE]
+        visible = [n for n in range(len(STEPS)) if (n != RESOLVE or self._needs_resolve() or i == RESOLVE)
+                   and (n != COMPARE or self._needs_compare())]
         self.step_label.setText("   ".join(f"[{STEPS[n]}]" if n == i else STEPS[n] for n in visible))
         self.back_btn.setEnabled(0 < i < REPORT)
         self.next_btn.setVisible(i < REPORT)
-        last = i == RESOLVE or (i == PREVIEW and not self._needs_resolve())
+        last = i == COMPARE or (not self._needs_compare()
+                                and (i == RESOLVE or (i == PREVIEW and not self._needs_resolve())))
         self.next_btn.setText("Import" if last else "Next >")
         self.close_btn.setText("Done" if i == REPORT else "Cancel")
 
@@ -271,6 +324,10 @@ class ExcelImportDialog(QDialog):
         i = self.stack.currentIndex()
         if i == RESOLVE:
             self._reprepare()
+        if i == COMPARE:
+            self._apply_compare_ticks()
+            self._show(RESOLVE if self._needs_resolve() else PREVIEW)
+            return
         self._show(max(i - 1, 0))
 
     def next(self) -> None:
@@ -286,10 +343,20 @@ class ExcelImportDialog(QDialog):
             if self._needs_resolve():
                 self._fill_resolve()
                 self._show(RESOLVE)
+            elif self._needs_compare():
+                if self.fill_compare():
+                    self._show(COMPARE)
             elif self._import():
                 self._show(REPORT)
         elif i == RESOLVE:
             self._reprepare()
+            if self._needs_compare():
+                if self.fill_compare():
+                    self._show(COMPARE)
+            elif self._import():
+                self._show(REPORT)
+        elif i == COMPARE:
+            self._apply_compare_ticks()
             if self._import():
                 self._show(REPORT)
 
@@ -516,7 +583,7 @@ class ExcelImportDialog(QDialog):
         combo = QComboBox()
         for a in choices:
             text = ACTION_LABELS[a]
-            if a == CREATE and r.match_kind == "PRODUCT_NO":
+            if a == CREATE and r.match_kind in ("PRODUCT_NO", "SIMILAR_CODE"):
                 text = "New anyway"
             combo.addItem(text, a)
         combo.setCurrentIndex(max(combo.findData(r.action), 0))
@@ -653,12 +720,89 @@ class ExcelImportDialog(QDialog):
                 return False
         return True
 
+    # -- step 6: compare with the current project list -----------------------------------------
+    def fill_compare(self) -> bool:
+        self.plan.excluded = set()
+        self.plan.remove_ids = []
+        lines = run(self, self.svc.compare_project, self.plan)
+        if lines is None:
+            return False
+        self.compare_lines = lines
+        self.compare_ticks = {}
+        for n, c in enumerate(lines):
+            box = QCheckBox()
+            # Added / changed lines apply unless unticked; removals only when ticked (spec 33)
+            box.setChecked(c.change not in (REMOVED, "UNCHANGED"))
+            box.setEnabled(c.change != "UNCHANGED")
+            box.toggled.connect(lambda _=False: self._compare_counts())
+            self.compare_ticks[n] = box
+        self._fill_compare_table()
+        return True
+
+    def _fill_compare_table(self) -> None:
+        want = self.compare_filter.currentData()
+        shown = [(n, c) for n, c in enumerate(self.compare_lines) if want is None or c.change == want]
+        heads = ["Apply", "Change", "Code", "Material", "Current", "New file", "Difference", "Details"]
+        t = self.compare_table
+        for r in range(t.rowCount()):  # keep the check boxes alive: they are reused
+            w = t.cellWidget(r, 0)
+            if w is not None:
+                w.setParent(None)
+        t.clear()
+        t.setColumnCount(len(heads))
+        t.setHorizontalHeaderLabels(heads)
+        t.setRowCount(len(shown))
+
+        def qty(v):
+            return "" if v is None else format(v.normalize(), "f")
+
+        for row, (n, c) in enumerate(shown):
+            diff = c.difference
+            cells = ["", c.label, c.code, c.name, qty(c.current), qty(c.new),
+                     "" if diff is None or diff == 0 else (f"+{qty(diff)}" if diff > 0 else qty(diff)), c.details]
+            for col, text in enumerate(cells):
+                item = QTableWidgetItem(text)
+                if col == 1:
+                    item.setBackground(CHANGE_BG[c.change])
+                if text and len(text) > 20:
+                    item.setToolTip(text)
+                t.setItem(row, col, item)
+            t.setCellWidget(row, 0, self.compare_ticks[n])
+        t.resizeColumnsToContents()
+        t.setColumnWidth(3, min(max(t.columnWidth(3), 160), 320))
+        t.horizontalHeader().setSectionResizeMode(len(heads) - 1, QHeaderView.ResizeMode.Stretch)
+        self._compare_counts()
+
+    def _compare_counts(self) -> None:
+        counts = {k: 0 for k in COMPARE_LABELS}
+        for c in self.compare_lines:
+            counts[c.change] += 1
+        ticked = sum(1 for n, c in enumerate(self.compare_lines)
+                     if c.change != "UNCHANGED" and self.compare_ticks[n].isChecked())
+        self.compare_summary.setText(
+            f"Project {self.plan.project_label}: " + ",  ".join(f"{COMPARE_LABELS[k]} {v}" for k, v in counts.items())
+            + f".   {ticked} change(s) ticked to apply. Stock is not changed.")
+
+    def set_compare(self, change_code: str, apply: bool) -> None:
+        """Tick / untick the compare line for a material code (as the person would)."""
+        n = next(i for i, c in enumerate(self.compare_lines) if c.code.upper() == change_code.upper())
+        self.compare_ticks[n].setChecked(apply)
+
+    def _apply_compare_ticks(self) -> None:
+        if self.plan is None or not self.compare_lines:
+            return
+        self.plan.excluded = {c.excel_row for n, c in enumerate(self.compare_lines)
+                              if c.excel_row is not None and c.change not in (REMOVED, "UNCHANGED")
+                              and not self.compare_ticks[n].isChecked()}
+        self.plan.remove_ids = [c.product_id for n, c in enumerate(self.compare_lines)
+                                if c.change == REMOVED and self.compare_ticks[n].isChecked()]
+
     # -- import + report ----------------------------------------------------------------------
     def _import(self) -> bool:
         if not self._check_choices():
             return False
         c = self.plan.counts()
-        if not c["create"] and not c["update"] and not c["project_lines"]:
+        if not c["create"] and not c["update"] and not c["project_lines"] and not c["remove"]:
             show_error(self, ValidationError("Nothing to import: every row is skipped, a duplicate or has errors."),
                        "Import")
             return False
@@ -668,6 +812,9 @@ class ExcelImportDialog(QDialog):
                 f"{c['duplicate']} duplicate(s) and {c['skip']} row(s) skipped - nothing is overwritten for them.")
         if c["project_lines"]:
             text += f"\n{c['project_lines']} project material line(s) (Required Quantity - stock is not changed)."
+        if c["remove"]:
+            text += (f"\n{c['remove']} material(s) taken OFF the project list (not in the revised file). "
+                     f"Reservations and issued history stay.")
         if new_sup:
             text += "\n\nNew suppliers: " + ", ".join(sorted(new_sup))
         if new_proj:
@@ -699,6 +846,8 @@ class ExcelImportDialog(QDialog):
                  f"Photos imported: {result.photos}   ·   Photos missing: {result.photos_missing}"]
         if result.project_lines:
             lines.append(f"Project material lines: {result.project_lines} (stock not changed)")
+        if result.project_lines_removed:
+            lines.append(f"Taken off the project list: {result.project_lines_removed}")
         if result.suppliers_created:
             lines.append("New suppliers: " + ", ".join(result.suppliers_created))
         if result.projects_created:

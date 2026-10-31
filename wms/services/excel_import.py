@@ -27,17 +27,27 @@ from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 
 from wms.core.enums import CLOSED_SITE_STATUSES, EntityType, ItemType, SiteStatus
 from wms.core.exceptions import ValidationError, WMSError
 from wms.core.numbers import ZERO
 from wms.core.permissions import P
-from wms.db.models import Attachment, Bin, Category, Product, SavedSearch, Site, Supplier, Unit
+from wms.db.models import (
+    Attachment,
+    Bin,
+    Category,
+    Product,
+    ProjectMaterial,
+    SavedSearch,
+    Site,
+    Supplier,
+    Unit,
+)
 from wms.services import audit
 from wms.services.attachments import PHOTO_EXT, AttachmentService, StagedFile
 from wms.services.base import BaseService, normalise_code
-from wms.services.products import ProductService
+from wms.services.products import ProductService, code_key
 
 # --- what can be imported ------------------------------------------------------------------
 
@@ -72,10 +82,16 @@ REQUIRED = ("internal_code", "name")
 QTY_FIELDS = ("min_stock", "reorder_level", "reorder_qty")
 
 CREATE, UPDATE, SKIP = "CREATE", "UPDATE", "SKIP"
-ACTION_LABELS = {CREATE: "New", UPDATE: "Update existing", SKIP: "Skip"}
+#: LINK = "Match": use the suggested existing material as it is (UI refactor spec 31) - on a project
+#: import its Required quantity goes on that material; nothing about the material changes
+LINK = "LINK"
+ACTION_LABELS = {CREATE: "New", UPDATE: "Update existing", SKIP: "Skip", LINK: "Match (use existing)"}
+#: how an existing material was found: CODE is certain; the others are suggestions the person decides
+UNCERTAIN = ("PRODUCT_NO", "SIMILAR_CODE")
 
 #: what the preview shows per row (spec section 30)
 NEW, DUPLICATE, ERROR, SKIPPED = "NEW", "DUPLICATE", "ERROR", "SKIPPED"
+MATCHED = "MATCHED"  # a suggested existing material the person chose to use
 STATUS_LABELS = {NEW: "NEW", UPDATE: "UPDATE", DUPLICATE: "DUPLICATE", ERROR: "ERROR", SKIPPED: "SKIPPED"}
 
 #: how an unknown supplier / project in the file is resolved (spec sections 35, 37)
@@ -191,6 +207,8 @@ class ImportRow:
             return NEW
         if self.action == UPDATE:
             return UPDATE
+        if self.action == LINK:
+            return MATCHED
         if self.existing_id is not None and self.match_kind is not None and not self.archived:
             return DUPLICATE
         return SKIPPED
@@ -246,29 +264,42 @@ class ImportPlan:
     suppliers: dict[str, SupplierChoice] = field(default_factory=dict)  # supplier_key -> choice
     projects: dict[str, ProjectChoice] = field(default_factory=dict)  # upper text -> choice
     project_label: str = ""  # "Import into project" target
+    #: Compare with Excel (spec 33): rows the person unticked, and list lines to take off the project
+    excluded: set[int] = field(default_factory=set)  # Excel row numbers
+    remove_ids: list[int] = field(default_factory=list)  # product ids (project import only)
+
+    @property
+    def has_project(self) -> bool:
+        return bool(self.options.project_id) or "project" in self.options.mapping
 
     def skipped_by_project(self, r: ImportRow) -> bool:
         c = self.projects.get(r.project_key) if r.project_key else None
         return c is not None and c.action == SKIP_ROW
 
-    def links_project(self, r: ImportRow) -> bool:
+    def links_project(self, r: ImportRow, respect_excluded: bool = True) -> bool:
         """The row puts its material on a project's list."""
-        if not r.ok or r.duplicate_of is not None or r.required is None or self.skipped_by_project(r):
+        if not r.ok or r.duplicate_of is not None or r.required is None or self.skipped_by_project(r) \
+                or (respect_excluded and r.row in self.excluded):
             return False
+        if r.match_kind in UNCERTAIN:
+            # a suggested match is used only when the person said so (Match / Update / New)
+            material = r.action in (LINK, UPDATE, CREATE)
+        else:
+            material = r.action != SKIP or r.existing_id is not None
         if self.options.project_id:
-            return r.action != SKIP or r.existing_id is not None
+            return material
         c = self.projects.get(r.project_key) if r.project_key else None
-        return c is not None and c.action in (MATCH, CREATE) and (r.action != SKIP or r.existing_id is not None)
+        return c is not None and c.action in (MATCH, CREATE) and material
 
     @property
     def to_import(self) -> list[ImportRow]:
         """Rows that change something: a new / updated material, or a project list line."""
         return [r for r in self.rows if r.ok and r.duplicate_of is None and not self.skipped_by_project(r)
-                and (r.action in (CREATE, UPDATE) or self.links_project(r))]
+                and r.row not in self.excluded and (r.action in (CREATE, UPDATE) or self.links_project(r))]
 
     def counts(self) -> dict[str, int]:
         rows = [r for r in self.rows if not self.skipped_by_project(r)]
-        live = [r for r in rows if r.ok and r.action in (CREATE, UPDATE)]
+        live = [r for r in rows if r.ok and r.action in (CREATE, UPDATE) and r.row not in self.excluded]
         return {"rows": len(self.rows), "create": sum(1 for r in live if r.action == CREATE),
                 "update": sum(1 for r in live if r.action == UPDATE),
                 "duplicate": sum(1 for r in rows if r.status == DUPLICATE),
@@ -276,7 +307,9 @@ class ImportPlan:
                 "errors": sum(1 for r in rows if not r.ok),
                 "photos": sum(1 for r in live if r.photo is not None),
                 "photos_missing": sum(1 for r in rows if r.photo_missing),
-                "project_lines": sum(1 for r in rows if self.links_project(r))}
+                "project_lines": sum(1 for r in rows if self.links_project(r)),
+                "matched": sum(1 for r in rows if r.ok and r.action == LINK),
+                "remove": len(self.remove_ids)}
 
     def summary(self) -> str:
         c = self.counts()
@@ -298,15 +331,44 @@ class ImportPlan:
                 n += 1
         return n
 
-    @staticmethod
-    def choices(r: ImportRow) -> list[str]:
+    def choices(self, r: ImportRow) -> list[str]:
         if not r.ok or r.duplicate_of is not None or r.archived:
             return [SKIP]
         if r.match_kind == "CODE":
             return [UPDATE, SKIP]
-        if r.match_kind == "PRODUCT_NO":
-            return [SKIP, UPDATE, CREATE]
+        if r.match_kind in UNCERTAIN:
+            # spec 31: [Match] [Create New] [Skip] - and Update when the file should correct it
+            return [SKIP, LINK, UPDATE, CREATE] if self.has_project else [SKIP, UPDATE, CREATE]
         return [CREATE, SKIP]
+
+
+ADDED, REMOVED, QTY_CHANGED, DETAIL_CHANGED, UNCHANGED = "ADDED", "REMOVED", "QTY", "DETAIL", "UNCHANGED"
+COMPARE_LABELS = {ADDED: "Added", REMOVED: "Removed", QTY_CHANGED: "Quantity changed",
+                  DETAIL_CHANGED: "Detail changed", UNCHANGED: "Unchanged"}
+
+
+@dataclass
+class CompareLine:
+    """One line of "Compare with Excel": the project's current list against the revised file (spec 33)."""
+
+    change: str  # ADDED / REMOVED / QTY / DETAIL / UNCHANGED
+    code: str
+    name: str
+    current: Decimal | None  # Required on the project now (None = not on the list)
+    new: Decimal | None  # Required in the file (None = not in the file)
+    excel_row: int | None = None
+    product_id: int | None = None
+    details: str = ""
+
+    @property
+    def label(self) -> str:
+        return COMPARE_LABELS[self.change]
+
+    @property
+    def difference(self) -> Decimal | None:
+        if self.current is None and self.new is None:
+            return None
+        return (self.new or ZERO) - (self.current or ZERO)
 
 
 @dataclass
@@ -324,6 +386,7 @@ class ImportResult:
     photos_missing: int = 0
     project_lines: int = 0
     projects_created: list[str] = field(default_factory=list)
+    project_lines_removed: int = 0
     total_rows: int = 0
 
 
@@ -653,6 +716,47 @@ class ExcelImportService(BaseService):
                     r.action = old.action
         return plan
 
+    def compare_project(self, plan: ImportPlan) -> list[CompareLine]:
+        """Compare the project's current material list with the prepared file (nothing is changed).
+
+        ADDED - in the file, not on the list; QUANTITY CHANGED - Required differs; DETAIL CHANGED -
+        the material itself would be updated; UNCHANGED; REMOVED - on the list, not in the file at all
+        (a row that is in the file but skipped or wrong is never reported as removed)."""
+        site_id = plan.options.project_id
+        if not site_id:
+            raise ValidationError("Compare with Excel needs the project to import into.")
+        self.require(P.SITES_VIEW)
+        with self.db.read_session() as s:
+            current = {pm.product_id: (pm.required_qty, p) for pm, p in s.execute(
+                select(ProjectMaterial, Product).join(Product, Product.id == ProjectMaterial.product_id)
+                .where(ProjectMaterial.site_id == site_id).order_by(Product.internal_code))}
+            in_file = {r.existing_id for r in plan.rows if r.existing_id}
+            codes = {code_key(r.code) for r in plan.rows if r.code}
+            out: list[CompareLine] = []
+            for r in plan.rows:
+                if not plan.links_project(r, respect_excluded=False):
+                    continue
+                pid = None if r.action == CREATE else r.existing_id
+                name = r.values.get("name", "")
+                if pid in current:
+                    cur, p = current[pid]
+                    if r.action == UPDATE and r.changes:
+                        change, details = DETAIL_CHANGED, r.changes_text
+                    elif cur != r.required:
+                        change, details = QTY_CHANGED, ""
+                    else:
+                        change, details = UNCHANGED, ""
+                    out.append(CompareLine(change, p.internal_code, p.name, cur, r.required, r.row, pid, details))
+                else:
+                    details = {CREATE: "new material", LINK: f"matched to {r.existing_label}"}.get(r.action, "")
+                    out.append(CompareLine(ADDED, r.code, name, None, r.required, r.row, pid, details))
+            for pid, (cur, p) in current.items():
+                if pid not in in_file and code_key(p.internal_code) not in codes:
+                    out.append(CompareLine(REMOVED, p.internal_code, p.name, cur, None, None, pid,
+                                           "not in the revised file"))
+        order = list(COMPARE_LABELS)
+        return sorted(out, key=lambda c: (order.index(c.change), c.code))
+
     def _photo_for(self, r: ImportRow, cells, photo_col, floating, in_cell, workbook: Path,
                    index: PhotoFolder) -> PhotoSource | None:
         # 1. a picture placed in the photo cell, or floating over that row
@@ -719,9 +823,11 @@ class ExcelImportService(BaseService):
             for x in {x.id: x for x in suppliers.values()}.values():
                 by_key.setdefault(supplier_key(x.name), []).append(x)
             by_product_no: dict[str, list[Product]] = {}
+            by_code_key: dict[str, list[Product]] = {}
             for p in existing.values():
                 if p.supplier_code:
                     by_product_no.setdefault(p.supplier_code.upper(), []).append(p)
+                by_code_key.setdefault(code_key(p.internal_code), []).append(p)
             target = None
             if o.project_id:
                 target = s.get(Site, o.project_id)
@@ -853,6 +959,12 @@ class ExcelImportService(BaseService):
                              if sup is None or p.supplier_id in (None, sup.id)]
                     if len(twins) == 1:
                         match, kind = twins[0], "PRODUCT_NO"
+                if match is None and code:
+                    # 'H3311 ST10' in the file, 'H3311-ST10' in the WMS: probably the same material, but
+                    # only a suggestion - never merged without the person's choice (spec 31)
+                    similar = [p for p in by_code_key.get(code_key(code), []) if p.internal_code.upper() != code]
+                    if len(similar) == 1:
+                        match, kind = similar[0], "SIMILAR_CODE"
                 if match is not None:
                     r.existing_id = match.id
                     r.match_kind = kind
@@ -860,12 +972,17 @@ class ExcelImportService(BaseService):
                     r.changes = self._changes(match, v, o, sup)
                     if kind == "PRODUCT_NO":
                         r.warnings.append(f"same product number as {match.internal_code} - possible duplicate "
-                                          f"(choose Update to change {match.internal_code}, or New to add it anyway)")
+                                          f"(choose {'Match to use it, ' if plan.has_project else ''}Update to "
+                                          f"change {match.internal_code}, or New to add it anyway)")
+                    elif kind == "SIMILAR_CODE":
+                        r.warnings.append(f"possible existing material {match.internal_code} - {match.name} "
+                                          f"(choose {'Match to use it, ' if plan.has_project else ''}Update to "
+                                          f"change it, or New to create a separate material)")
                     if not match.is_active:
                         r.action = SKIP
                         r.warnings.append(f"{match.internal_code} exists but was removed from active use - "
                                           f"restore it first to update it")
-                    elif kind == "PRODUCT_NO":
+                    elif kind in UNCERTAIN:
                         r.action = SKIP
                     else:
                         r.action = o.on_existing if o.on_existing in (SKIP, UPDATE) else SKIP
@@ -941,7 +1058,7 @@ class ExcelImportService(BaseService):
         if o.project_id or not (v.get("project") or "").strip():
             if raw and not o.project_id and "project" not in o.mapping:
                 r.warnings.append("Required Quantity ignored: no project (map the Project column or use "
-                                  "Import Project Material List)")
+                                  "Import Project Material Requirements)")
             return
         text = v["project"].strip()
         key = text.upper()
@@ -976,7 +1093,7 @@ class ExcelImportService(BaseService):
         transaction is rolled back - nothing is imported."""
         self.require(P.PRODUCTS_EDIT)
         rows = plan.to_import
-        if not rows:
+        if not rows and not (plan.remove_ids and plan.options.project_id):
             raise ValidationError("Nothing to import: every row is skipped or has errors.")
         for r in rows:
             if r.action == UPDATE and r.existing_id is None:
@@ -986,7 +1103,7 @@ class ExcelImportService(BaseService):
                 raise ValidationError(f"Row {r.row} ({r.code}): the code is already in the WMS - choose Update "
                                       f"or Skip. Check the preview again.")
         links = [r for r in rows if plan.links_project(r)]
-        if links:
+        if links or plan.remove_ids:
             self.require(P.SITES_EDIT)
         with_photos = [r for r in rows if r.photo is not None and r.action in (CREATE, UPDATE)]
         if with_photos:
@@ -1029,7 +1146,7 @@ class ExcelImportService(BaseService):
                     if progress is not None and n % 25 == 1 and progress(n - 1, total) is False:
                         raise ImportCancelled()
                     v = r.values
-                    p_id = r.existing_id
+                    p_id = None if r.action == CREATE else r.existing_id
                     if r.action in (CREATE, UPDATE):
                         try:
                             data = self._product_data(s, r, plan, suppliers, sup_new, categories, cat_new)
@@ -1067,6 +1184,19 @@ class ExcelImportService(BaseService):
                     except WMSError as exc:
                         raise ValidationError(f"{exc.message} Nothing was imported.") from exc
                     lines += len({pid for pid, _ in items})
+                removed = 0
+                if plan.remove_ids and plan.options.project_id:
+                    # Compare with Excel: lines the person confirmed to take off (spec 33). Only the
+                    # Required quantity goes; reservations and issued history stay.
+                    res = s.execute(delete(ProjectMaterial).where(
+                        ProjectMaterial.site_id == plan.options.project_id,
+                        ProjectMaterial.product_id.in_(plan.remove_ids)))
+                    removed = res.rowcount or 0
+                    site = s.get(Site, plan.options.project_id)
+                    audit.record(s, self.ctx, "PROJECT_MATERIALS_REMOVED", EntityType.SITE.value, site.id,
+                                 site.project_number, f"{removed} material(s) taken off the project list "
+                                 f"(not in revised Excel {plan.source.name})",
+                                 old={"products": sorted(plan.remove_ids)[:500]})
                 if progress is not None and progress(total, total) is False:
                     raise ImportCancelled()
                 counts = plan.counts()
@@ -1077,7 +1207,8 @@ class ExcelImportService(BaseService):
                              new={"created": created, "updated": updated, "skipped": counts["skip"],
                                   "errors": counts["errors"], "photos": photos, "backup": backup.name,
                                   "suppliers_created": sorted(sup_new), "categories_created": sorted(cat_new),
-                                  "project_lines": lines, "projects_created": sorted(site_new)})
+                                  "project_lines": lines, "projects_created": sorted(site_new),
+                                  "project_lines_removed": removed})
         except BaseException:
             att.discard(list(staged.values()))
             raise
@@ -1087,7 +1218,7 @@ class ExcelImportService(BaseService):
                             backup, photo_problems, duplicates=c["duplicate"],
                             photos_missing=c["photos_missing"] + len(photo_problems), project_lines=lines,
                             projects_created=sorted(f"{x.project_number} - {x.name}" for x in site_new.values()),
-                            total_rows=c["rows"])
+                            total_rows=c["rows"], project_lines_removed=removed)
 
     def _project_for(self, s, plan: ImportPlan, r: ImportRow, site_new: dict[str, Site]) -> int:
         if plan.options.project_id:
