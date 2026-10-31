@@ -91,6 +91,11 @@ class GoodsOutPage(Page):
                                          is self.history else None)
         self.body.addWidget(self.tabs, 1)
 
+    def apply_preset(self, preset: dict) -> None:
+        """Show issued documents (Dashboard "Goods Out today"): the History tab with these filters."""
+        self.tabs.setCurrentWidget(self.history)
+        self.history.apply_preset(preset)
+
     def _entry_tab(self) -> QWidget:
         w = QWidget()
         lay = QVBoxLayout(w)

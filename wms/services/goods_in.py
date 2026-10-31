@@ -7,14 +7,14 @@ from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import exists, func, or_, select
 from sqlalchemy.orm import selectinload
 
 from wms.core.enums import DocumentStatus, EntityType, MovementType
 from wms.core.exceptions import DuplicateError, NotFoundError, ValidationError
 from wms.core.numbers import ZERO, to_money, to_qty, utcnow
 from wms.core.permissions import P
-from wms.db.models import Bin, DeliveryNote, DeliveryNoteLine, Product, StockMovement, Supplier
+from wms.db.models import Attachment, Bin, DeliveryNote, DeliveryNoteLine, Product, StockMovement, Supplier
 from wms.services import audit
 from wms.services.attachments import AttachmentService
 from wms.services.base import BaseService, check_client_token, clean_str, like_pattern
@@ -227,8 +227,9 @@ class GoodsInService(BaseService):
 
     def search(self, text: str | None = None, supplier_id: int | None = None, date_from: date | None = None,
                date_to: date | None = None, status: str | None = None, product_id: int | None = None,
-               limit: int = 1000) -> list[tuple[DeliveryNote, int, Decimal]]:
-        """Returns (delivery note, line count, total value)."""
+               limit: int = 1000, scan: str | None = None) -> list[tuple[DeliveryNote, int, Decimal]]:
+        """Returns (delivery note, line count, total value). ``scan``: "MISSING" = no scan / photo
+        attached, "PRESENT" = at least one (the Dashboard's "missing scan" counter opens this)."""
         q = (
             select(DeliveryNote, func.count(DeliveryNoteLine.id))
             .join(DeliveryNoteLine, isouter=True)
@@ -246,6 +247,10 @@ class GoodsInService(BaseService):
             q = q.where(DeliveryNote.delivery_date <= date_to)
         if status:
             q = q.where(DeliveryNote.status == status)
+        if scan in ("MISSING", "PRESENT"):
+            has = exists().where(Attachment.entity_type == EntityType.DELIVERY_NOTE.value,
+                                 Attachment.entity_id == DeliveryNote.id, Attachment.is_deleted.is_(False))
+            q = q.where(~has if scan == "MISSING" else has)
         if product_id:
             q = q.where(DeliveryNote.id.in_(select(DeliveryNoteLine.delivery_note_id)
                                             .where(DeliveryNoteLine.product_id == product_id)))
