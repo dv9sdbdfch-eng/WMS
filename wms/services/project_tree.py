@@ -1,4 +1,4 @@
-"""Projects module: Manager -> Project -> Unit -> Materials (v1.15).
+"""Projects module: Manager -> Project -> [Block -> Level ->] Unit -> Materials (v1.15).
 
 The tree on screen is only a view of these tables; every change is one transaction here, written
 to the audit trail, or nothing changes at all.
@@ -29,7 +29,7 @@ from wms.core.enums import CLOSED_SITE_STATUSES, EntityType, SiteStatus
 from wms.core.exceptions import DuplicateError, NotFoundError, ValidationError
 from wms.core.numbers import ZERO, to_qty, utcnow
 from wms.core.permissions import P
-from wms.db.models import Manager, Product, ProjectUnit, Site, Unit, UnitMaterial
+from wms.db.models import Manager, Product, ProjectBlock, ProjectLevel, ProjectUnit, Site, Unit, UnitMaterial
 from wms.services import audit
 from wms.services.base import BaseService, clean_code, clean_str, like_pattern
 from wms.services.project_demand import line_total
@@ -39,6 +39,9 @@ UNASSIGNED = -1
 MANAGER_FIELDS = ("name", "email", "phone", "notes", "is_active")
 UNIT_FIELDS = ("unit_code", "name", "quantity", "notes")
 MATERIAL_FIELDS = ("quantity_per_unit", "vpk_code", "notes")
+GROUP_FIELDS = ("code", "name", "notes")
+#: ``units(level_id=...)``: every unit of the project / only units directly in the project
+ALL_UNITS, DIRECT = "all", None
 _CHUNK = 900  # SQLite parameter limit
 
 
@@ -66,7 +69,13 @@ class ProjectNode:
     customer: str | None
     notes: str | None
     version: int
-    units: int = 0
+    units: int = 0  # every unit of the project, wherever it sits
+    blocks: int = 0
+    direct_units: int = 0  # units directly in the project (not on a level)
+
+    @property
+    def has_children(self) -> bool:
+        return bool(self.blocks or self.direct_units)
 
     @property
     def status_label(self) -> str:
@@ -87,6 +96,45 @@ class UnitNode:
     sort_order: int
     notes: str | None
     materials: int = 0
+    level_id: int | None = None
+
+    @property
+    def parent_key(self) -> str:
+        """The tree row that holds this unit: its level, or the project itself."""
+        return f"V:{self.level_id}" if self.level_id else f"P:{self.site_id}"
+
+    @property
+    def label(self) -> str:
+        return f"{self.name} {self.code}" if self.code and self.code not in self.name else self.name
+
+
+@dataclass
+class BlockNode:
+    id: int
+    site_id: int
+    code: str | None
+    name: str
+    sort_order: int
+    notes: str | None
+    levels: int = 0
+    units: int = 0
+
+    @property
+    def label(self) -> str:
+        return f"{self.name} {self.code}" if self.code and self.code not in self.name else self.name
+
+
+@dataclass
+class LevelNode:
+    id: int
+    block_id: int
+    site_id: int
+    code: str | None
+    name: str
+    sort_order: int
+    notes: str | None
+    units: int = 0
+    block_name: str = ""
 
     @property
     def label(self) -> str:
@@ -124,17 +172,22 @@ class TreeMatches:
     text: str
     managers: set[int] = field(default_factory=set)  # the manager itself matched
     projects: set[int] = field(default_factory=set)  # the project itself matched
+    blocks: set[int] = field(default_factory=set)
+    levels: set[int] = field(default_factory=set)
     units: set[int] = field(default_factory=set)  # the unit itself matched
     materials: set[int] = field(default_factory=set)  # material lines that matched
     # branches to show: projects / units holding a match further down
     project_paths: set[int] = field(default_factory=set)
+    block_paths: set[int] = field(default_factory=set)
+    level_paths: set[int] = field(default_factory=set)
     unit_paths: set[int] = field(default_factory=set)
     manager_paths: set[int] = field(default_factory=set)
     unassigned_path: bool = False
 
     @property
     def total(self) -> int:
-        return len(self.managers) + len(self.projects) + len(self.units) + len(self.materials)
+        return (len(self.managers) + len(self.projects) + len(self.blocks) + len(self.levels) + len(self.units)
+                + len(self.materials))
 
 
 @dataclass
@@ -233,25 +286,29 @@ class ProjectTreeService(BaseService):
         """Projects of one manager (``UNASSIGNED``: without a manager; None: every project)."""
         self.require(P.SITES_VIEW)
         flt = flt or TreeFilter()
-        units = (select(ProjectUnit.site_id, func.count(ProjectUnit.id).label("n"))
+        units = (select(ProjectUnit.site_id, func.count(ProjectUnit.id).label("n"),
+                        func.count(ProjectUnit.id).filter(ProjectUnit.level_id.is_(None)).label("direct"))
                  .group_by(ProjectUnit.site_id).subquery())
-        q = (select(Site, func.coalesce(units.c.n, 0), Manager.name)
-             .outerjoin(units, units.c.site_id == Site.id).outerjoin(Manager, Manager.id == Site.manager_id)
+        blocks = (select(ProjectBlock.site_id, func.count(ProjectBlock.id).label("b"))
+                  .group_by(ProjectBlock.site_id).subquery())
+        q = (select(Site, func.coalesce(units.c.n, 0), Manager.name, func.coalesce(blocks.c.b, 0),
+                    func.coalesce(units.c.direct, 0))
+             .outerjoin(units, units.c.site_id == Site.id).outerjoin(blocks, blocks.c.site_id == Site.id)
+             .outerjoin(Manager, Manager.id == Site.manager_id)
              .where(*TreeFilter(manager_id, flt.site_id, flt.statuses).site_conditions())
              .order_by(Site.project_number))
         with self.db.read_session() as s:
             if ids is not None:
                 out = []
                 for chunk in _chunks(ids):
-                    out += [self._project_node(site, n, mname) for site, n, mname in
-                            s.execute(q.where(Site.id.in_(chunk)))]
+                    out += [self._project_node(*row) for row in s.execute(q.where(Site.id.in_(chunk)))]
                 return sorted(out, key=lambda p: p.code)
-            return [self._project_node(site, n, mname) for site, n, mname in s.execute(q)]
+            return [self._project_node(*row) for row in s.execute(q)]
 
     @staticmethod
-    def _project_node(site: Site, n: int, manager_name: str | None) -> ProjectNode:
+    def _project_node(site: Site, n: int, manager_name: str | None, blocks: int, direct: int) -> ProjectNode:
         return ProjectNode(site.id, site.project_number, site.name, site.status, site.manager_id,
-                           manager_name, site.customer, site.notes, site.version, n)
+                           manager_name, site.customer, site.notes, site.version, n, blocks, direct)
 
     def project(self, site_id: int) -> ProjectNode:
         found = self.projects(None, ids=[site_id])
@@ -267,17 +324,88 @@ class ProjectTreeService(BaseService):
                 select(Site.id, Site.project_number, Site.name)
                 .where(Site.status != SiteStatus.ARCHIVED.value).order_by(Site.project_number))]
 
-    def units(self, site_id: int, ids: Iterable[int] | None = None) -> list[UnitNode]:
+    def units(self, site_id: int | None, ids: Iterable[int] | None = None,
+              level_id: int | str | None = ALL_UNITS) -> list[UnitNode]:
+        """Units of a project: all of them (default), only those directly in the project
+        (``level_id=DIRECT``) or those on one level (``level_id=<id>``, ``site_id`` may be None)."""
         self.require(P.SITES_VIEW)
         mats = (select(UnitMaterial.unit_id, func.count(UnitMaterial.id).label("n"))
                 .group_by(UnitMaterial.unit_id).subquery())
         q = (select(ProjectUnit, func.coalesce(mats.c.n, 0)).outerjoin(mats, mats.c.unit_id == ProjectUnit.id)
-             .where(ProjectUnit.site_id == site_id).order_by(ProjectUnit.sort_order, ProjectUnit.id))
+             .order_by(ProjectUnit.sort_order, ProjectUnit.id))
+        if site_id is not None:
+            q = q.where(ProjectUnit.site_id == site_id)
+        if level_id is DIRECT:
+            q = q.where(ProjectUnit.level_id.is_(None))
+        elif level_id != ALL_UNITS:
+            q = q.where(ProjectUnit.level_id == level_id)
         if ids is not None:
             q = q.where(ProjectUnit.id.in_(list(ids)))
         with self.db.read_session() as s:
-            return [UnitNode(u.id, u.site_id, u.unit_code, u.name, u.quantity, u.sort_order, u.notes, n)
-                    for u, n in s.execute(q)]
+            return [_unit_node(u, n) for u, n in s.execute(q)]
+
+    def blocks(self, site_id: int, ids: Iterable[int] | None = None) -> list[BlockNode]:
+        self.require(P.SITES_VIEW)
+        levels = (select(ProjectLevel.block_id, func.count(ProjectLevel.id).label("n"))
+                  .group_by(ProjectLevel.block_id).subquery())
+        units = (select(ProjectLevel.block_id, func.count(ProjectUnit.id).label("u"))
+                 .join(ProjectUnit, ProjectUnit.level_id == ProjectLevel.id).group_by(ProjectLevel.block_id).subquery())
+        q = (select(ProjectBlock, func.coalesce(levels.c.n, 0), func.coalesce(units.c.u, 0))
+             .outerjoin(levels, levels.c.block_id == ProjectBlock.id).outerjoin(units, units.c.block_id == ProjectBlock.id)
+             .where(ProjectBlock.site_id == site_id).order_by(ProjectBlock.sort_order, ProjectBlock.id))
+        if ids is not None:
+            q = q.where(ProjectBlock.id.in_(list(ids)))
+        with self.db.read_session() as s:
+            return [BlockNode(b.id, b.site_id, b.code, b.name, b.sort_order, b.notes, n, u) for b, n, u in s.execute(q)]
+
+    def block(self, block_id: int) -> BlockNode:
+        with self.db.read_session() as s:
+            b = s.get(ProjectBlock, block_id)
+            if b is None:
+                raise NotFoundError("Block not found.")
+            site_id = b.site_id
+        return self.blocks(site_id, ids=[block_id])[0]
+
+    def levels(self, block_id: int, ids: Iterable[int] | None = None) -> list[LevelNode]:
+        self.require(P.SITES_VIEW)
+        units = (select(ProjectUnit.level_id, func.count(ProjectUnit.id).label("u"))
+                 .where(ProjectUnit.level_id.is_not(None)).group_by(ProjectUnit.level_id).subquery())
+        q = (select(ProjectLevel, ProjectBlock.site_id, ProjectBlock.name, func.coalesce(units.c.u, 0))
+             .join(ProjectBlock, ProjectBlock.id == ProjectLevel.block_id)
+             .outerjoin(units, units.c.level_id == ProjectLevel.id)
+             .where(ProjectLevel.block_id == block_id).order_by(ProjectLevel.sort_order, ProjectLevel.id))
+        if ids is not None:
+            q = q.where(ProjectLevel.id.in_(list(ids)))
+        with self.db.read_session() as s:
+            return [LevelNode(lv.id, lv.block_id, sid, lv.code, lv.name, lv.sort_order, lv.notes, u, bname)
+                    for lv, sid, bname, u in s.execute(q)]
+
+    def level(self, level_id: int) -> LevelNode:
+        with self.db.read_session() as s:
+            lv = s.get(ProjectLevel, level_id)
+            if lv is None:
+                raise NotFoundError("Level not found.")
+            block_id = lv.block_id
+        return self.levels(block_id, ids=[level_id])[0]
+
+    def unit_places(self) -> list[tuple[str, int, int | None]]:
+        """Where a unit can be moved: (label, project id, level id or None) for every project that is
+        not archived - the project itself and each of its levels."""
+        self.require(P.SITES_VIEW)
+        with self.db.read_session() as s:
+            sites = list(s.execute(select(Site.id, Site.project_number, Site.name)
+                                   .where(Site.status != SiteStatus.ARCHIVED.value).order_by(Site.project_number)))
+            levels: dict[int, list] = {}
+            for sid, lid, bname, lname in s.execute(
+                    select(ProjectBlock.site_id, ProjectLevel.id, ProjectBlock.name, ProjectLevel.name)
+                    .join(ProjectBlock, ProjectBlock.id == ProjectLevel.block_id)
+                    .order_by(ProjectBlock.sort_order, ProjectBlock.id, ProjectLevel.sort_order, ProjectLevel.id)):
+                levels.setdefault(sid, []).append((lid, bname, lname))
+        out = []
+        for sid, code, name in sites:
+            out.append((f"{code} - {name}  (directly in the project)", sid, None))
+            out += [(f"{code} - {name}  /  {b}  /  {lv}", sid, lid) for lid, b, lv in levels.get(sid, [])]
+        return out
 
     def unit(self, unit_id: int) -> UnitNode:
         self.require(P.SITES_VIEW)
@@ -286,7 +414,7 @@ class ProjectTreeService(BaseService):
             if u is None:
                 raise NotFoundError("Unit not found.")
             n = s.scalar(select(func.count(UnitMaterial.id)).where(UnitMaterial.unit_id == unit_id)) or 0
-            return UnitNode(u.id, u.site_id, u.unit_code, u.name, u.quantity, u.sort_order, u.notes, n)
+            return _unit_node(u, n)
 
     def materials(self, unit_id: int, ids: Iterable[int] | None = None) -> list[MaterialNode]:
         self.require(P.SITES_VIEW)
@@ -354,25 +482,48 @@ class ProjectTreeService(BaseService):
                     or_(ilike(Site.name), ilike(Site.project_number)), *site_conds)):
                 res.projects.add(sid)
                 self._add_path(res, mid)
-            for uid, sid, mid in s.execute(
-                    select(ProjectUnit.id, Site.id, Site.manager_id).join(Site, Site.id == ProjectUnit.site_id)
-                    .where(or_(ilike(ProjectUnit.name), ilike(ProjectUnit.unit_code)), *site_conds)):
-                res.units.add(uid)
+            for bid, sid, mid in s.execute(
+                    select(ProjectBlock.id, Site.id, Site.manager_id).join(Site, Site.id == ProjectBlock.site_id)
+                    .where(or_(ilike(ProjectBlock.name), ilike(ProjectBlock.code)), *site_conds)):
+                res.blocks.add(bid)
                 res.project_paths.add(sid)
                 self._add_path(res, mid)
-            for lid, uid, sid, mid in s.execute(
-                    select(UnitMaterial.id, ProjectUnit.id, Site.id, Site.manager_id)
+            for vid, bid, sid, mid in s.execute(
+                    select(ProjectLevel.id, ProjectBlock.id, Site.id, Site.manager_id)
+                    .join(ProjectBlock, ProjectBlock.id == ProjectLevel.block_id)
+                    .join(Site, Site.id == ProjectBlock.site_id)
+                    .where(or_(ilike(ProjectLevel.name), ilike(ProjectLevel.code)), *site_conds)):
+                res.levels.add(vid)
+                res.block_paths.add(bid)
+                res.project_paths.add(sid)
+                self._add_path(res, mid)
+            unit_cols = (ProjectUnit.id, ProjectUnit.level_id, ProjectLevel.block_id, Site.id, Site.manager_id)
+            for uid, vid, bid, sid, mid in s.execute(
+                    select(*unit_cols).join(Site, Site.id == ProjectUnit.site_id)
+                    .outerjoin(ProjectLevel, ProjectLevel.id == ProjectUnit.level_id)
+                    .where(or_(ilike(ProjectUnit.name), ilike(ProjectUnit.unit_code)), *site_conds)):
+                res.units.add(uid)
+                self._add_unit_path(res, vid, bid, sid, mid)
+            for lid, uid, vid, bid, sid, mid in s.execute(
+                    select(UnitMaterial.id, *unit_cols)
                     .join(ProjectUnit, ProjectUnit.id == UnitMaterial.unit_id)
                     .join(Site, Site.id == ProjectUnit.site_id)
+                    .outerjoin(ProjectLevel, ProjectLevel.id == ProjectUnit.level_id)
                     .join(Product, Product.id == UnitMaterial.product_id)
                     .where(or_(ilike(Product.internal_code), ilike(Product.supplier_code), ilike(Product.name),
                                ilike(Product.description), ilike(Product.brand), ilike(UnitMaterial.vpk_code),
                                ilike(UnitMaterial.notes)), *site_conds)):
                 res.materials.add(lid)
                 res.unit_paths.add(uid)
-                res.project_paths.add(sid)
-                self._add_path(res, mid)
+                self._add_unit_path(res, vid, bid, sid, mid)
         return res
+
+    def _add_unit_path(self, res: TreeMatches, level_id, block_id, site_id, manager_id) -> None:
+        if level_id:
+            res.level_paths.add(level_id)
+            res.block_paths.add(block_id)
+        res.project_paths.add(site_id)
+        self._add_path(res, manager_id)
 
     @staticmethod
     def _add_path(res: TreeMatches, manager_id: int | None) -> None:
@@ -532,12 +683,29 @@ class ProjectTreeService(BaseService):
         return self.project(new_id)
 
     def _copy_units(self, s: Session, from_site: int, to_site: int) -> tuple[int, int]:
+        """Copy a project's blocks, levels, units and unit materials to another project."""
+        user_id = self.ctx.user.id if self.ctx.user else None
+        level_map: dict[int, int] = {}
+        for b in s.scalars(select(ProjectBlock).where(ProjectBlock.site_id == from_site)):
+            nb = ProjectBlock(site_id=to_site, code=b.code, name=b.name, sort_order=b.sort_order, notes=b.notes,
+                              created_by_id=user_id)
+            s.add(nb)
+            s.flush()
+            for lv in s.scalars(select(ProjectLevel).where(ProjectLevel.block_id == b.id)):
+                nl = ProjectLevel(block_id=nb.id, code=lv.code, name=lv.name, sort_order=lv.sort_order,
+                                  notes=lv.notes, created_by_id=user_id)
+                s.add(nl)
+                s.flush()
+                level_map[lv.id] = nl.id
+        return self._copy_unit_rows(s, select(ProjectUnit).where(ProjectUnit.site_id == from_site), to_site,
+                                    lambda u: level_map.get(u.level_id) if u.level_id else None)
+
+    def _copy_unit_rows(self, s: Session, query, to_site: int, level_of) -> tuple[int, int]:
         user_id = self.ctx.user.id if self.ctx.user else None
         units = lines = 0
-        for u in s.scalars(select(ProjectUnit).where(ProjectUnit.site_id == from_site)
-                           .order_by(ProjectUnit.sort_order, ProjectUnit.id)):
-            copy = ProjectUnit(site_id=to_site, unit_code=u.unit_code, name=u.name, quantity=u.quantity,
-                               sort_order=u.sort_order, notes=u.notes, created_by_id=user_id)
+        for u in list(s.scalars(query.order_by(ProjectUnit.sort_order, ProjectUnit.id))):
+            copy = ProjectUnit(site_id=to_site, level_id=level_of(u), unit_code=u.unit_code, name=u.name,
+                               quantity=u.quantity, sort_order=u.sort_order, notes=u.notes, created_by_id=user_id)
             s.add(copy)
             s.flush()
             lines += self._copy_lines(s, u.id, copy.id)
@@ -572,9 +740,14 @@ class ProjectTreeService(BaseService):
             raise ValidationError(f"Project {site.project_number} is archived: restore it before changing its units.")
         return site
 
-    def save_unit(self, unit_id: int | None, data: dict, site_id: int | None = None) -> UnitNode:
-        """Add a unit to a project (``site_id``) or change the fields given on an existing one."""
+    def save_unit(self, unit_id: int | None, data: dict, site_id: int | None = None,
+                  level_id: int | None = None) -> UnitNode:
+        """Add a unit to a project (``site_id``) or to a level of it (``level_id``), or change the
+        fields given on an existing unit."""
         self.require(P.SITES_EDIT)
+        if not unit_id and level_id is not None:
+            with self.db.read_session() as s:
+                site_id = _level_site(s, level_id)
         with self.db.session() as s:
             if unit_id:
                 u = s.get(ProjectUnit, unit_id)
@@ -586,9 +759,9 @@ class ProjectTreeService(BaseService):
                 if site_id is None:
                     raise ValidationError("Choose the project for the unit.")
                 site = self._editable_site(s, site_id)
-                order = (s.scalar(select(func.max(ProjectUnit.sort_order)).where(ProjectUnit.site_id == site_id))
+                order = (s.scalar(select(func.max(ProjectUnit.sort_order)).where(*_siblings(site_id, level_id)))
                          or 0) + 1
-                u = ProjectUnit(site_id=site_id, sort_order=order, quantity=Decimal(1),
+                u = ProjectUnit(site_id=site_id, level_id=level_id, sort_order=order, quantity=Decimal(1),
                                 created_by_id=self.ctx.user.id if self.ctx.user else None)
                 old = {}
                 if "name" not in data:
@@ -612,16 +785,17 @@ class ProjectTreeService(BaseService):
         return self.unit(saved)
 
     def duplicate_unit(self, unit_id: int) -> UnitNode:
-        """A copy of the unit (with its materials) straight after it in the same project."""
+        """A copy of the unit (with its materials) straight after it, in the same place."""
         self.require(P.SITES_EDIT)
         with self.db.session() as s:
             u = s.get(ProjectUnit, unit_id)
             if u is None:
                 raise NotFoundError("Unit not found.")
             site = self._editable_site(s, u.site_id)
-            rows = list(s.scalars(select(ProjectUnit).where(ProjectUnit.site_id == u.site_id)
+            rows = list(s.scalars(select(ProjectUnit).where(*_siblings(u.site_id, u.level_id))
                                   .order_by(ProjectUnit.sort_order, ProjectUnit.id)))
-            copy = ProjectUnit(site_id=u.site_id, unit_code=u.unit_code, name=f"{u.name} (copy)"[:200],
+            copy = ProjectUnit(site_id=u.site_id, level_id=u.level_id, unit_code=u.unit_code,
+                               name=f"{u.name} (copy)"[:200],
                                quantity=u.quantity, notes=u.notes,
                                created_by_id=self.ctx.user.id if self.ctx.user else None, sort_order=0)
             s.add(copy)
@@ -636,49 +810,229 @@ class ProjectTreeService(BaseService):
         return self.unit(saved)
 
     def move_unit(self, unit_id: int, delta: int) -> None:
-        """Move a unit up (-1) or down (+1) within its project."""
+        """Move a unit up (-1) or down (+1) among the units next to it (same level / project)."""
         self.require(P.SITES_EDIT)
         with self.db.session() as s:
             u = s.get(ProjectUnit, unit_id)
             if u is None:
                 raise NotFoundError("Unit not found.")
             self._editable_site(s, u.site_id)
-            rows = list(s.scalars(select(ProjectUnit).where(ProjectUnit.site_id == u.site_id)
+            rows = list(s.scalars(select(ProjectUnit).where(*_siblings(u.site_id, u.level_id))
                                   .order_by(ProjectUnit.sort_order, ProjectUnit.id)))
             _shift(rows, unit_id, delta, "Unit")
 
     def set_unit_position(self, unit_id: int, index: int) -> None:
-        """Put a unit at position ``index`` (0 = first) in its project - for drag and drop."""
+        """Put a unit at position ``index`` (0 = first) among its neighbours - for drag and drop."""
         self.require(P.SITES_EDIT)
         with self.db.session() as s:
             u = s.get(ProjectUnit, unit_id)
             if u is None:
                 raise NotFoundError("Unit not found.")
             self._editable_site(s, u.site_id)
-            rows = [r for r in s.scalars(select(ProjectUnit).where(ProjectUnit.site_id == u.site_id)
+            rows = [r for r in s.scalars(select(ProjectUnit).where(*_siblings(u.site_id, u.level_id))
                                          .order_by(ProjectUnit.sort_order, ProjectUnit.id)) if r.id != unit_id]
             rows.insert(max(0, min(index, len(rows))), u)
             for i, r in enumerate(rows, start=1):
                 r.sort_order = i
 
     def move_unit_to_project(self, unit_id: int, site_id: int) -> UnitNode:
-        """Move a unit (with its materials) to the end of another project."""
+        """Move a unit (with its materials) to the end of another project (directly in it)."""
+        return self.move_unit_to(unit_id, site_id, None)
+
+    def move_unit_to(self, unit_id: int, site_id: int | None, level_id: int | None) -> UnitNode:
+        """Move a unit (with its materials) to the end of a level, or of a project (``level_id``
+        None). The project of the level is used when ``level_id`` is given."""
         self.require(P.SITES_EDIT)
         with self.db.session() as s:
             u = s.get(ProjectUnit, unit_id)
             if u is None:
                 raise NotFoundError("Unit not found.")
+            if level_id is not None:
+                site_id = _level_site(s, level_id)
+            if site_id is None:
+                raise ValidationError("Choose where to move the unit.")
             src = self._editable_site(s, u.site_id)
             dst = self._editable_site(s, site_id)
-            if src.id == dst.id:
+            if (src.id, u.level_id) == (dst.id, level_id):
                 return self.unit(unit_id)
-            u.site_id = dst.id
+            old = _place(s, src, u.level_id)
+            u.site_id, u.level_id = dst.id, level_id
             u.sort_order = (s.scalar(select(func.max(ProjectUnit.sort_order))
-                                     .where(ProjectUnit.site_id == dst.id)) or 0) + 1
+                                     .where(*_siblings(dst.id, level_id), ProjectUnit.id != u.id)) or 0) + 1
+            new = _place(s, dst, level_id)
             audit.record(s, self.ctx, "UNIT_MOVED", EntityType.PROJECT_UNIT.value, u.id, u.name,
-                         f"Moved from {src.project_number} to {dst.project_number}",
-                         old={"project": src.project_number}, new={"project": dst.project_number})
+                         f"Moved from {old} to {new}", old={"place": old}, new={"place": new})
         return self.unit(unit_id)
+
+    # ---- blocks and levels --------------------------------------------------------------------------
+    def save_block(self, block_id: int | None, data: dict, site_id: int | None = None) -> BlockNode:
+        """Add a block to a project or change the fields given (name, code, notes)."""
+        return self._save_group(ProjectBlock, block_id, data, site_id, "BLOCK")
+
+    def save_level(self, level_id: int | None, data: dict, block_id: int | None = None) -> LevelNode:
+        """Add a level to a block or change the fields given (name, code, notes)."""
+        return self._save_group(ProjectLevel, level_id, data, block_id, "LEVEL")
+
+    def _save_group(self, model, obj_id, data: dict, parent_id, what: str):
+        self.require(P.SITES_EDIT)
+        label = what.capitalize()
+        parent_col = model.site_id if model is ProjectBlock else model.block_id
+        with self.db.session() as s:
+            if obj_id:
+                g = s.get(model, obj_id)
+                if g is None:
+                    raise NotFoundError(f"{label} not found.")
+                old = audit.snapshot(g, GROUP_FIELDS)
+            else:
+                if parent_id is None:
+                    raise ValidationError(f"Choose where to add the {label.lower()}.")
+                if "name" not in data:
+                    raise ValidationError(f"{label} name is required.", "name")
+                order = (s.scalar(select(func.max(model.sort_order)).where(parent_col == parent_id)) or 0) + 1
+                g = model(sort_order=order, created_by_id=self.ctx.user.id if self.ctx.user else None)
+                setattr(g, parent_col.key, parent_id)
+                old = {}
+            site = self._editable_site(s, g.site_id if model is ProjectBlock else _block_site(s, g.block_id))
+            if "name" in data:
+                g.name = clean_str(data.get("name"), "name", required=True, max_len=200)
+            if "code" in data:
+                g.code = clean_str(data.get("code"), "code", max_len=50)
+            if "notes" in data:
+                g.notes = clean_str(data.get("notes"))
+            if not obj_id:
+                s.add(g)
+            s.flush()
+            o, n = audit.diff(old, audit.snapshot(g, GROUP_FIELDS))
+            if n:
+                audit.record(s, self.ctx, f"{what}_{'UPDATED' if obj_id else 'CREATED'}", EntityType.SITE.value,
+                             site.id, f"{site.project_number} / {g.name}", old=o, new=n)
+            saved = g.id
+        return self.block(saved) if model is ProjectBlock else self.level(saved)
+
+    def move_block(self, block_id: int, delta: int) -> None:
+        self.require(P.SITES_EDIT)
+        with self.db.session() as s:
+            b = s.get(ProjectBlock, block_id)
+            if b is None:
+                raise NotFoundError("Block not found.")
+            self._editable_site(s, b.site_id)
+            rows = list(s.scalars(select(ProjectBlock).where(ProjectBlock.site_id == b.site_id)
+                                  .order_by(ProjectBlock.sort_order, ProjectBlock.id)))
+            _shift(rows, block_id, delta, "Block")
+
+    def move_level(self, level_id: int, delta: int) -> None:
+        self.require(P.SITES_EDIT)
+        with self.db.session() as s:
+            lv = s.get(ProjectLevel, level_id)
+            if lv is None:
+                raise NotFoundError("Level not found.")
+            self._editable_site(s, _block_site(s, lv.block_id))
+            rows = list(s.scalars(select(ProjectLevel).where(ProjectLevel.block_id == lv.block_id)
+                                  .order_by(ProjectLevel.sort_order, ProjectLevel.id)))
+            _shift(rows, level_id, delta, "Level")
+
+    def block_contents(self, block_id: int) -> tuple[int, int, int]:
+        """(levels, units, material lines) of a block - shown before it is deleted."""
+        with self.db.read_session() as s:
+            levels = select(ProjectLevel.id).where(ProjectLevel.block_id == block_id)
+            return (s.scalar(select(func.count()).select_from(levels.subquery())) or 0,) + _unit_counts(
+                s, ProjectUnit.level_id.in_(levels))
+
+    def level_contents(self, level_id: int) -> tuple[int, int]:
+        """(units, material lines) of a level."""
+        with self.db.read_session() as s:
+            return _unit_counts(s, ProjectUnit.level_id == level_id)
+
+    def delete_block(self, block_id: int) -> tuple[int, int, int]:
+        """Delete a block with its levels, their units and material lines (planning data only)."""
+        self.require(P.SITES_EDIT)
+        with self.db.session() as s:
+            b = s.get(ProjectBlock, block_id)
+            if b is None:
+                raise NotFoundError("Block not found.")
+            site = self._editable_site(s, b.site_id)
+            level_ids = select(ProjectLevel.id).where(ProjectLevel.block_id == block_id)
+            n_levels = s.scalar(select(func.count()).select_from(level_ids.subquery())) or 0
+            units, lines = _delete_units(s, ProjectUnit.level_id.in_(level_ids))
+            s.execute(delete(ProjectLevel).where(ProjectLevel.block_id == block_id))
+            audit.record(s, self.ctx, "BLOCK_DELETED", EntityType.SITE.value, site.id,
+                         f"{site.project_number} / {b.name}",
+                         f"Block deleted with {n_levels} level(s), {units} unit(s), {lines} material line(s)",
+                         old=audit.snapshot(b, GROUP_FIELDS) | {"levels": n_levels, "units": units, "lines": lines})
+            s.delete(b)
+            return n_levels, units, lines
+
+    def delete_level(self, level_id: int) -> tuple[int, int]:
+        """Delete a level with its units and their material lines (planning data only)."""
+        self.require(P.SITES_EDIT)
+        with self.db.session() as s:
+            lv = s.get(ProjectLevel, level_id)
+            if lv is None:
+                raise NotFoundError("Level not found.")
+            site = self._editable_site(s, _block_site(s, lv.block_id))
+            units, lines = _delete_units(s, ProjectUnit.level_id == level_id)
+            audit.record(s, self.ctx, "LEVEL_DELETED", EntityType.SITE.value, site.id,
+                         f"{site.project_number} / {lv.name}",
+                         f"Level deleted with {units} unit(s), {lines} material line(s)",
+                         old=audit.snapshot(lv, GROUP_FIELDS) | {"units": units, "lines": lines})
+            s.delete(lv)
+            return units, lines
+
+    def duplicate_level(self, level_id: int) -> LevelNode:
+        """A copy of the level with all its units and materials, straight after it ("Level 2" from
+        "Level 1": then rename it)."""
+        self.require(P.SITES_EDIT)
+        with self.db.session() as s:
+            lv = s.get(ProjectLevel, level_id)
+            if lv is None:
+                raise NotFoundError("Level not found.")
+            site = self._editable_site(s, _block_site(s, lv.block_id))
+            copy = self._copy_level(s, lv, lv.block_id, site.id, f"{lv.name} (copy)"[:200])
+            rows = [r for r in s.scalars(select(ProjectLevel).where(ProjectLevel.block_id == lv.block_id)
+                                         .order_by(ProjectLevel.sort_order, ProjectLevel.id)) if r.id != copy.id]
+            rows.insert(rows.index(lv) + 1, copy)
+            for i, r in enumerate(rows, start=1):
+                r.sort_order = i
+            audit.record(s, self.ctx, "LEVEL_DUPLICATED", EntityType.SITE.value, site.id,
+                         f"{site.project_number} / {copy.name}", f"Copy of {lv.name}")
+            saved = copy.id
+        return self.level(saved)
+
+    def duplicate_block(self, block_id: int) -> BlockNode:
+        """A copy of the block with its levels, units and materials, straight after it."""
+        self.require(P.SITES_EDIT)
+        with self.db.session() as s:
+            b = s.get(ProjectBlock, block_id)
+            if b is None:
+                raise NotFoundError("Block not found.")
+            site = self._editable_site(s, b.site_id)
+            user_id = self.ctx.user.id if self.ctx.user else None
+            copy = ProjectBlock(site_id=b.site_id, code=b.code, name=f"{b.name} (copy)"[:200], notes=b.notes,
+                                sort_order=0, created_by_id=user_id)
+            s.add(copy)
+            s.flush()
+            for lv in list(s.scalars(select(ProjectLevel).where(ProjectLevel.block_id == b.id)
+                                     .order_by(ProjectLevel.sort_order, ProjectLevel.id))):
+                self._copy_level(s, lv, copy.id, site.id, lv.name, lv.sort_order)
+            rows = [r for r in s.scalars(select(ProjectBlock).where(ProjectBlock.site_id == b.site_id)
+                                         .order_by(ProjectBlock.sort_order, ProjectBlock.id)) if r.id != copy.id]
+            rows.insert(rows.index(b) + 1, copy)
+            for i, r in enumerate(rows, start=1):
+                r.sort_order = i
+            audit.record(s, self.ctx, "BLOCK_DUPLICATED", EntityType.SITE.value, site.id,
+                         f"{site.project_number} / {copy.name}", f"Copy of {b.name}")
+            saved = copy.id
+        return self.block(saved)
+
+    def _copy_level(self, s: Session, lv: ProjectLevel, block_id: int, site_id: int, name: str,
+                    order: int = 0) -> ProjectLevel:
+        copy = ProjectLevel(block_id=block_id, code=lv.code, name=name, notes=lv.notes, sort_order=order,
+                            created_by_id=self.ctx.user.id if self.ctx.user else None)
+        s.add(copy)
+        s.flush()
+        self._copy_unit_rows(s, select(ProjectUnit).where(ProjectUnit.level_id == lv.id), site_id,
+                             lambda _u: copy.id)
+        return copy
 
     def delete_unit(self, unit_id: int) -> int:
         """Delete a unit and its material lines (planning data only). Returns the lines removed."""
@@ -806,19 +1160,66 @@ class ProjectTreeService(BaseService):
         return (Decimal(int(qty or 0)) / 1000).quantize(Decimal("0.001")), lines
 
 
-def _contents(s: Session, site_id: int) -> tuple[int, int]:
-    units = s.scalar(select(func.count(ProjectUnit.id)).where(ProjectUnit.site_id == site_id)) or 0
+def _unit_node(u: ProjectUnit, materials: int) -> UnitNode:
+    return UnitNode(u.id, u.site_id, u.unit_code, u.name, u.quantity, u.sort_order, u.notes, materials, u.level_id)
+
+
+def _siblings(site_id: int, level_id: int | None) -> list:
+    """The units a unit is ordered among: same level, or directly in the same project."""
+    if level_id is None:
+        return [ProjectUnit.site_id == site_id, ProjectUnit.level_id.is_(None)]
+    return [ProjectUnit.level_id == level_id]
+
+
+def _block_site(s: Session, block_id: int) -> int:
+    sid = s.scalar(select(ProjectBlock.site_id).where(ProjectBlock.id == block_id))
+    if sid is None:
+        raise NotFoundError("Block not found.")
+    return sid
+
+
+def _level_site(s: Session, level_id: int) -> int:
+    sid = s.scalar(select(ProjectBlock.site_id).join(ProjectLevel, ProjectLevel.block_id == ProjectBlock.id)
+                   .where(ProjectLevel.id == level_id))
+    if sid is None:
+        raise NotFoundError("Level not found.")
+    return sid
+
+
+def _place(s: Session, site: Site, level_id: int | None) -> str:
+    if level_id is None:
+        return site.project_number
+    bname, lname = s.execute(select(ProjectBlock.name, ProjectLevel.name)
+                             .join(ProjectLevel, ProjectLevel.block_id == ProjectBlock.id)
+                             .where(ProjectLevel.id == level_id)).one()
+    return f"{site.project_number} / {bname} / {lname}"
+
+
+def _unit_counts(s: Session, *conds) -> tuple[int, int]:
+    units = s.scalar(select(func.count(ProjectUnit.id)).where(*conds)) or 0
     lines = s.scalar(select(func.count(UnitMaterial.id)).join(ProjectUnit, ProjectUnit.id == UnitMaterial.unit_id)
-                     .where(ProjectUnit.site_id == site_id)) or 0
+                     .where(*conds)) or 0
     return units, lines
 
 
+def _delete_units(s: Session, *conds) -> tuple[int, int]:
+    units, lines = _unit_counts(s, *conds)
+    ids = select(ProjectUnit.id).where(*conds).scalar_subquery()
+    s.execute(delete(UnitMaterial).where(UnitMaterial.unit_id.in_(ids)))
+    s.execute(delete(ProjectUnit).where(*conds))
+    return units, lines
+
+
+def _contents(s: Session, site_id: int) -> tuple[int, int]:
+    return _unit_counts(s, ProjectUnit.site_id == site_id)
+
+
 def delete_project_structure(s: Session, site_id: int) -> tuple[int, int]:
-    """Remove a project's units and their material lines (inside the caller's transaction)."""
-    units, lines = _contents(s, site_id)
-    unit_ids = select(ProjectUnit.id).where(ProjectUnit.site_id == site_id).scalar_subquery()
-    s.execute(delete(UnitMaterial).where(UnitMaterial.unit_id.in_(unit_ids)))
-    s.execute(delete(ProjectUnit).where(ProjectUnit.site_id == site_id))
+    """Remove a project's blocks, levels, units and their material lines (caller's transaction)."""
+    units, lines = _delete_units(s, ProjectUnit.site_id == site_id)
+    blocks = select(ProjectBlock.id).where(ProjectBlock.site_id == site_id).scalar_subquery()
+    s.execute(delete(ProjectLevel).where(ProjectLevel.block_id.in_(blocks)))
+    s.execute(delete(ProjectBlock).where(ProjectBlock.site_id == site_id))
     return units, lines
 
 
@@ -843,5 +1244,5 @@ def _shift(rows: list, row_id: int, delta: int, what: str) -> None:
         r.sort_order = n
 
 
-__all__ = ["CLOSED_SITE_STATUSES", "UNASSIGNED", "ManagerNode", "MaterialNode", "ProjectNode", "ProjectTreeService",
+__all__ = ["ALL_UNITS", "CLOSED_SITE_STATUSES", "DIRECT", "UNASSIGNED", "BlockNode", "LevelNode", "ManagerNode", "MaterialNode", "ProjectNode", "ProjectTreeService",
            "TreeFilter", "TreeMatches", "UnitNode", "delete_project_structure", "find_or_create_manager"]

@@ -5,7 +5,7 @@ For every material::
     Required = sum over units of (unit quantity x quantity per unit)
 
 Nothing here is stored: the figures are worked out from the structure every time, so they can
-never disagree with it. The same functions work for one unit, one project, one manager, any set
+never disagree with it. The same functions work for one unit, one level, one block, one project, one manager, any set
 of projects, or every open project, and know nothing about screens - the Projects tree, the
 Dashboard, Remaining or a report can all reuse them.
 
@@ -27,7 +27,7 @@ from wms.core.enums import OPEN_SITE_STATUSES
 from wms.core.exceptions import NotFoundError
 from wms.core.numbers import ZERO
 from wms.core.permissions import P
-from wms.db.models import Product, ProjectMaterial, ProjectUnit, Site, Unit, UnitMaterial
+from wms.db.models import Product, ProjectLevel, ProjectMaterial, ProjectUnit, Site, Unit, UnitMaterial
 from wms.services.base import BaseService
 
 _PLACES = Decimal("0.001")
@@ -53,6 +53,8 @@ class DemandScope:
     ``statuses`` - project statuses (default: every status)."""
 
     unit_ids: Iterable[int] | None = None
+    level_ids: Iterable[int] | None = None
+    block_ids: Iterable[int] | None = None
     site_ids: Iterable[int] | None = None
     manager_id: int | None = None
     unassigned: bool = False
@@ -77,6 +79,11 @@ def _conditions(scope: DemandScope) -> list:
     conds = []
     if scope.unit_ids is not None:
         conds.append(ProjectUnit.id.in_(list(scope.unit_ids)))
+    if scope.level_ids is not None:
+        conds.append(ProjectUnit.level_id.in_(list(scope.level_ids)))
+    if scope.block_ids is not None:
+        conds.append(ProjectUnit.level_id.in_(
+            select(ProjectLevel.id).where(ProjectLevel.block_id.in_(list(scope.block_ids)))))
     if scope.site_ids is not None:
         conds.append(ProjectUnit.site_id.in_(list(scope.site_ids)))
     if scope.manager_id is not None:
@@ -158,6 +165,12 @@ class ProjectDemandService(BaseService):
 
     def for_unit(self, unit_id: int) -> list[DemandLine]:
         return self.calculate(DemandScope(unit_ids=[unit_id]))
+
+    def for_level(self, level_id: int) -> list[DemandLine]:
+        return self.calculate(DemandScope(level_ids=[level_id]))
+
+    def for_block(self, block_id: int) -> list[DemandLine]:
+        return self.calculate(DemandScope(block_ids=[block_id]))
 
     def for_project(self, site_id: int) -> list[DemandLine]:
         return self.calculate(DemandScope(site_ids=[site_id]))

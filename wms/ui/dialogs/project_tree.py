@@ -1,4 +1,4 @@
-"""Small forms used by the Project Tree screen: manager, project, unit, material picker."""
+"""Small forms used by the Project Tree screen: manager, project, block, level, unit, material picker."""
 
 from __future__ import annotations
 
@@ -136,10 +136,38 @@ class DuplicateProjectDialog(_Form):
                    self.name.text())
 
 
+class GroupDialog(_Form):
+    """Block or level: name, code, notes. ``kind`` is "block" or "level"; ``parent_id`` is the
+    project (block) or the block (level) a new one is added to."""
+
+    HINTS = {"block": ("Block A, Building 1, East Wing...", "A"), "level": ("Ground Floor, Level 1, Level 2...", "L1")}
+
+    def __init__(self, app, kind: str, parent_id: int | None, node=None, parent=None, where: str = ""):
+        title = f"Edit {kind} {node.name}" if node else f"New {kind}" + (f" in {where}" if where else "")
+        super().__init__(title, parent)
+        self.app, self.kind, self.parent_id, self.node = app, kind, parent_id, node
+        self.name = QLineEdit(node.name if node else "")
+        self.code = QLineEdit(node.code or "" if node else "")
+        self.name.setPlaceholderText(self.HINTS[kind][0])
+        self.code.setPlaceholderText(self.HINTS[kind][1])
+        self.notes = notes_edit(node.notes if node else None)
+        for text, w in ((f"{kind.capitalize()} name *", self.name), ("Code / ref", self.code), ("Notes", self.notes)):
+            self.form.addRow(text, w)
+        self.finish()
+
+    def data(self) -> dict:
+        return {"name": self.name.text(), "code": self.code.text(), "notes": self.notes.toPlainText()}
+
+    def save(self):
+        svc = self.app.services.project_tree
+        fn = svc.save_block if self.kind == "block" else svc.save_level
+        return run(self, fn, self.node.id if self.node else None, self.data(), self.parent_id)
+
+
 class UnitDialog(_Form):
-    def __init__(self, app, site_id: int | None, node=None, parent=None):
+    def __init__(self, app, site_id: int | None, node=None, parent=None, level_id: int | None = None):
         super().__init__(f"Edit unit {node.name}" if node else "New unit", parent)
-        self.app, self.site_id, self.node = app, site_id, node
+        self.app, self.site_id, self.node, self.level_id = app, site_id, node, level_id
         self.name = QLineEdit(node.name if node else "")
         self.name.setPlaceholderText("Kitchen, Wardrobe, Vanity Unit, Reception Desk...")
         self.code = QLineEdit(node.code or "" if node else "")
@@ -160,7 +188,7 @@ class UnitDialog(_Form):
 
     def save(self):
         return run(self, self.app.services.project_tree.save_unit, self.node.id if self.node else None, self.data(),
-                   site_id=self.site_id)
+                   site_id=self.site_id, level_id=self.level_id)
 
 
 class MaterialPickerDialog(QDialog):

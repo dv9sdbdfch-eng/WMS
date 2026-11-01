@@ -1,9 +1,10 @@
-"""project hierarchy: managers, project units, unit materials
+"""project hierarchy: managers, blocks, levels, project units, unit materials
 
 - managers: people who look after projects (name, contact, notes, active, order).
 - sites.manager_id: optional link from a project to its manager. Added with plain ALTER TABLE ADD
   COLUMN (no table rebuild): stock, documents, the ledger and its triggers are untouched.
   ON DELETE SET NULL - removing a manager never removes a project.
+- project_blocks / project_levels: optional grouping of a project's units (Block A -> Level 3).
 - project_units: unit types a project needs (Kitchen K01 x 24), ordered.
 - unit_materials: materials of one unit - a link to the existing product plus the quantity one
   unit needs. Total required (unit qty x qty per unit) is calculated, never stored.
@@ -53,8 +54,45 @@ def upgrade() -> None:
                               ondelete='SET NULL')
     op.create_index('ix_sites_manager_id', 'sites', ['manager_id'], unique=False)
 
+    op.create_table('project_blocks',
+    sa.Column('site_id', sa.Integer(), nullable=False),
+    sa.Column('code', sa.String(length=50), nullable=True),
+    sa.Column('name', sa.String(length=200), nullable=False),
+    sa.Column('sort_order', sa.Integer(), nullable=False),
+    sa.Column('notes', sa.Text(), nullable=True),
+    sa.Column('created_by_id', sa.Integer(), nullable=True),
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('created_at', wms.db.types.UTCDateTime(), nullable=False),
+    sa.Column('updated_at', wms.db.types.UTCDateTime(), nullable=False),
+    sa.ForeignKeyConstraint(['created_by_id'], ['users.id'], name=op.f('fk_project_blocks_created_by_id_users'), ondelete='RESTRICT'),
+    sa.ForeignKeyConstraint(['site_id'], ['sites.id'], name=op.f('fk_project_blocks_site_id_sites'), ondelete='CASCADE'),
+    sa.PrimaryKeyConstraint('id', name=op.f('pk_project_blocks'))
+    )
+    op.create_index('ix_project_blocks_created_by_id', 'project_blocks', ['created_by_id'], unique=False)
+    op.create_index('ix_project_blocks_site_id', 'project_blocks', ['site_id'], unique=False)
+    op.create_index('ix_project_blocks_site_order', 'project_blocks', ['site_id', 'sort_order'], unique=False)
+
+    op.create_table('project_levels',
+    sa.Column('block_id', sa.Integer(), nullable=False),
+    sa.Column('code', sa.String(length=50), nullable=True),
+    sa.Column('name', sa.String(length=200), nullable=False),
+    sa.Column('sort_order', sa.Integer(), nullable=False),
+    sa.Column('notes', sa.Text(), nullable=True),
+    sa.Column('created_by_id', sa.Integer(), nullable=True),
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('created_at', wms.db.types.UTCDateTime(), nullable=False),
+    sa.Column('updated_at', wms.db.types.UTCDateTime(), nullable=False),
+    sa.ForeignKeyConstraint(['block_id'], ['project_blocks.id'], name=op.f('fk_project_levels_block_id_project_blocks'), ondelete='CASCADE'),
+    sa.ForeignKeyConstraint(['created_by_id'], ['users.id'], name=op.f('fk_project_levels_created_by_id_users'), ondelete='RESTRICT'),
+    sa.PrimaryKeyConstraint('id', name=op.f('pk_project_levels'))
+    )
+    op.create_index('ix_project_levels_block_id', 'project_levels', ['block_id'], unique=False)
+    op.create_index('ix_project_levels_created_by_id', 'project_levels', ['created_by_id'], unique=False)
+    op.create_index('ix_project_levels_block_order', 'project_levels', ['block_id', 'sort_order'], unique=False)
+
     op.create_table('project_units',
     sa.Column('site_id', sa.Integer(), nullable=False),
+    sa.Column('level_id', sa.Integer(), nullable=True),
     sa.Column('unit_code', sa.String(length=50), nullable=True),
     sa.Column('name', sa.String(length=200), nullable=False),
     sa.Column('quantity', wms.db.types.Quantity(), nullable=False),
@@ -66,10 +104,12 @@ def upgrade() -> None:
     sa.Column('updated_at', wms.db.types.UTCDateTime(), nullable=False),
     sa.CheckConstraint('quantity >= 0', name=op.f('ck_project_units_quantity_not_negative')),
     sa.ForeignKeyConstraint(['created_by_id'], ['users.id'], name=op.f('fk_project_units_created_by_id_users'), ondelete='RESTRICT'),
+    sa.ForeignKeyConstraint(['level_id'], ['project_levels.id'], name=op.f('fk_project_units_level_id_project_levels'), ondelete='CASCADE'),
     sa.ForeignKeyConstraint(['site_id'], ['sites.id'], name=op.f('fk_project_units_site_id_sites'), ondelete='CASCADE'),
     sa.PrimaryKeyConstraint('id', name=op.f('pk_project_units'))
     )
     op.create_index('ix_project_units_created_by_id', 'project_units', ['created_by_id'], unique=False)
+    op.create_index('ix_project_units_level_id', 'project_units', ['level_id'], unique=False)
     op.create_index('ix_project_units_name', 'project_units', ['name'], unique=False)
     op.create_index('ix_project_units_site_id', 'project_units', ['site_id'], unique=False)
     op.create_index('ix_project_units_unit_code', 'project_units', ['unit_code'], unique=False)
@@ -141,7 +181,16 @@ def downgrade() -> None:
     op.drop_index('ix_project_units_site_id', table_name='project_units')
     op.drop_index('ix_project_units_name', table_name='project_units')
     op.drop_index('ix_project_units_created_by_id', table_name='project_units')
+    op.drop_index('ix_project_units_level_id', table_name='project_units')
     op.drop_table('project_units')
+    op.drop_index('ix_project_levels_block_order', table_name='project_levels')
+    op.drop_index('ix_project_levels_created_by_id', table_name='project_levels')
+    op.drop_index('ix_project_levels_block_id', table_name='project_levels')
+    op.drop_table('project_levels')
+    op.drop_index('ix_project_blocks_site_order', table_name='project_blocks')
+    op.drop_index('ix_project_blocks_site_id', table_name='project_blocks')
+    op.drop_index('ix_project_blocks_created_by_id', table_name='project_blocks')
+    op.drop_table('project_blocks')
     op.drop_index('ix_sites_manager_id', table_name='sites')
     bind = op.get_bind()
     op.execute("UPDATE sites SET manager_id = NULL")

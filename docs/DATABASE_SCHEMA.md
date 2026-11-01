@@ -344,6 +344,38 @@ Protected tables (database triggers, see `wms.db.engine`):
 | is_active | Boolean | no |  |
 | version | Integer | no |  |
 
+## project_blocks
+
+| Column | Type | Null | Key / reference |
+|---|---|---|---|
+| site_id | Integer | no | FK sites.id, indexed |
+| code | String(50) | yes |  |
+| name | String(200) | no |  |
+| sort_order | Integer | no |  |
+| notes | Text | yes |  |
+| created_by_id | Integer | yes | FK users.id, indexed |
+| id | Integer | no | PK |
+| created_at | UTCDateTime | no |  |
+| updated_at | UTCDateTime | no |  |
+
+* INDEX ix_project_blocks_site_order (site_id, sort_order)
+
+## project_levels
+
+| Column | Type | Null | Key / reference |
+|---|---|---|---|
+| block_id | Integer | no | FK project_blocks.id, indexed |
+| code | String(50) | yes |  |
+| name | String(200) | no |  |
+| sort_order | Integer | no |  |
+| notes | Text | yes |  |
+| created_by_id | Integer | yes | FK users.id, indexed |
+| id | Integer | no | PK |
+| created_at | UTCDateTime | no |  |
+| updated_at | UTCDateTime | no |  |
+
+* INDEX ix_project_levels_block_order (block_id, sort_order)
+
 ## project_materials
 
 | Column | Type | Null | Key / reference |
@@ -365,6 +397,7 @@ Protected tables (database triggers, see `wms.db.engine`):
 | Column | Type | Null | Key / reference |
 |---|---|---|---|
 | site_id | Integer | no | FK sites.id, indexed |
+| level_id | Integer | yes | FK project_levels.id, indexed |
 | unit_code | String(50) | yes | indexed |
 | name | String(200) | no | indexed |
 | quantity | Quantity | no |  |

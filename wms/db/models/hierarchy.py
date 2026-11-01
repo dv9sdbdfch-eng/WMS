@@ -1,4 +1,4 @@
-"""Project structure: Manager -> Project -> Unit -> Materials (v1.15).
+"""Project structure: Manager -> Project -> [Block -> Level ->] Unit -> Materials (v1.15).
 
 The database is the source of truth; the Projects tree on screen only shows and edits it.
 
@@ -6,6 +6,8 @@ The database is the source of truth; the Projects tree on screen only shows and 
   nullable ``sites.manager_id``; removing a manager never removes a project (it becomes
   unassigned). ``sites.project_manager`` keeps the manager's name as a display copy, so the
   existing project list, search and exports keep working unchanged.
+* ``ProjectBlock`` / ``ProjectLevel`` - optional grouping of a project's units by block and level
+  (floor). A unit with no level sits directly in the project.
 * ``ProjectUnit`` - one unit type a project needs ("Kitchen K01") and how many of it (24).
 * ``UnitMaterial`` - one material line of a unit: a link to the existing product master record and
   the quantity one unit needs. The product is never copied: the same product can sit in any number
@@ -41,6 +43,34 @@ class Manager(IdMixin, TimestampMixin, ActiveMixin, Base):
 Index("ix_managers_name_upper", func.upper(Manager.name))
 
 
+class ProjectBlock(IdMixin, TimestampMixin, Base):
+    """A block / building of a project ("Block A"). Optional: small projects hold units directly."""
+
+    __tablename__ = "project_blocks"
+    __table_args__ = (Index("ix_project_blocks_site_order", "site_id", "sort_order"),)
+
+    site_id: Mapped[int] = fk("sites.id", nullable=False, ondelete="CASCADE")
+    code: Mapped[str | None] = mapped_column(String(50))
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    notes: Mapped[str | None] = mapped_column(Text)
+    created_by_id: Mapped[int | None] = fk("users.id")
+
+
+class ProjectLevel(IdMixin, TimestampMixin, Base):
+    """A level / floor inside a block ("Level 3"). Units can sit on a level."""
+
+    __tablename__ = "project_levels"
+    __table_args__ = (Index("ix_project_levels_block_order", "block_id", "sort_order"),)
+
+    block_id: Mapped[int] = fk("project_blocks.id", nullable=False, ondelete="CASCADE")
+    code: Mapped[str | None] = mapped_column(String(50))
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    notes: Mapped[str | None] = mapped_column(Text)
+    created_by_id: Mapped[int | None] = fk("users.id")
+
+
 class ProjectUnit(IdMixin, TimestampMixin, Base):
     __tablename__ = "project_units"
     __table_args__ = (
@@ -49,6 +79,8 @@ class ProjectUnit(IdMixin, TimestampMixin, Base):
     )
 
     site_id: Mapped[int] = fk("sites.id", nullable=False, ondelete="CASCADE")
+    # Empty: the unit sits directly in the project. Otherwise the level (of a block of the same project).
+    level_id: Mapped[int | None] = fk("project_levels.id", ondelete="CASCADE")
     unit_code: Mapped[str | None] = mapped_column(String(50), index=True)
     name: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
     quantity: Mapped[Decimal] = mapped_column(Quantity, nullable=False, default=Decimal(1))

@@ -15,7 +15,7 @@ from wms.db.models.documents import (
     StockTransfer,
 )
 from wms.db.models.drafts import DocumentDraft
-from wms.db.models.hierarchy import Manager, ProjectUnit, UnitMaterial
+from wms.db.models.hierarchy import Manager, ProjectBlock, ProjectLevel, ProjectUnit, UnitMaterial
 from wms.db.models.locations import Bin, Location
 from wms.db.models.products import BomItem, FinishedProductInfo, Product
 from wms.db.models.projects import ProjectMaterial
@@ -43,6 +43,8 @@ __all__ = [
     "Location",
     "Manager",
     "MovementReversal",
+    "ProjectBlock",
+    "ProjectLevel",
     "ProjectMaterial",
     "ProjectUnit",
     "NumberSequence",

@@ -1,4 +1,6 @@
-"""Project Tree: Manager -> Project -> Unit -> Materials (v1.15).
+"""Project Tree: Manager -> Project -> Block -> Level -> Unit -> Materials (v1.15).
+
+Block and Level are optional: a unit can sit directly in a project or on a level of a block.
 
 The tree only shows and edits what is in the database (``ProjectTreeService``). Branches are read
 when they are opened, so the screen stays quick with many managers, hundreds of units and
@@ -33,11 +35,12 @@ from PySide6.QtWidgets import (
 from wms.core.enums import CLOSED_SITE_STATUSES, OPEN_SITE_STATUSES, SiteStatus
 from wms.core.numbers import fmt_qty
 from wms.core.permissions import P
-from wms.services.project_tree import UNASSIGNED, TreeFilter, TreeMatches
+from wms.services.project_tree import DIRECT, UNASSIGNED, TreeFilter, TreeMatches
 from wms.ui.dialogs.project_tree import (
     DeleteManagerDialog,
     DemandDialog,
     DuplicateProjectDialog,
+    GroupDialog,
     ManagerDialog,
     MaterialPickerDialog,
     ProjectDialog,
@@ -57,6 +60,12 @@ AUTO_EXPAND_MATCHES = 400
 MUTED = QColor("#8A94A6")
 MATCH = QColor("#FFF3C4")
 _SETTINGS_KEY = "project_tree/expanded"
+#: rows that hold other rows: manager, unassigned, project, block, level (V), unit
+BRANCHES = ("M", "N", "P", "B", "V", "U")
+
+
+def _n(count: int, word: str) -> str:
+    return f"{count} {word}{'' if count == 1 else 's'}"
 
 
 def _qs() -> QSettings:
@@ -74,7 +83,7 @@ def id_of(key: str) -> int | None:
 
 class ProjectsPage(Page):
     title = "Project Tree"
-    subtitle = ("Manager → Project → Unit → Materials. Double-click a name or quantity to change it; right-click "
+    subtitle = ("Manager → Project → Block → Level → Unit → Materials (Block and Level are optional). Double-click a name or quantity to change it; right-click "
                 "or ⋯ for actions. Total required = unit quantity × quantity per unit.")
 
     def __init__(self, app, parent=None):
@@ -99,7 +108,7 @@ class ProjectsPage(Page):
             self.add_action(button("+  Manager", self.add_manager, primary=True, shortcut="Ctrl+N"))
 
         # filters (spec 8)
-        self.search = SearchBox("Search manager, project, unit, product code, VPK code or material...")
+        self.search = SearchBox("Search manager, project, block, level, unit, product code, VPK code or material...")
         self.search.setMinimumWidth(220)
         self.search.search.connect(lambda _t: self.refresh())
         self.manager_filter = QComboBox()
@@ -219,6 +228,7 @@ class ProjectsPage(Page):
                 more = "" if self.auto_expand else (f" - more than {AUTO_EXPAND_MATCHES}, so branches are not opened "
                                                     f"automatically: open them to see the matches")
                 self.status.setText(f"{m.total} match(es): {len(m.managers)} manager(s), {len(m.projects)} project(s), "
+                                    f"{len(m.blocks)} block(s), {len(m.levels)} level(s), "
                                     f"{len(m.units)} unit(s), {len(m.materials)} material line(s){more}. Matches are "
                                     f"highlighted.")
         else:
@@ -263,8 +273,8 @@ class ProjectsPage(Page):
         if m is None:
             return False
         k, i = kind_of(key), id_of(key)
-        return ((k == "M" and i in m.managers) or (k == "P" and i in m.projects) or (k == "U" and i in m.units)
-                or (k == "L" and i in m.materials))
+        return ((k == "M" and i in m.managers) or (k == "P" and i in m.projects) or (k == "B" and i in m.blocks)
+                or (k == "V" and i in m.levels) or (k == "U" and i in m.units) or (k == "L" and i in m.materials))
 
     def _on_match_path(self, key: str) -> bool:
         m = self.matches
@@ -272,7 +282,8 @@ class ProjectsPage(Page):
             return False
         k, i = kind_of(key), id_of(key)
         return ((k == "M" and i in m.manager_paths) or (k == "N" and m.unassigned_path)
-                or (k == "P" and i in m.project_paths) or (k == "U" and i in m.unit_paths))
+                or (k == "P" and i in m.project_paths) or (k == "B" and i in m.block_paths)
+                or (k == "V" and i in m.level_paths) or (k == "U" and i in m.unit_paths))
 
     def _style(self, item: QTreeWidgetItem, bold: bool = False, muted: bool = False) -> None:
         f = item.font(C_NAME)
@@ -303,15 +314,40 @@ class ProjectsPage(Page):
         return item
 
     def _project_texts(self, node) -> list[str]:
-        return [node.name, node.code, "", "", f"{node.status_label}  ·  {node.units} unit{'' if node.units == 1 else 's'}"]
+        parts = [node.status_label]
+        if node.blocks:
+            parts.append(_n(node.blocks, "block"))
+        parts.append(_n(node.units, "unit"))
+        return [node.name, node.code, "", "", "  ·  ".join(parts)]
 
     def _add_project(self, parent, node, full: bool) -> QTreeWidgetItem:
-        item = self._new_item(parent, f"P:{node.id}", node, self._project_texts(node), node.units > 0, full)
+        item = self._new_item(parent, f"P:{node.id}", node, self._project_texts(node), node.has_children, full)
         f = item.font(C_NAME)
         f.setWeight(QFont.Weight.DemiBold)
         item.setFont(C_NAME, f)
         for c in range(5):
             item.setForeground(c, QBrush(MUTED) if node.status in CLOSED_SITE_STATUSES else QBrush())
+        if node.notes:
+            item.setToolTip(C_NAME, node.notes)
+        return item
+
+    def _block_texts(self, node) -> list[str]:
+        return [node.name, node.code or "", "", "", f"{_n(node.levels, 'level')}  ·  {_n(node.units, 'unit')}"]
+
+    def _add_block(self, parent, node, full: bool) -> QTreeWidgetItem:
+        item = self._new_item(parent, f"B:{node.id}", node, self._block_texts(node), node.levels > 0, full)
+        f = item.font(C_NAME)
+        f.setWeight(QFont.Weight.Medium)
+        item.setFont(C_NAME, f)
+        if node.notes:
+            item.setToolTip(C_NAME, node.notes)
+        return item
+
+    def _level_texts(self, node) -> list[str]:
+        return [node.name, node.code or "", "", "", _n(node.units, "unit")]
+
+    def _add_level(self, parent, node, full: bool) -> QTreeWidgetItem:
+        item = self._new_item(parent, f"V:{node.id}", node, self._level_texts(node), node.units > 0, full)
         if node.notes:
             item.setToolTip(C_NAME, node.notes)
         return item
@@ -368,15 +404,28 @@ class ProjectsPage(Page):
             for node in rows:
                 self._add_project(item, node, full or (self.matches is not None and node.id in self.matches.projects))
         elif k == "P":
-            ids = None if m is None else (m.units | m.unit_paths)
-            for node in run(self, self.svc.units, oid, ids) or []:
-                self._add_unit(item, node, full or (self.matches is not None and node.id in self.matches.units))
+            # blocks first, then the units that sit directly in the project
+            ids = None if m is None else (m.blocks | m.block_paths)
+            for node in run(self, self.svc.blocks, oid, ids) or []:
+                self._add_block(item, node, full or (self.matches is not None and node.id in self.matches.blocks))
+            self._load_units(item, oid, DIRECT, m, full)
+        elif k == "B":
+            ids = None if m is None else (m.levels | m.level_paths)
+            for node in run(self, self.svc.levels, oid, ids) or []:
+                self._add_level(item, node, full or (self.matches is not None and node.id in self.matches.levels))
+        elif k == "V":
+            self._load_units(item, None, oid, m, full)
         elif k == "U":
             ids = None if m is None else m.materials
             for node in run(self, self.svc.materials, oid, ids) or []:
                 self._add_material(item, node)
         if item.childCount() == 0:
             item.setChildIndicatorPolicy(QTreeWidgetItem.ChildIndicatorPolicy.DontShowIndicatorWhenChildless)
+
+    def _load_units(self, item: QTreeWidgetItem, site_id, level_id, m: TreeMatches | None, full: bool) -> None:
+        ids = None if m is None else (m.units | m.unit_paths)
+        for node in run(self, self.svc.units, site_id, ids, level_id) or []:
+            self._add_unit(item, node, full or (self.matches is not None and node.id in self.matches.units))
 
     def _forget(self, item: QTreeWidgetItem) -> None:
         for i in range(item.childCount()):
@@ -403,7 +452,13 @@ class ProjectsPage(Page):
             has = node > 0
         elif k == "P":
             node = self.svc.project(oid)
-            texts, has = self._project_texts(node), node.units > 0
+            texts, has = self._project_texts(node), node.has_children
+        elif k == "B":
+            node = self.svc.block(oid)
+            texts, has = self._block_texts(node), node.levels > 0
+        elif k == "V":
+            node = self.svc.level(oid)
+            texts, has = self._level_texts(node), node.units > 0
         elif k == "U":
             node = self.svc.unit(oid)
             texts, has = self._unit_texts(node), node.materials > 0
@@ -468,9 +523,9 @@ class ProjectsPage(Page):
         self._changed()
 
     def expand_all(self) -> None:
-        """Open every manager, project and unit (materials are the last level)."""
+        """Open every manager, project, block, level and unit (materials are the last level)."""
         def walk(item):
-            if kind_of(item.data(0, KEY)) in ("M", "N", "P", "U"):
+            if kind_of(item.data(0, KEY)) in BRANCHES:
                 item.setExpanded(True)
                 for i in range(item.childCount()):
                     walk(item.child(i))
@@ -488,7 +543,7 @@ class ProjectsPage(Page):
             raw = _qs().value(_SETTINGS_KEY)
         except Exception:  # noqa: BLE001 - a convenience only
             return set()
-        return {k for k in str(raw or "").split(",") if k and k[0] in "MNPU"}
+        return {k for k in str(raw or "").split(",") if k and k[0] in BRANCHES}
 
     def _save_open_keys(self) -> None:
         if self.matches is not None or self._loading:
@@ -501,7 +556,8 @@ class ProjectsPage(Page):
     # ---- inline editing ------------------------------------------------------------------------
     def _editable(self, key: str, col: int) -> bool:
         k = kind_of(key)
-        return self.can_edit and ((k in ("M", "P", "U") and col == C_NAME) or (k == "U" and col in (C_CODE, C_QTY))
+        return self.can_edit and ((k in ("M", "P", "B", "V", "U") and col == C_NAME)
+                                  or (k in ("B", "V", "U") and col == C_CODE) or (k == "U" and col == C_QTY)
                                   or (k == "L" and col == C_QTY))
 
     def _double_clicked(self, item: QTreeWidgetItem, col: int) -> None:
@@ -546,6 +602,9 @@ class ProjectsPage(Page):
             ok = run(self, self.svc.save_manager, oid, {"name": text})
         elif k == "P":
             ok = run(self, self.svc.save_project, oid, {"name": text})
+        elif k in ("B", "V"):
+            field = {C_NAME: "name", C_CODE: "code"}[col]
+            ok = run(self, self.svc.save_block if k == "B" else self.svc.save_level, oid, {field: text})
         elif k == "U":
             field = {C_NAME: "name", C_CODE: "unit_code", C_QTY: "quantity"}[col]
             ok = run(self, self.svc.save_unit, oid, {field: text})
@@ -600,7 +659,8 @@ class ProjectsPage(Page):
         elif k == "P":
             ro = node.read_only
             if e and not ro:
-                m.addAction("Add Unit...", lambda: self.add_unit(node.id))
+                m.addAction("Add Block...", lambda: self.add_block(node))
+                m.addAction("Add Unit (directly in project)...", lambda: self.add_unit(node.id))
             if e:
                 m.addAction("Edit...", lambda: self.edit_project(node))
                 m.addAction("Duplicate...", lambda: self.duplicate_project(node))
@@ -618,6 +678,20 @@ class ProjectsPage(Page):
             if e:
                 m.addSeparator()
                 m.addAction("Delete...", lambda: self.delete_project(node))
+        elif k in ("B", "V"):
+            if e:
+                if k == "B":
+                    m.addAction("Add Level...", lambda: self.add_level(node))
+                else:
+                    m.addAction("Add Unit...", lambda: self.add_unit(node.site_id, node.id))
+                m.addAction("Edit...", lambda: self.edit_group(key, node))
+                m.addAction("Duplicate" + (" Level (with units and materials)" if k == "V" else " Block (with levels)"),
+                            lambda: self.duplicate_group(key, node))
+                m.addSeparator()
+                m.addAction("Move Up", lambda: self.move(key, -1))
+                m.addAction("Move Down", lambda: self.move(key, 1))
+                m.addSeparator()
+                m.addAction("Delete...", lambda: self.delete_group(key, node))
         elif k == "U":
             if e:
                 m.addAction("Add Material...", lambda: self.add_material(node))
@@ -627,7 +701,7 @@ class ProjectsPage(Page):
                 m.addSeparator()
                 m.addAction("Move Up", lambda: self.move(key, -1))
                 m.addAction("Move Down", lambda: self.move(key, 1))
-                m.addAction("Move to Another Project...", lambda: self.move_unit_to_project(node))
+                m.addAction("Move to...", lambda: self.move_unit_to_project(node))
                 m.addSeparator()
                 m.addAction("Delete...", lambda: self.delete_unit(node))
         elif k == "L":
@@ -640,7 +714,7 @@ class ProjectsPage(Page):
             if e:
                 m.addSeparator()
                 m.addAction("Remove", lambda: self.remove_material(node))
-        if k in ("M", "N", "P", "U"):
+        if k in BRANCHES:
             m.addSeparator()
             m.addAction("Expand Branch", lambda: self._expand_branch(item))
             m.addAction("Collapse Branch", lambda: self._collapse_branch(item))
@@ -655,7 +729,7 @@ class ProjectsPage(Page):
         item.setExpanded(True)
         for i in range(item.childCount()):
             child = item.child(i)
-            if kind_of(child.data(0, KEY)) in ("P", "U"):
+            if kind_of(child.data(0, KEY)) in ("P", "B", "V", "U"):
                 self._expand_branch(child)
 
     def _collapse_branch(self, item: QTreeWidgetItem) -> None:
@@ -666,15 +740,19 @@ class ProjectsPage(Page):
     # ---- keyboard ------------------------------------------------------------------------------
     def move_selected(self, delta: int) -> None:
         key = self.current_key()
-        if key and self.can_edit and kind_of(key) in ("M", "U", "L"):
+        if key and self.can_edit and kind_of(key) in ("M", "B", "V", "U", "L"):
             self.move(key, delta)
 
     def delete_selected(self) -> None:
         key, node = self.current_key(), self.current_node()
         if not key or not self.can_edit:
             return
+        k = kind_of(key)
+        if k in ("B", "V"):
+            self.delete_group(key, node)
+            return
         {"M": self.delete_manager, "P": self.delete_project, "U": self.delete_unit,
-         "L": self.remove_material}.get(kind_of(key), lambda _n: None)(node)
+         "L": self.remove_material}.get(k, lambda _n: None)(node)
 
     def rename_selected(self) -> None:
         item = self.tree.currentItem()
@@ -692,6 +770,10 @@ class ProjectsPage(Page):
             self.add_project(None)
         elif k == "P":
             self.add_unit(node.id)
+        elif k == "B":
+            self.add_level(node)
+        elif k == "V":
+            self.add_unit(node.site_id, node.id)
         elif k == "U":
             self.add_material(node)
 
@@ -803,12 +885,29 @@ class ProjectsPage(Page):
             self._changed()
 
     # ---- actions: units ------------------------------------------------------------------------
-    def add_unit(self, site_id: int) -> None:
-        dlg = UnitDialog(self.app, site_id, None, self)
+    def _place_keys(self, site_id: int, level_id: int | None) -> list[str]:
+        """The rows above a unit whose counts change with it: its level, block and project."""
+        if not level_id:
+            return [f"P:{site_id}"]
+        lv = self.svc.level(level_id)
+        return [f"V:{level_id}", f"B:{lv.block_id}", f"P:{site_id}"]
+
+    def _refresh_place(self, site_id: int, level_id: int | None, select: str | None = None) -> None:
+        """Read again the branch that holds the units of a place and the counts above it."""
+        keys = self._place_keys(site_id, level_id)
+        for key in reversed(keys[1:]):
+            self.reload_item(key, children=False)
+        self.reload_item(keys[0])
+        if select:
+            self._expand_to(keys[0], select)
+        self._changed()
+
+    def add_unit(self, site_id: int, level_id: int | None = None) -> None:
+        dlg = UnitDialog(self.app, site_id, None, self, level_id=level_id)
         if dlg.exec() and dlg.result_value is not None:
-            self.open_keys.add(f"P:{site_id}")
-            self._refresh_keys(f"P:{site_id}", select=f"U:{dlg.result_value.id}")
-            self._expand_to(f"P:{site_id}", f"U:{dlg.result_value.id}")
+            parent = self._place_keys(site_id, level_id)[0]
+            self.open_keys.add(parent)
+            self._refresh_place(site_id, level_id, select=f"U:{dlg.result_value.id}")
 
     def _expand_to(self, parent_key: str, key: str) -> None:
         parent = self.items.get(parent_key)
@@ -829,11 +928,12 @@ class ProjectsPage(Page):
     def duplicate_unit(self, node) -> None:
         new = run(self, self.svc.duplicate_unit, node.id)
         if new is not None:
-            self._refresh_keys(f"P:{node.site_id}", select=f"U:{new.id}")
+            self._refresh_place(node.site_id, node.level_id, select=f"U:{new.id}")
 
     def move(self, key: str, delta: int) -> None:
         k, oid = kind_of(key), id_of(key)
-        fn = {"M": self.svc.move_manager, "U": self.svc.move_unit, "L": self.svc.move_material}[k]
+        fn = {"M": self.svc.move_manager, "B": self.svc.move_block, "V": self.svc.move_level,
+              "U": self.svc.move_unit, "L": self.svc.move_material}[k]
         if run(self, fn, oid, delta) is None and k != "M":
             return
         if k == "M":
@@ -843,20 +943,32 @@ class ProjectsPage(Page):
         self._refresh_keys(self._parent_key(key), select=key)
 
     def move_unit_to_project(self, node) -> None:
+        """Move a unit to another level or project (or straight into a project)."""
         dlg = QDialog(self)
         dlg.setWindowTitle(f"Move unit {node.name}")
+        dlg.setMinimumWidth(520)
         lay = QVBoxLayout(dlg)
         lay.addWidget(label(f"Move {node.label} (with its {node.materials} material line(s)) to:", wrap=True))
         combo = QComboBox()
-        for text, sid in self.svc.project_choices():
-            if sid != node.site_id:
-                combo.addItem(text, sid)
+        combo.setEditable(True)  # type to find a project / level
+        combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        for text, sid, lid in self.svc.unit_places():
+            if (sid, lid) != (node.site_id, node.level_id):
+                combo.addItem(text, (sid, lid))
         lay.addWidget(combo)
         lay.addLayout(h(None, button("Cancel", dlg.reject), button("Move", dlg.accept, primary=True)))
         if dlg.exec() != QDialog.DialogCode.Accepted or combo.currentData() is None:
             return
-        if run(self, self.svc.move_unit_to_project, node.id, combo.currentData()) is not None:
-            self._refresh_keys(f"P:{node.site_id}", f"P:{combo.currentData()}")
+        sid, lid = combo.currentData()
+        if run(self, self.svc.move_unit_to, node.id, sid, lid) is not None:
+            src, dst = self._place_keys(node.site_id, node.level_id), self._place_keys(sid, lid)
+            for key in dict.fromkeys(src[1:] + dst[1:]):  # counts above the two places
+                if key not in (src[0], dst[0]):
+                    self.reload_item(key, children=False)
+            for key in dict.fromkeys((src[0], dst[0])):  # the two branches that lost / got the unit
+                self.reload_item(key)
+            self.select(f"U:{node.id}")
+            self._changed()
 
     def delete_unit(self, node) -> None:
         n = node.materials
@@ -866,7 +978,69 @@ class ProjectsPage(Page):
                                             f"material are not affected.", yes="Delete unit", danger=True):
             return
         if run(self, self.svc.delete_unit, node.id) is not None:
-            self._refresh_keys(f"P:{node.site_id}", select=f"P:{node.site_id}")
+            parent = node.parent_key
+            self._refresh_place(node.site_id, node.level_id)
+            self.select(parent)
+
+    # ---- actions: blocks and levels ------------------------------------------------------------
+    def add_block(self, project) -> None:
+        dlg = GroupDialog(self.app, "block", project.id, None, self, where=project.code)
+        if dlg.exec() and dlg.result_value is not None:
+            key = f"P:{project.id}"
+            self.open_keys.add(key)
+            self._refresh_keys(key)
+            self._expand_to(key, f"B:{dlg.result_value.id}")
+
+    def add_level(self, block) -> None:
+        dlg = GroupDialog(self.app, "level", block.id, None, self, where=block.label)
+        if dlg.exec() and dlg.result_value is not None:
+            key = f"B:{block.id}"
+            self.open_keys.add(key)
+            self.reload_item(key)
+            self._expand_to(key, f"V:{dlg.result_value.id}")
+            self._changed()
+
+    def edit_group(self, key: str, node) -> None:
+        kind = "block" if kind_of(key) == "B" else "level"
+        parent_id = node.site_id if kind == "block" else node.block_id
+        dlg = GroupDialog(self.app, kind, parent_id, node, self)
+        if dlg.exec() and dlg.result_value is not None:
+            self.reload_item(key, children=False)
+            self._changed()
+
+    def duplicate_group(self, key: str, node) -> None:
+        if kind_of(key) == "B":
+            new = run(self, self.svc.duplicate_block, node.id)
+            if new is not None:
+                self._refresh_keys(f"P:{node.site_id}", select=f"B:{new.id}")
+        else:
+            new = run(self, self.svc.duplicate_level, node.id)
+            if new is not None:
+                self.reload_item(f"P:{node.site_id}", children=False)
+                self._refresh_keys(f"B:{node.block_id}", select=f"V:{new.id}")
+
+    def delete_group(self, key: str, node) -> None:
+        is_block = kind_of(key) == "B"
+        if is_block:
+            levels, units, lines = run(self, self.svc.block_contents, node.id) or (0, 0, 0)
+            what = f"Block {node.label} has {_n(levels, 'level')}, {_n(units, 'unit')} and {_n(lines, 'material line')}."
+        else:
+            units, lines = run(self, self.svc.level_contents, node.id) or (0, 0)
+            what = f"Level {node.label} has {_n(units, 'unit')} and {_n(lines, 'material line')}."
+        empty = not units and not (is_block and levels)
+        text = (f"Delete {'block' if is_block else 'level'} {node.label}? It is empty." if empty
+                else f"{what} They will all be deleted with it.")
+        if not confirm(self, f"Delete {'block' if is_block else 'level'}",
+                       f"{text}\n\nThis is planning data only: stock, reservations and issued material are not "
+                       f"affected.", yes="Delete", danger=True):
+            return
+        fn = self.svc.delete_block if is_block else self.svc.delete_level
+        if run(self, fn, node.id) is None:
+            return
+        parent = f"P:{node.site_id}" if is_block else f"B:{node.block_id}"
+        if not is_block:
+            self.reload_item(f"P:{node.site_id}", children=False)
+        self._refresh_keys(parent, select=parent)
 
     # ---- actions: materials --------------------------------------------------------------------
     def add_material(self, node) -> None:
@@ -882,7 +1056,6 @@ class ProjectsPage(Page):
             self.open_keys.add(f"U:{node.id}")
             self._refresh_keys(f"U:{node.id}")
             self._expand_to(f"U:{node.id}", f"L:{ids[-1]}")
-            self.reload_item(f"P:{node.site_id}", children=False)
 
     def edit_material_quantity(self, node) -> None:
         text = ask_quantity(self, "Quantity per unit", f"How many {node.uom} of {node.code} {node.name} does one unit "
@@ -922,12 +1095,12 @@ class NodePanel(QStackedWidget):
         self.setMinimumWidth(330)
         self.setMaximumWidth(460)
         self.node = None
-        self.empty = label("Select a manager, project, unit or material to see and change its details here.\n\n"
+        self.empty = label("Select a manager, project, block, level, unit or material to see and change its details here.\n\n"
                            "Right-click a row (or click ⋯) for its actions.", "Muted", wrap=True)
         self.empty.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.addWidget(self.empty)
-        self.pages = {"M": self._manager_page(), "P": self._project_page(), "U": self._unit_page(),
-                      "L": self._material_page()}
+        self.pages = {"M": self._manager_page(), "P": self._project_page(), "B": self._group_page("b", "Block"),
+                      "V": self._group_page("v", "Level"), "U": self._unit_page(), "L": self._material_page()}
         for w in self.pages.values():
             self.addWidget(w)
 
@@ -986,6 +1159,23 @@ class NodePanel(QStackedWidget):
         self.p_table.activated_item.connect(lambda r: self.app.open_entity("PRODUCT", r.product_id, self))
         lay.addWidget(self.p_table, 1)
         lay.addLayout(h(None, self.p_apply))
+        return w
+
+    def _group_page(self, p: str, title: str) -> QWidget:
+        """Block (``p`` = "b") or level ("v"): name, code, notes and the materials it needs."""
+        w, lay, form = self._box(title)
+        name, code, notes = QLineEdit(), QLineEdit(), notes_edit(height=48)
+        for text, e in (("Name *", name), ("Code / ref", code), ("Notes", notes)):
+            form.addRow(text, e)
+        save = button("Save", lambda: self.save_group(p), primary=True)
+        lay.addLayout(h(None, save))
+        info_ = label("", "Muted", wrap=True)
+        lay.addWidget(info_)
+        table = self._demand_table()
+        lay.addWidget(table, 1)
+        for attr, val in (("name", name), ("code", code), ("notes", notes), ("save", save), ("info", info_),
+                          ("table", table)):
+            setattr(self, f"{p}_{attr}", val)
         return w
 
     def _unit_page(self) -> QWidget:
@@ -1078,9 +1268,27 @@ class NodePanel(QStackedWidget):
         rows = run(self, self.app.services.project_demand.compare_with_project_list, n.id) or []
         self.p_table.set_items(rows)
         off = sum(1 for r in rows if not r.in_step)
-        self.p_info.setText(f"{n.units} unit type(s), {fmt_qty(qty)} unit(s), {lines} material line(s). "
+        blocks = f"{_n(n.blocks, 'block')}, " if n.blocks else ""
+        self.p_info.setText(f"{blocks}{n.units} unit type(s), {fmt_qty(qty)} unit(s), {lines} material line(s). "
                             + (f"{off} material(s) differ from the material list." if off
                                else "Material list matches the units." if rows else ""))
+
+    def _show_group(self, p: str, n, rows, text: str) -> None:
+        getattr(self, f"{p}_name").setText(n.name)
+        getattr(self, f"{p}_code").setText(n.code or "")
+        getattr(self, f"{p}_notes").setPlainText(n.notes or "")
+        self._enable(*(getattr(self, f"{p}_{a}") for a in ("name", "code", "notes", "save")), on=self.page.can_edit)
+        getattr(self, f"{p}_table").set_items(rows)
+        getattr(self, f"{p}_info").setText(f"{text} Materials needed ({len(rows)}):")
+
+    def _show_b(self, n) -> None:
+        rows = run(self, self.app.services.project_demand.for_block, n.id) or []
+        self._show_group("b", n, rows, f"{_n(n.levels, 'level')}, {_n(n.units, 'unit type')}.")
+
+    def _show_v(self, n) -> None:
+        rows = run(self, self.app.services.project_demand.for_level, n.id) or []
+        where = f"In block {n.block_name}. " if n.block_name else ""
+        self._show_group("v", n, rows, f"{where}{_n(n.units, 'unit type')}.")
 
     def _show_u(self, n) -> None:
         self.u_name.setText(n.name)
@@ -1122,6 +1330,16 @@ class NodePanel(QStackedWidget):
             "status": self.p_status.currentData(), "notes": self.p_notes.toPlainText()}, n.version)
         if saved is not None:
             self.page._after_project_change(saved, n.manager_id)
+
+    def save_group(self, p: str) -> None:
+        n = self.node
+        fn = self.svc.save_block if p == "b" else self.svc.save_level
+        data = {"name": getattr(self, f"{p}_name").text(), "code": getattr(self, f"{p}_code").text(),
+                "notes": getattr(self, f"{p}_notes").toPlainText()}
+        if run(self, fn, n.id, data) is not None:
+            key = f"{'B' if p == 'b' else 'V'}:{n.id}"
+            self.page.reload_item(key, children=False)
+            self.page._changed()
 
     def save_unit(self) -> None:
         n = self.node

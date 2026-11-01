@@ -279,6 +279,8 @@ def test_upgrade_turns_typed_manager_names_into_managers(svc, sample):
 # ---- the Project Tree screen ------------------------------------------------------------------------
 from test_ui_smoke import _errors, ui  # noqa: E402,F401 - the shared screen fixture
 
+from wms.ui.pages.projects import KEY  # noqa: E402
+
 
 def _open_page(win):
     win.go("projects")
@@ -394,4 +396,127 @@ def test_tree_actions_move_duplicate_delete(ui, tribeca, monkeypatch):  # noqa: 
     assert page.items["N:"].isExpanded() and f"P:{tribeca.project.id}" in page.items
     page.apply_demand(app.services.project_tree.project(tribeca.project.id))
     assert app.services.materials.project_summary(tribeca.project.id).required > 0
+    assert not _errors(msgs), msgs
+
+
+# ---- Block and Level (Manager -> Project -> Block -> Level -> Unit -> Material) ----------------------
+@pytest.fixture
+def tower(svc, tribeca):
+    """Tribeca -> Block A -> Level 1 -> Kitchen K10 x 4 (H3311 x 2) and Bath B10 x 2 (Hinge x 6)."""
+    t = svc.project_tree
+    block = t.save_block(None, {"name": "Block A", "code": "A"}, tribeca.project.id)
+    level = t.save_level(None, {"name": "Level 1", "code": "L1"}, block.id)
+    k10 = t.save_unit(None, {"name": "Kitchen", "unit_code": "K10", "quantity": "4"}, level_id=level.id)
+    t.add_materials(k10.id, [(tribeca.h3311.id, "2")])
+    b10 = t.save_unit(None, {"name": "Bath", "unit_code": "B10", "quantity": "2"}, level_id=level.id)
+    t.add_materials(b10.id, [(tribeca.hinge.id, "6")])
+    return type("W", (), dict(block=block, level=level, k10=k10, b10=b10))
+
+
+def test_blocks_and_levels_hold_units(svc, tribeca, tower):
+    t = svc.project_tree
+    p = t.project(tribeca.project.id)
+    assert (p.blocks, p.direct_units, p.units) == (1, 2, 4)  # Kitchen K01 + Wardrobe sit directly in the project
+    assert [b.name for b in t.blocks(p.id)] == ["Block A"] and t.blocks(p.id)[0].units == 2
+    assert [lv.name for lv in t.levels(tower.block.id)] == ["Level 1"]
+    assert [u.code for u in t.units(None, level_id=tower.level.id)] == ["K10", "B10"]
+    assert [u.code for u in t.units(p.id, level_id=None)] == ["K01", "W02"]  # DIRECT
+    assert t.unit(tower.k10.id).site_id == p.id and t.unit(tower.k10.id).parent_key == f"V:{tower.level.id}"
+    with pytest.raises(ValidationError):
+        t.save_level(None, {"name": " "}, tower.block.id)
+
+
+def test_demand_for_block_level_and_project(svc, tribeca, tower):
+    d = svc.project_demand
+    assert _required(d.for_level(tower.level.id)) == {"H3311": D(8), "HINGE-XYZ": D(12)}
+    assert _required(d.for_block(tower.block.id)) == {"H3311": D(8), "HINGE-XYZ": D(12)}
+    # project = direct units (H3311 24x3 + 12x1.5 = 90, hinge 192) + the level (8 / 12)
+    proj = _required(d.for_project(tribeca.project.id))
+    assert proj["H3311"] == D(98) and proj["HINGE-XYZ"] == D(204)
+
+
+def test_duplicate_level_copies_a_whole_floor(svc, tribeca, tower):
+    t = svc.project_tree
+    copy = t.duplicate_level(tower.level.id)
+    assert copy.name == "Level 1 (copy)" and copy.units == 2
+    t.save_level(copy.id, {"name": "Level 2", "code": "L2"})
+    assert [lv.name for lv in t.levels(tower.block.id)] == ["Level 1", "Level 2"]
+    assert _required(svc.project_demand.for_block(tower.block.id))["HINGE-XYZ"] == D(24)
+    t.move_level(copy.id, -1)
+    assert [lv.name for lv in t.levels(tower.block.id)] == ["Level 2", "Level 1"]
+    block2 = t.duplicate_block(tower.block.id)
+    assert block2.levels == 2 and block2.units == 4
+    assert [b.name for b in t.blocks(tribeca.project.id)] == ["Block A", "Block A (copy)"]
+    # duplicating the project copies blocks and levels too
+    dup = t.duplicate_project(tribeca.project.id, "TRI-2", "Tribeca 2")
+    assert (dup.blocks, dup.units) == (2, 8 + 2)
+
+
+def test_move_unit_between_levels_and_projects(svc, tribeca, tower):
+    t = svc.project_tree
+    lvl2 = t.save_level(None, {"name": "Level 2"}, tower.block.id)
+    t.move_unit_to(tower.b10.id, None, lvl2.id)
+    assert [u.code for u in t.units(None, level_id=lvl2.id)] == ["B10"]
+    t.move_unit_to(tower.b10.id, tribeca.project.id, None)  # straight into the project
+    assert t.unit(tower.b10.id).level_id is None
+    places = t.unit_places()
+    assert any(lid == lvl2.id and "Block A" in text and "Level 2" in text for text, _sid, lid in places)
+    t.move_unit(tower.b10.id, -1)  # ordered among the project's direct units only
+    assert [u.code for u in t.units(tribeca.project.id, level_id=None)] == ["K01", "B10", "W02"]
+
+
+def test_delete_level_and_block_say_what_goes(svc, tribeca, tower):
+    t = svc.project_tree
+    assert t.level_contents(tower.level.id) == (2, 2)
+    assert t.block_contents(tower.block.id) == (1, 2, 2)
+    assert t.delete_level(tower.level.id) == (2, 2)
+    assert t.levels(tower.block.id) == [] and len(t.units(tribeca.project.id)) == 2
+    lv = t.save_level(None, {"name": "Level 3"}, tower.block.id)
+    t.save_unit(None, {"name": "Desk", "quantity": "1"}, level_id=lv.id)
+    assert t.delete_block(tower.block.id) == (1, 1, 0)
+    assert t.blocks(tribeca.project.id) == []
+    with svc.ctx.db.read_session() as s:
+        actions = set(s.scalars(select(AuditLog.action)))
+    assert {"BLOCK_CREATED", "LEVEL_CREATED", "LEVEL_DELETED", "BLOCK_DELETED"} <= actions
+
+
+def test_search_finds_blocks_levels_and_units_inside(svc, tribeca, tower):
+    m = svc.project_tree.search("level 1")
+    assert m.levels == {tower.level.id} and tower.block.id in m.block_paths
+    m = svc.project_tree.search("B10")
+    assert m.units == {tower.b10.id} and tower.level.id in m.level_paths and tower.block.id in m.block_paths
+    assert tribeca.project.id in m.project_paths
+
+
+def test_tree_screen_blocks_levels(ui, tribeca, tower, monkeypatch):  # noqa: F811
+    app, win, msgs, _ = ui
+    page = _open_page(win)
+    page.expand_all()
+    tri = page.items[f"P:{tribeca.project.id}"]
+    assert tri.child(0).data(0, KEY) == f"B:{tower.block.id}"  # blocks first, then direct units
+    assert "1 block" in tri.text(4)
+    block = page.items[f"B:{tower.block.id}"]
+    assert block.text(0) == "Block A" and "1 level" in block.text(4)
+    level = page.items[f"V:{tower.level.id}"]
+    assert level.isExpanded() and level.childCount() == 2
+    k10 = page.items[f"U:{tower.k10.id}"]
+    k10.setExpanded(True)
+    assert k10.child(0).text(3) == "8 SHEET"
+    for key in (f"B:{tower.block.id}", f"V:{tower.level.id}"):
+        assert page.build_menu(page.items[key]).actions()
+    # rename inline, side panel shows the level's demand
+    assert page.commit_edit(level, 0, "Ground Floor")
+    assert app.services.project_tree.level(tower.level.id).name == "Ground Floor"
+    page.select(f"V:{tower.level.id}")
+    assert page.panel.currentWidget() is page.panel.pages["V"]
+    assert {d.code for d in page.panel.v_table.items()} == {"H3311", "HINGE-XYZ"}
+    page.select(f"B:{tower.block.id}")
+    assert page.panel.currentWidget() is page.panel.pages["B"]
+    # duplicate the level, then delete the block (confirmed automatically in tests)
+    page.duplicate_group(f"V:{tower.level.id}", app.services.project_tree.level(tower.level.id))
+    assert page.items[f"B:{tower.block.id}"].childCount() == 2
+    page.delete_group(f"B:{tower.block.id}", app.services.project_tree.block(tower.block.id))
+    assert any("2 levels" in m[2] for m in msgs if m[0] == "confirm")
+    assert f"B:{tower.block.id}" not in page.items
+    assert app.services.project_tree.project(tribeca.project.id).blocks == 0
     assert not _errors(msgs), msgs
