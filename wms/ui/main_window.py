@@ -167,7 +167,7 @@ class MainWindow(QMainWindow):
         self.nav.itemClicked.connect(self._nav_clicked)
         self.nav.currentItemChanged.connect(self._nav_changed)
         sl.addWidget(self.nav, 1)
-        sl.addWidget(label(f"v{__version__}", "AppSubtitle"))
+        sl.addWidget(label(f"v{__version__}", "AppVersion"))
         rl.addWidget(side)
 
         # Main column

@@ -30,11 +30,16 @@ QCheckBox::indicator:disabled {{ background: #F2F4F7; border-color: #D0D5DD; }}
 QCalendarWidget QWidget {{ background: white; color: {TEXT}; }}
 QWidget#Sidebar {{ background: {PRIMARY}; }}
 QListWidget#Nav {{ background: transparent; border: none; color: #DCE3EC; outline: 0; }}
-QListWidget#Nav::item {{ padding: 5px 14px; border-radius: 6px; margin: 0px 8px; }}
+QListWidget#Nav::item {{ padding: 3px 14px; border-radius: 6px; margin: 0px 8px; }}
+QListWidget#Nav QScrollBar:vertical {{ background: transparent; width: 8px; margin: 0; }}
+QListWidget#Nav QScrollBar::handle:vertical {{ background: #4A6B92; border-radius: 4px; min-height: 24px; }}
+QListWidget#Nav QScrollBar::add-line:vertical, QListWidget#Nav QScrollBar::sub-line:vertical {{ height: 0; }}
+QListWidget#Nav QScrollBar::add-page:vertical, QListWidget#Nav QScrollBar::sub-page:vertical {{ background: none; }}
 QListWidget#Nav::item:selected {{ background: #2E5583; color: white; }}
 QListWidget#Nav::item:hover:!selected {{ background: #284A73; }}
 QLabel#AppTitle {{ color: white; font-size: 13pt; font-weight: 600; padding: 14px 16px 4px 16px; }}
 QLabel#AppSubtitle {{ color: #AFC0D3; padding: 0 16px 10px 16px; font-size: 9pt; }}
+QLabel#AppVersion {{ color: #AFC0D3; padding: 8px 16px 0 16px; font-size: 9pt; border-top: 1px solid #2E5583; }}
 QLabel#NavSection {{ color: #8FA6BF; font-size: 8pt; font-weight: 600; padding: 10px 22px 2px 22px; }}
 QWidget#TopBar {{ background: white; border-bottom: 1px solid #E4E7EC; }}
 QLabel#PageTitle {{ font-size: 15pt; font-weight: 600; color: #101828; }}

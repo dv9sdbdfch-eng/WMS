@@ -36,8 +36,10 @@ class LowStockPage(Page):
         self.table.set_row_style(lambda r: "low" if r.status in (StockStatus.OUT, StockStatus.LOW) else None)
         self.table.activated_item.connect(self.open)
         self.body.addWidget(self.table, 1)
-        self.count = label("", "Muted")
-        self.body.addLayout(h(self.count, None, button("Copy list", self.table.copy_all)))
+        self.count = label("", "Muted", wrap=True)
+        footer = h(self.count, button("Copy list", self.table.copy_all))
+        footer.setStretch(0, 1)  # the count text takes the free width and wraps when it is long
+        self.body.addLayout(footer)
         self.body.addWidget(label(
             "Suggested = reorder level (or minimum) + reorder quantity - available - on order. "
             "Draft orders are never sent automatically: open them under Purchase Orders, check and mark as ordered.",

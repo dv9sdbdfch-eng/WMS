@@ -28,9 +28,10 @@ class Page(QWidget):
         titles.setSpacing(2)
         titles.addWidget(label(self.title, "PageTitle"))
         if self.subtitle:
-            titles.addWidget(label(self.subtitle, "PageSubtitle"))
-        head.addLayout(titles)
-        head.addStretch(1)
+            # Wraps onto a second line instead of widening the window: every screen has to fit a
+            # 1366 x 768 laptop / warehouse PC screen next to the sidebar.
+            titles.addWidget(label(self.subtitle, "PageSubtitle", wrap=True))
+        head.addLayout(titles, 1)
         self.actions = QHBoxLayout()
         self.actions.setSpacing(8)
         head.addLayout(self.actions)
@@ -101,8 +102,9 @@ class ListPage(Page):
         self.table = DataTable(self.columns(), settings_key=type(self).__name__)
         self.table.activated_item.connect(self._open)
         self.body.addWidget(self.table, 1)
-        self.count = label("", "Muted")
-        self.footer = h(self.count, None, button("Open", lambda: self._open(self.table.current())))
+        self.count = label("", "Muted", wrap=True)
+        self.footer = h(self.count, button("Open", lambda: self._open(self.table.current())))
+        self.footer.setStretch(0, 1)  # the count text takes the free width and wraps when it is long
         self.body.addLayout(self.footer)
 
     def add_filter(self, widget, signal=None) -> None:
