@@ -260,8 +260,39 @@ class Database:
                     conn.execute(text(stmt))
                 command.stamp(cfg, "head")
             else:
+                self._copy_before_upgrade(conn, cfg)
                 command.upgrade(cfg, "head")
         self.refresh_statistics()
+
+    def _copy_before_upgrade(self, conn, cfg) -> Path | None:
+        """A full copy of the database file next to it before a newer version changes its schema
+        ("wms.before-0012.db"), so an upgrade can always be undone by hand. SQLite only; a
+        failed copy is logged and the upgrade goes ahead (migrations are additive and transactional)."""
+        from alembic.runtime.migration import MigrationContext
+        from alembic.script import ScriptDirectory
+
+        if self.dialect != "sqlite":
+            return None
+        try:
+            current = MigrationContext.configure(conn).get_current_revision()
+            head = ScriptDirectory.from_config(cfg).get_current_head()
+            path = self.engine.url.database
+            if current == head or not current or not path or path == ":memory:":
+                return None
+            src = Path(path)
+            dst = src.with_name(f"{src.stem}.before-{head}{src.suffix or '.db'}")
+            if dst.exists():
+                return dst
+            import sqlite3
+            with sqlite3.connect(str(src)) as a, sqlite3.connect(str(dst)) as b:
+                a.backup(b)
+            a.close()
+            b.close()
+            log.info("Copy of the database before the upgrade to %s: %s", head, dst)
+            return dst
+        except Exception:  # noqa: BLE001
+            log.warning("Could not copy the database before upgrading it", exc_info=True)
+            return None
 
     def refresh_statistics(self) -> None:
         """Give SQLite's query planner current table statistics (ANALYZE, sampled).

@@ -240,6 +240,20 @@ Protected tables (database triggers, see `wms.db.engine`):
 
 * UNIQUE (parent_id, code)
 
+## managers
+
+| Column | Type | Null | Key / reference |
+|---|---|---|---|
+| name | String(120) | no |  |
+| email | String(200) | yes |  |
+| phone | String(50) | yes |  |
+| notes | Text | yes |  |
+| sort_order | Integer | no |  |
+| id | Integer | no | PK |
+| created_at | UTCDateTime | no |  |
+| updated_at | UTCDateTime | no |  |
+| is_active | Boolean | no |  |
+
 ## movement_reversals
 
 | Column | Type | Null | Key / reference |
@@ -345,6 +359,24 @@ Protected tables (database triggers, see `wms.db.engine`):
 
 * CHECK required_qty >= 0
 * UNIQUE (site_id, product_id)
+
+## project_units
+
+| Column | Type | Null | Key / reference |
+|---|---|---|---|
+| site_id | Integer | no | FK sites.id, indexed |
+| unit_code | String(50) | yes | indexed |
+| name | String(200) | no | indexed |
+| quantity | Quantity | no |  |
+| sort_order | Integer | no |  |
+| notes | Text | yes |  |
+| created_by_id | Integer | yes | FK users.id, indexed |
+| id | Integer | no | PK |
+| created_at | UTCDateTime | no |  |
+| updated_at | UTCDateTime | no |  |
+
+* CHECK quantity >= 0
+* INDEX ix_project_units_site_order (site_id, sort_order)
 
 ## purchase_order_lines
 
@@ -474,6 +506,7 @@ Protected tables (database triggers, see `wms.db.engine`):
 | address | Text | yes |  |
 | postcode | String(12) | yes |  |
 | project_manager | String(120) | yes |  |
+| manager_id | Integer | yes | FK managers.id, indexed |
 | contact_name | String(120) | yes |  |
 | contact_phone | String(50) | yes |  |
 | contact_email | String(200) | yes |  |
@@ -681,6 +714,24 @@ Protected tables (database triggers, see `wms.db.engine`):
 | created_at | UTCDateTime | no |  |
 | updated_at | UTCDateTime | no |  |
 | is_active | Boolean | no |  |
+
+## unit_materials
+
+| Column | Type | Null | Key / reference |
+|---|---|---|---|
+| unit_id | Integer | no | FK project_units.id, indexed |
+| product_id | Integer | no | FK products.id, indexed |
+| quantity_per_unit | Quantity | no |  |
+| vpk_code | String(80) | yes | indexed |
+| sort_order | Integer | no |  |
+| notes | Text | yes |  |
+| created_by_id | Integer | yes | FK users.id, indexed |
+| id | Integer | no | PK |
+| created_at | UTCDateTime | no |  |
+| updated_at | UTCDateTime | no |  |
+
+* CHECK quantity_per_unit >= 0
+* INDEX ix_unit_materials_unit_order (unit_id, sort_order)
 
 ## units
 

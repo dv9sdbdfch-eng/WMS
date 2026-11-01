@@ -64,7 +64,7 @@ def test_every_page_opens(ui, sample):
     app, win, msgs, _ = ui
     sample.receive(sample.mdf, 40)
     keys = list(win.factories)
-    assert len(keys) == 20
+    assert len(keys) == 21
     for key in keys:
         win.go(key)
         page = win.page(key)

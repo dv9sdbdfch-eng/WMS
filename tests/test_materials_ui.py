@@ -399,7 +399,7 @@ def test_sidebar_is_grouped_and_less_used_groups_fold(ui, sample):  # noqa: F811
         "HOME": ["Dashboard"],
         "WAREHOUSE": ["Materials", "Locations & Bins"],
         "OPERATIONS": ["Goods In", "Goods Out", "Transfer"],
-        "PROJECTS": ["Projects"],
+        "PROJECTS": ["Project Tree", "Projects"],
         "PURCHASING": ["Purchase Orders", "Deliveries"],
         "MORE": ["Stocktake", "Returns", "Finished Products", "Reports", "Import / Export", "Archived Records"],
         "ADMIN": ["Users", "Audit Log", "Backup & Restore", "Settings"],

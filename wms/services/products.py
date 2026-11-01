@@ -26,6 +26,7 @@ from wms.db.models import (
     StockMovement,
     Supplier,
     Unit,
+    UnitMaterial,
 )
 from wms.services import audit, lifecycle
 from wms.services.base import BaseService, clean_code, clean_str, like_pattern, prefix_pattern
@@ -485,6 +486,7 @@ class ProductService(BaseService):
             lifecycle.count(s, StockLevel.id, StockLevel.product_id == p.id)
             + lifecycle.count(s, StockCountLine.id, StockCountLine.product_id == p.id)
             + lifecycle.count(s, ProjectMaterial.id, ProjectMaterial.product_id == p.id)
+            + lifecycle.count(s, UnitMaterial.id, UnitMaterial.product_id == p.id)
             + lifecycle.count(s, BomItem.id, or_(BomItem.parent_product_id == p.id,
                                                   BomItem.component_product_id == p.id))
             + lifecycle.count(s, Attachment.id, Attachment.entity_type == EntityType.PRODUCT.value,

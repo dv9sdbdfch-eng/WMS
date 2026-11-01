@@ -39,6 +39,26 @@ def _signed(m):
     return m.quantity * out
 
 
+class _ManagerBox(QComboBox):
+    """Project manager: pick one of the managers (Project Tree) or type a new name, which creates
+    that manager when the project is saved."""
+
+    def __init__(self, app):
+        super().__init__()
+        self.setEditable(True)
+        self.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.addItem("")
+        for name, _mid in app.services.project_tree.manager_choices():
+            self.addItem(name)
+        self.lineEdit().setPlaceholderText("Choose or type a manager")
+
+    def text(self) -> str:
+        return self.currentText()
+
+    def setText(self, text: str) -> None:  # noqa: N802 - same call as QLineEdit
+        self.setEditText(text)
+
+
 class SiteDialog(QDialog):
     def __init__(self, app, site_id: int | None, parent=None, tab: str | None = None):
         super().__init__(parent)
@@ -134,7 +154,7 @@ class SiteDialog(QDialog):
                           ("customer", "Customer"), ("address", "Address"), ("postcode", "Postcode"),
                           ("project_manager", "Project manager"), ("contact_name", "Site contact"),
                           ("contact_phone", "Contact phone"), ("contact_email", "Contact email")):
-            e = QLineEdit()
+            e = _ManagerBox(self.app) if key == "project_manager" else QLineEdit()
             self.f[key] = e
             form.addRow(text, e)
         self.status = QComboBox()
