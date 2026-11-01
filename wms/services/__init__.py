@@ -84,6 +84,16 @@ class Services:
         return SiteService(self.ctx)
 
     @cached_property
+    def project_tree(self):
+        from wms.services.project_tree import ProjectTreeService
+        return ProjectTreeService(self.ctx)
+
+    @cached_property
+    def project_demand(self):
+        from wms.services.project_demand import ProjectDemandService
+        return ProjectDemandService(self.ctx)
+
+    @cached_property
     def stock(self):
         from wms.services.stock_ops import StockOpsService
         return StockOpsService(self.ctx)

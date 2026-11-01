@@ -102,9 +102,10 @@ class SiteService(BaseService):
                 old = {}
             site.project_number, site.name, site.status = number, name, status
             site.start_date, site.end_date = start, end
-            for f in ("customer", "address", "postcode", "project_manager", "contact_name", "contact_phone",
+            for f in ("customer", "address", "postcode", "contact_name", "contact_phone",
                       "contact_email", "notes"):
                 setattr(site, f, clean_str(data.get(f)))
+            self._set_manager(s, site, data)
             s.flush()
             o, n = audit.diff(old, audit.snapshot(site, SITE_FIELDS))
             if n:
@@ -112,6 +113,22 @@ class SiteService(BaseService):
                              site.display, old=o, new=n)
             saved_id = site.id
         return self.get(saved_id)
+
+    def _set_manager(self, s, site: Site, data: dict) -> None:
+        """v1.15: a project's manager is a link to a manager record (``manager_id``); the name is
+        kept in ``project_manager`` for display. Given ``manager_id`` wins; otherwise the typed
+        name is matched to a manager (ignoring case) and a new manager is made for a new name."""
+        from wms.db.models import Manager
+        from wms.services.project_tree import find_or_create_manager
+        if "manager_id" in data:
+            mid = data.get("manager_id") or None
+            m = s.get(Manager, mid) if mid else None
+            if mid and m is None:
+                raise NotFoundError("Manager not found.")
+        else:
+            m = find_or_create_manager(s, self.ctx, data.get("project_manager"))
+        site.manager_id = m.id if m else None
+        site.project_manager = m.name if m else None
 
     # -- completing / archiving / restoring projects -------------------------------
     def _plan(self, s, site: Site) -> RemovalPlan:
@@ -122,6 +139,12 @@ class SiteService(BaseService):
             GoodsIssue.site_id, StockReturn.site_id, ProductionOrder.site_id, FinishedProductInfo.site_id,
             ProjectMaterial.site_id))
         plan.references += lifecycle.attachment_count(s, EntityType.SITE.value, site.id)
+        from wms.services.project_tree import _contents
+        units, lines = _contents(s, site.id)
+        if units:
+            what = f"{units:,} unit{'' if units == 1 else 's'} with {lines:,} material line{'' if lines == 1 else 's'}"
+            plan.notes.append(f"Its project structure ({what}) will be deleted with it." if plan.permanent
+                              else f"Its project structure ({what}) is kept with the archived project.")
         return plan
 
     def removal_plan(self, site_id: int) -> RemovalPlan:
@@ -143,6 +166,8 @@ class SiteService(BaseService):
             plan.check()
             lifecycle.record_removal(s, self.ctx, plan, "SITE", reason)
             if plan.permanent:
+                from wms.services.project_tree import delete_project_structure
+                delete_project_structure(s, site.id)
                 s.delete(site)
             else:
                 site.status = SiteStatus.ARCHIVED.value

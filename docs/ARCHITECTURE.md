@@ -37,6 +37,14 @@ SQLite файл    (пізніше PostgreSQL)
 | SQLite `BEGIN IMMEDIATE` | Дві копії програми на одній базі не змішують операції |
 | Правила цілісності і в коді, і в базі (FK, UNIQUE, CHECK, тригери) | Не залежимо лише від перевірок у формах |
 
+## Структура проєктів (v1.15)
+
+`Manager → Project (sites) → [ProjectBlock → ProjectLevel] → ProjectUnit → UnitMaterial → Product`.
+Блок і рівень необов'язкові: `project_units.level_id` може бути NULL, а `project_units.site_id` є
+завжди (потреба проєкту — один запит). Проєкт — це існуючий запис
+`sites`; матеріали юнітів посилаються на існуючі товари. Підсумкова потреба не зберігається, а
+рахується окремим шаром `services/project_demand.py`, який не знає про екрани. Див. docs/PROJECTS.md.
+
 ## Перехід на PostgreSQL (майбутнє)
 
 Що вже готово: моделі і запити — SQLAlchemy (без SQL, специфічного для SQLite, у сервісах);
