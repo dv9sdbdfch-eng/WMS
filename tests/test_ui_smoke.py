@@ -277,15 +277,9 @@ def test_dashboard_shows_actionable_alerts(ui, sample):
     dn = win.page("delivery_notes")
     assert dn.scan.currentData() == "MISSING"
     assert len(dn.table.items()) == next(a.count for a in d.alerts if a.key == "no_scan")
-    # TODAY is one compact line; each figure opens today's list
+    # v1.14: the TODAY line is gone (Goods In / Out lists keep their own date filters)
     win.go("dashboard")
-    assert dash.today_tiles["Goods Out"].text() == "Goods Out   1"
-    assert dash.today_tiles["Returns"].objectName() == "TodayZero"
-    dash.today_tiles["Goods In"].click()
-    assert dn.date_from.value() == date.today() and len(dn.table.items()) == 1
-    win.go("dashboard")
-    dash.today_tiles["Goods Out"].click()
-    assert win.page("goods_out").tabs.currentWidget() is win.page("goods_out").history
+    assert not hasattr(dash, "today_tiles")
     win.go("dashboard")
     dash.open_action("no_photo")
     search = win.page("search")
