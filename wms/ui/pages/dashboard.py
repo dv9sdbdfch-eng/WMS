@@ -1,33 +1,39 @@
-"""Dashboard (spec 8-16): what needs my attention, and what happened today.
+"""Dashboard = the home workspace (v1.14): the stock table gets the screen, the summaries fold away.
 
-* ACTION REQUIRED - one list of problems, zero counts left out, grouped Critical / Action /
-  Data quality. Every entry opens the screen that shows exactly those records.
-* TODAY - one compact line of today's postings; each figure opens its list.
-* Backup health - a quiet line while backups are fine; a failed or overdue backup becomes a
-  Critical entry instead.
-* RECENT ACTIVITY - code, project, bin and document cells are links; double-click a row opens
-  the transaction.
+Top to bottom:
+
+* **Dashboard** (folds; folded by default) - Recent Activity. The header keeps the quiet
+  "Last successful backup" line visible while folded. Code, project, bin and document cells are links;
+  double-click a row opens the transaction.
+* **Action Required (n)** (folds) - one list of problems, zero counts left out, grouped Critical /
+  Action / Data quality; every entry opens the screen that shows exactly those records. The number of
+  entries stays in the header while folded. With nothing to do it starts folded.
+* **Search + filters** and the **Remaining / Stock table** (the Materials list) - takes every pixel
+  that is left, so folding a section above or resizing the window gives the table more rows at once.
+
+Folded / unfolded states, the table's columns, widths and sort order are kept on this PC between
+sessions. Search text and filters are not: the screen always reopens showing all active stock.
+The old TODAY line was removed (spec v1.14 section 1); Goods In / Out lists keep their own date filters.
 """
 
 from __future__ import annotations
 
-from datetime import date
-
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QPushButton, QSizePolicy, QVBoxLayout, QWidget
 
 from wms.core.enums import EntityType
+from wms.core.permissions import P
 from wms.services.dashboard import PRIORITIES
 from wms.services.search import signed_qty
 from wms.ui.pages.base import Page
+from wms.ui.widgets.collapsible import CollapsibleSection
 from wms.ui.widgets.common import DATETIME, QTY, Col, DataTable, label
-
-#: TODAY figures: (name, page, preset). Lists open filtered to today's documents.
-TODAY = (("Goods In", "delivery_notes", "today"), ("Goods Out", "goods_out", "today"),
-         ("Transfers", "movements", "transfer"), ("Returns", "returns", "today"))
-TODAY_PAGES = {name: page for name, page, _ in TODAY}
 
 #: button style per priority (colour is never the only signal: each group has its own heading)
 STYLES = {"critical": "AlertCritical", "action": "AlertAction", "data": "AlertData"}
+#: QSettings keys of the two folding sections (per PC)
+DASH_KEY, ACTION_KEY = "home/dashboard", "home/action_required"
+#: Recent Activity is a preview inside a folding section: at most this many rows tall
+RECENT_HEIGHT = 196
 
 
 def _restyle(w, name: str) -> None:
@@ -39,48 +45,21 @@ def _restyle(w, name: str) -> None:
 
 class DashboardPage(Page):
     title = "Dashboard"
-    subtitle = "What needs attention, and what has happened today"
+    subtitle = ""
+    show_header = False  # the "Dashboard" section header is the title
+    margins = (16, 8, 16, 8)
+    spacing = 0
 
     def __init__(self, app, parent=None):
         super().__init__(app, parent)
         # Goods In / Goods Out / Transfer are in the top bar on every screen (F2 / F3 / F4).
+        self.body.setSpacing(6)
 
-        # -- ACTION REQUIRED ------------------------------------------------------------------
-        self.action_title = label("ACTION REQUIRED", "SectionTitle")
-        self.body.addWidget(self.action_title)
-        self.action_box = QVBoxLayout()
-        self.action_box.setSpacing(6)
-        self.body.addLayout(self.action_box)
-        self.nothing = label("Nothing needs attention right now.", "Muted")
-        self.body.addWidget(self.nothing)
-        self.tiles: dict[str, QPushButton] = {}  # key -> button, for the entries shown now
-        self.group_rows: dict[str, QWidget] = {}
-
-        # -- TODAY + backup (one line) --------------------------------------------------------
-        self.body.addWidget(label("TODAY", "SectionTitle"))
-        bar = QFrame()
-        bar.setObjectName("TodayBar")
-        tl = QHBoxLayout(bar)
-        tl.setContentsMargins(12, 6, 12, 6)
-        tl.setSpacing(4)
-        self.today_tiles: dict[str, QPushButton] = {}
-        for i, (name, page, preset) in enumerate(TODAY):
-            if i:
-                tl.addWidget(label("|", "Muted"))
-            b = QPushButton(name)
-            b.setObjectName("TodayItem")
-            b.setAutoDefault(False)
-            b.setToolTip(f"{name} posted today - click to open the list")
-            b.clicked.connect(lambda _=False, p=page, k=preset: self.open_today(p, k))
-            self.today_tiles[name] = b
-            tl.addWidget(b)
-        tl.addStretch(1)
+        # -- DASHBOARD (folded by default) ------------------------------------------------------
+        self.dash_section = CollapsibleSection("Dashboard", DASH_KEY, expanded=False,
+                                               tooltip="Recent activity. Click to show or hide.")
         self.backup_line = label("", "Muted")
-        tl.addWidget(self.backup_line)
-        self.body.addWidget(bar)
-
-        # -- RECENT ACTIVITY ------------------------------------------------------------------
-        self.body.addWidget(label("RECENT ACTIVITY", "SectionTitle"))
+        self.dash_section.add_header_widget(self.backup_line)
         self.t_mv = DataTable([
             Col("When", lambda m: m.occurred_at, DATETIME, 128),
             Col("Type", lambda m: m.type_label, width=95),
@@ -95,7 +74,37 @@ class DashboardPage(Page):
         self.t_mv.activated_item.connect(self._open_movement)
         self.t_mv.setToolTip("Click a code, bin, project or document to open it. Double-click a row for the "
                              "transaction.")
-        self.body.addWidget(self.t_mv, 1)
+        self.dash_section.body.addWidget(label("RECENT ACTIVITY", "AlertGroup"))
+        self.dash_section.body.addWidget(self.t_mv)
+        self.dash_section.toggled.connect(lambda _on: self._update_hints())
+        self.body.addWidget(self.dash_section)
+
+        # -- ACTION REQUIRED (n) --------------------------------------------------------------
+        self.action_section = CollapsibleSection("Action Required", ACTION_KEY, expanded=True,
+                                                 tooltip="Problems that need someone. Click to show or hide.")
+        self.action_title = self.action_section.title_label
+        self.action_box = QVBoxLayout()
+        self.action_box.setSpacing(4)
+        self.action_section.body.addLayout(self.action_box)
+        self.nothing = label("Nothing needs attention right now.", "Muted")
+        self.action_section.body.addWidget(self.nothing)
+        self.action_section.toggled.connect(lambda _on: self._update_hints())
+        self.body.addWidget(self.action_section)
+        self.tiles: dict[str, QPushButton] = {}  # key -> button, for the entries shown now
+        self.group_rows: dict[str, QWidget] = {}
+        self._counts: dict[str, int] = {}
+
+        # -- REMAINING / STOCK: search + filters + the table, all the height that is left ---------
+        self.stock = None
+        if app.can(P.PRODUCTS_VIEW):
+            from wms.ui.widgets.materials_view import MaterialsView
+            self.stock = MaterialsView(app, self, settings_key="home_stock", compact=True)
+            self.body.addWidget(self.stock, 1)
+        else:  # no stock rights: Recent Activity may use the room instead
+            self.t_mv.setMaximumHeight(16777215)
+            self.dash_section.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+            self.body.addStretch(1)
+        self._size_recent()
         self.data = None
 
     # -- actions -------------------------------------------------------------------
@@ -118,18 +127,6 @@ class DashboardPage(Page):
             page.show_tab("Backup and restore")
         elif a.preset and hasattr(page, "apply_preset"):
             page.apply_preset(a.preset)
-
-    def open_today(self, page_key: str, kind: str) -> None:
-        mw = self.main_window
-        mw.go(page_key)
-        page = mw.page(page_key)
-        if page is None or not hasattr(page, "apply_preset"):
-            return
-        today = date.today()
-        if kind == "transfer":
-            page.apply_preset({"mtype": "TRANSFER", "date_from": today, "date_to": today})
-        else:
-            page.apply_preset({"date_from": today, "date_to": today})
 
     # -- Recent Activity links (spec 16) ----------------------------------------------
     def open_product(self, m):
@@ -177,7 +174,7 @@ class DashboardPage(Page):
             row = QWidget()
             rl = QHBoxLayout(row)
             rl.setContentsMargins(0, 0, 0, 0)
-            rl.setSpacing(8)
+            rl.setSpacing(6)
             head = label(title.upper(), "AlertGroup")
             head.setFixedWidth(104)
             rl.addWidget(head)
@@ -196,11 +193,12 @@ class DashboardPage(Page):
             self.group_rows[prio] = row
             self.action_box.addWidget(row)
         self.nothing.setVisible(not items)
-
-        for name, b in self.today_tiles.items():
-            n = d.today.get(name, 0)
-            b.setText(f"{name}   {n:,}")
-            _restyle(b, "TodayItem" if n else "TodayZero")
+        self._counts = {p: sum(1 for a in items if a.priority == p) for p in PRIORITIES}
+        severity = "critical" if self._counts["critical"] else "action" if self._counts["action"] else ""
+        self.action_section.set_count(len(items), severity)
+        # nothing to do: folded; otherwise as the person left it (unfolded the first time)
+        saved = self.action_section.saved_state()
+        self.action_section.set_expanded(bool(items) and (saved is None or saved), save=False)
 
         if d.backup is not None:
             # quiet while healthy (spec 14); a problem is already a Critical entry above
@@ -208,3 +206,19 @@ class DashboardPage(Page):
             self.backup_line.setStyleSheet("" if d.backup.ok else "color: #B42318;")
         self.backup_line.setVisible(d.backup is not None)
         self.t_mv.set_items(d.recent_movements)
+        self._update_hints()
+        if self.stock is not None:
+            self.stock.refresh()
+
+    def _update_hints(self) -> None:
+        """What a folded section holds, in words, so folding never hides that something is there."""
+        if self.action_section.expanded or not self._counts:
+            self.action_section.set_hint("")
+        else:
+            parts = [f"{n} {PRIORITIES[p].lower()}" for p, n in self._counts.items() if n]
+            self.action_section.set_hint("  ·  ".join(parts) if parts else "nothing needs attention")
+        self.dash_section.set_hint("" if self.dash_section.expanded else "Recent activity")
+
+    def _size_recent(self) -> None:
+        if self.stock is not None:
+            self.t_mv.setFixedHeight(RECENT_HEIGHT)

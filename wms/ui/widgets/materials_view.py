@@ -52,6 +52,7 @@ from wms.services.materials import (
     PAGE_SIZE,
     PROJECT_SORTS,
     PROJECT_STATUS_CHOICES,
+    SORT_KEYS,
     STATUS_CHOICES,
     STOCK_CHOICES,
     MaterialFilter,
@@ -94,6 +95,7 @@ PROJECT_FIGURES = (
 HEADER_TIPS = {k: tip for k, _t, tip in PROJECT_FIGURES if k != "materials"}
 HEADER_TIPS["proj_reserved"] = HEADER_TIPS.pop("reserved")
 THUMB = 36  # photo thumbnail size in the table, pixels
+ROW = 28  # row height when the Photo column is hidden
 
 
 @dataclass
@@ -343,14 +345,19 @@ class MaterialsView(QWidget):
     filter_changed = Signal()  # a new filter is being shown (parents adapt their buttons)
 
     def __init__(self, app, parent=None, fixed_site_id: int | None = None, settings_key: str | None = None,
-                 picker: bool = False):
+                 picker: bool = False, compact: bool = False):
         super().__init__(parent)
         self.app = app
+        #: compact = a workspace table (Dashboard): search and every filter in two rows, a Status
+        #: drop-down and an always-visible Clear filters button, the chip row only when More Filters
+        #: added something the drop-downs cannot show
+        self.compact = compact
         self.svc = app.services.materials
         self.fixed_site_id = fixed_site_id
         self.picker = picker  # "choose materials" mode: no bulk actions, no export
         self.settings_key = settings_key or ("project_materials" if fixed_site_id else "materials")
         self.filter = MaterialFilter(site_id=fixed_site_id, status="ALL" if fixed_site_id else "ACTIVE")
+        self._restore_sort()
         self.loading = False
         self._gen = 0
         self._options_loaded = False
@@ -379,6 +386,13 @@ class MaterialsView(QWidget):
         for k, v in STOCK_CHOICES.items():
             self.stock.addItem(v, k)
         self.stock.currentIndexChanged.connect(lambda _: self._set("stock", self.stock.currentData()))
+        self.status = QComboBox()
+        for k, v in STATUS_CHOICES.items():
+            self.status.addItem(f"Status: {v}", k)
+        self.status.setToolTip("Material status: active, archived, or both")
+        self.status.currentIndexChanged.connect(lambda _: self._set("status", self.status.currentData()))
+        self.clear_btn = button("Clear filters", lambda: self.clear_all(),
+                                tooltip="Remove every filter and the search text: show all active materials")
         self.more = button("More filters", self.more_filters, tooltip="Category, brand, location, status, "
                            "photo, supplier, dates")
         self.views_btn = QPushButton("Views")
@@ -395,14 +409,36 @@ class MaterialsView(QWidget):
         self.project.setVisible(fixed_site_id is None)
         self.views_btn.setVisible(fixed_site_id is None and not picker)
         self.columns_btn.setVisible(not picker)
-        # spec 18: the search on its own line, the primary filters under it (Project first)
-        lay.addWidget(self.search)
-        top = h(self.project, self.supplier, self.bin, self.stock, self.more, None, self.columns_btn,
-                self.views_btn)
-        for i in (0, 1, 2):
-            top.setStretch(i, 2)
-        top.setStretch(3, 1)
-        lay.addLayout(top)
+        self.count = label("", "Count")
+        if compact:
+            # two compact rows: search + count + table tools, then every filter + Clear filters.
+            # The drop-downs may shrink (to about 10 letters) so the row fits a 1366-pixel laptop screen.
+            lay.setSpacing(6)
+            for combo, n in ((self.project, 10), (self.supplier, 10), (self.bin, 8), (self.stock, 8),
+                             (self.status, 8)):
+                combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+                combo.setMinimumContentsLength(n)
+            first = h(self.search, 12, self.count, None, self.columns_btn, self.views_btn)
+            first.setStretch(0, 3)
+            first.setStretch(3, 1)
+            lay.addLayout(first)
+            top = h(self.project, self.supplier, self.bin, self.stock, self.status, self.more, self.clear_btn)
+            for i in (0, 1, 2):
+                top.setStretch(i, 2)
+            top.setStretch(3, 1)
+            top.setStretch(4, 1)
+            lay.addLayout(top)
+        else:
+            # spec 18: the search on its own line, the primary filters under it (Project first)
+            self.status.setVisible(False)
+            self.clear_btn.setVisible(False)
+            lay.addWidget(self.search)
+            top = h(self.project, self.supplier, self.bin, self.stock, self.more, None, self.columns_btn,
+                    self.views_btn)
+            for i in (0, 1, 2):
+                top.setStretch(i, 2)
+            top.setStretch(3, 1)
+            lay.addLayout(top)
 
         # -- project context (spec 21 / 23): the same banner on Materials -> Project and Project -> Materials
         self.project_bar = QFrame()
@@ -441,8 +477,11 @@ class MaterialsView(QWidget):
         scroll.setFixedHeight(34)
         scroll.setStyleSheet("background: transparent;")
         self.chips_scroll = scroll
-        self.count = label("", "Count")
-        lay.addLayout(h(self.count, 12, scroll))
+        if compact:
+            lay.addWidget(scroll)
+            scroll.setVisible(False)
+        else:
+            lay.addLayout(h(self.count, 12, scroll))
         self.chip_buttons: dict[str, QPushButton] = {}
 
         # -- selection bar (shown while something is ticked) -----------------------------------
@@ -534,7 +573,10 @@ class MaterialsView(QWidget):
             else f"{self.settings_key}/project_columns"
 
     def _default_visible(self, mode: str) -> set[str]:
-        return set(PROJECT_DEFAULT) if mode == "project" else {c.key for c in COLUMNS if c.default and not c.project}
+        keys = set(PROJECT_DEFAULT) if mode == "project" else {c.key for c in COLUMNS if c.default and not c.project}
+        if self.compact:
+            keys.discard(PHOTO)  # workspace table: more rows on screen (Columns -> Photo brings it back)
+        return keys
 
     def _load_visible(self, mode: str) -> set[str]:
         default = self._default_visible("project" if self.fixed_site_id else mode)
@@ -572,6 +614,29 @@ class MaterialsView(QWidget):
         except Exception:  # noqa: BLE001 - settings are a convenience only
             log.debug("Could not save table settings", exc_info=True)
 
+    def _restore_sort(self) -> None:
+        """The sort column and direction chosen last time on this PC (filters are never restored:
+        a list must not reopen quietly showing only part of the stock)."""
+        if self.picker:
+            return
+        try:
+            saved = str(self._qs().value(f"{self.settings_key}/sort") or "")
+        except Exception:  # noqa: BLE001
+            return
+        key, _, direction = saved.partition(",")
+        if key not in SORT_KEYS or (key in PROJECT_SORTS and not self.filter.site_id):
+            return
+        self.filter.sort, self.filter.descending = key, direction == "desc"
+
+    def _save_sort(self) -> None:
+        if self.picker:
+            return
+        try:
+            self._qs().setValue(f"{self.settings_key}/sort",
+                                f"{self.filter.sort},{'desc' if self.filter.descending else 'asc'}")
+        except Exception:  # noqa: BLE001
+            log.debug("Could not save the sort order", exc_info=True)
+
     def _remember_width(self, section: int, _old: int, new: int) -> None:
         if getattr(self, "_applying", False) or not 0 <= section < len(self.model.cols):
             return
@@ -591,6 +656,9 @@ class MaterialsView(QWidget):
             self.model.set_columns(self.shown_columns())
             for i, c in enumerate(self.model.cols):
                 self.table.setColumnWidth(i, self.widths.get(c.key, c.width))
+            # rows only need to be thumbnail-tall while the Photo column is shown
+            photo = any(c.key == PHOTO for c in self.model.cols)
+            self.table.verticalHeader().setDefaultSectionSize(THUMB + 4 if photo else ROW)
         finally:
             self._applying = False
 
@@ -646,7 +714,7 @@ class MaterialsView(QWidget):
         self.bin.set_options(opts)
 
     def _block(self, on: bool) -> None:
-        for w in (self.search, self.project, self.supplier, self.bin, self.stock):
+        for w in (self.search, self.project, self.supplier, self.bin, self.stock, self.status):
             w.blockSignals(on)
 
     def sync_widgets(self) -> None:
@@ -665,6 +733,7 @@ class MaterialsView(QWidget):
                 self._fill_bins()
             self.bin.set_value(f.bin_state or f.bin_id)
             self.stock.setCurrentIndex(max(self.stock.findData(f.stock), 0))
+            self.status.setCurrentIndex(max(self.status.findData(f.status), 0))
         finally:
             self._block(False)
 
@@ -674,6 +743,8 @@ class MaterialsView(QWidget):
             self.refresh(reset_selection=True)
 
     def _set(self, name: str, value) -> None:
+        if name == "status" and not value:
+            value = "ACTIVE"
         if getattr(self.filter, name) == value:
             return
         setattr(self.filter, name, value)
@@ -713,6 +784,7 @@ class MaterialsView(QWidget):
         dlg = MoreFiltersDialog(self.app, self.filter, self, show_project_status=self.fixed_site_id is None)
         if dlg.exec() == QDialog.DialogCode.Accepted and dlg.result_filter is not None:
             self.filter = dlg.result_filter
+            self.sync_widgets()
             self.refresh(reset_selection=True)
 
     # ---- loading -----------------------------------------------------------------------------
@@ -833,6 +905,12 @@ class MaterialsView(QWidget):
             # the project itself, and "active and archived" (a project shows everything it used), are
             # the tab's own setting, not a filter the person added
             chips = [c for c in chips if c[0] != "site_id" and not (c[0] == "status" and self.filter.status == "ALL")]
+        if self.compact:
+            # the drop-downs already show these; a chip only for what More Filters added
+            primary = {"site_id", "supplier_id", "bin_id", "bin_state", "stock", "status", "text"}
+            self.clear_btn.setEnabled(bool(chips))
+            chips = [c for c in chips if c[0] not in primary]
+            self.chips_scroll.setVisible(bool(chips))
         for key, text in chips:
             b = QPushButton(f"{text}  ×")
             b.setObjectName("Chip")
@@ -841,7 +919,7 @@ class MaterialsView(QWidget):
             b.clicked.connect(lambda _=False, k=key: self.clear_filter(k))
             self.chips.addWidget(b)
             self.chip_buttons[key] = b
-        if chips:
+        if chips and not self.compact:
             clear = button("Clear all", self.clear_all)
             clear.setObjectName("Link")
             self.chips.addWidget(clear)
@@ -912,6 +990,7 @@ class MaterialsView(QWidget):
         numeric = c.kind in (QTY, DATETIME)
         desc = (not self.filter.descending) if c.sort == self.filter.sort else numeric
         self.filter.sort, self.filter.descending = c.sort, desc
+        self._save_sort()
         self.refresh()
 
     def current_row(self) -> MaterialRow | None:

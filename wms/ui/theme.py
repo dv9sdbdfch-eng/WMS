@@ -106,11 +106,16 @@ QPushButton#AlertCritical:hover, QPushButton#AlertAction:hover, QPushButton#Aler
     border-color: {ACCENT}; }}
 QPushButton#AlertCritical:focus, QPushButton#AlertAction:focus, QPushButton#AlertData:focus {{
     border: 2px solid {ACCENT}; }}
-QFrame#TodayBar {{ background: white; border: 1px solid #E4E7EC; border-radius: 6px; }}
-QPushButton#TodayItem, QPushButton#TodayZero {{ background: transparent; border: none; padding: 3px 8px; }}
-QPushButton#TodayItem {{ color: #101828; font-weight: 600; }}
-QPushButton#TodayZero {{ color: #98A2B3; }}
-QPushButton#TodayItem:hover, QPushButton#TodayZero:hover {{ color: {ACCENT}; text-decoration: underline; }}
+QFrame#SectionHeader {{ background: white; border: 1px solid #E4E7EC; border-radius: 6px; }}
+QFrame#SectionHeader:hover {{ border-color: #B2DDFF; }}
+QToolButton#SectionChevron {{ border: none; background: transparent; color: #344054; font-size: 11pt;
+    padding: 0 2px; min-width: 16px; }}
+QToolButton#SectionChevron:focus {{ border: 1px solid {ACCENT}; border-radius: 4px; }}
+QLabel#SectionHeaderTitle {{ color: #101828; font-weight: 600; }}
+QLabel#SectionCount {{ color: #475467; font-weight: 600; }}
+QLabel#SectionCount[severity="critical"] {{ color: {DANGER}; }}
+QLabel#SectionCount[severity="action"] {{ color: {WARNING}; }}
+QLabel#SectionHint {{ color: {MUTED}; }}
 QPushButton#QuickAction {{ background: {ACCENT}; border: 1px solid {ACCENT}; color: white; font-weight: 600;
     padding: 6px 12px; min-width: 96px; }}
 QPushButton#QuickAction:hover {{ background: #285F99; }}

@@ -10,14 +10,19 @@ from wms.ui.widgets.common import label
 class Page(QWidget):
     title = ""
     subtitle = ""
+    #: outer margins (left, top, right, bottom) and the gap between header and body
+    margins = (24, 18, 24, 18)
+    spacing = 12
+    #: False: no title row (a workspace screen whose own sections say what it is)
+    show_header = True
 
     def __init__(self, app, parent=None):
         super().__init__(parent)
         self.app = app
         self.dirty = True
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(24, 18, 24, 18)
-        outer.setSpacing(12)
+        outer.setContentsMargins(*self.margins)
+        outer.setSpacing(self.spacing)
         head = QHBoxLayout()
         titles = QVBoxLayout()
         titles.setSpacing(2)
@@ -29,7 +34,11 @@ class Page(QWidget):
         self.actions = QHBoxLayout()
         self.actions.setSpacing(8)
         head.addLayout(self.actions)
-        outer.addLayout(head)
+        self.head_widget = QWidget()
+        self.head_widget.setLayout(head)
+        head.setContentsMargins(0, 0, 0, 0)
+        self.head_widget.setVisible(self.show_header)
+        outer.addWidget(self.head_widget)
         self.body = QVBoxLayout()
         self.body.setSpacing(10)
         outer.addLayout(self.body, 1)
