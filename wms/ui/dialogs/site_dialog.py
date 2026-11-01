@@ -104,13 +104,13 @@ class SiteDialog(QDialog):
         lay = QVBoxLayout(w)
         self.cards = {k: Card(t) for k, t in (("materials", "Materials"), ("required", "Required"),
                                               ("reserved", "Reserved"), ("issued", "Issued"),
-                                              ("returned", "Returned"), ("net", "Net issued"),
+                                              ("returned", "Returned"), ("net", "Net Issued"),
                                               ("remaining", "Remaining"), ("value", "Material value on site"))}
         lay.addLayout(h(*self.cards.values()))
         lay.addWidget(label("Required = the project's material list (a plan, never stock).  Reserved = held in the "
-                            "warehouse for it.  Issued / Returned = posted Goods Out and returns.  Net issued = "
-                            "Issued - Returned.  Remaining = Required - Net issued - Reserved (still to reserve or "
-                            "issue).", "Muted", wrap=True))
+                            "warehouse for it.  Issued / Returned = posted Goods Out and returns.  Net Issued = "
+                            "Issued - Returned.  Remaining = Required - Net Issued - Reserved (still to reserve or "
+                            "issue; a return makes that quantity needed again).", "Muted", wrap=True))
         lay.addWidget(details, 1)
         self._fill_cards()
         return w

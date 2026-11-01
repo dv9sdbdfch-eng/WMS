@@ -86,9 +86,13 @@ PROJECT_FIGURES = (
     ("reserved", "Reserved", "Stock set aside for the project, still in the warehouse"),
     ("issued", "Issued", "Sent from the warehouse to the project (Goods Out)"),
     ("returned", "Returned", "Physically returned from the project"),
-    ("net", "Net Issued", "Issued - Returned"),
-    ("remaining", "Remaining", "Required - Net Issued - Reserved (never below 0): still to reserve or issue"),
+    ("net", "Net Issued", "Net Issued = Issued - Returned (what is still out on the project)"),
+    ("remaining", "Remaining", "Remaining = Required - Net Issued - Reserved, never below 0: what is still to "
+                               "reserve or issue. A return makes that quantity needed again."),
 )
+#: header tooltips of the project columns, so the Remaining calculation can be followed on screen
+HEADER_TIPS = {k: tip for k, _t, tip in PROJECT_FIGURES if k != "materials"}
+HEADER_TIPS["proj_reserved"] = HEADER_TIPS.pop("reserved")
 THUMB = 36  # photo thumbnail size in the table, pixels
 
 
@@ -119,7 +123,7 @@ COLUMNS: list[MCol] = [
     MCol("proj_reserved", "Reserved", lambda r: r.proj_reserved, QTY, 85, "proj_reserved", project=True),
     MCol("issued", "Issued", lambda r: r.issued, QTY, 80, "issued", project=True),
     MCol("returned", "Returned", lambda r: r.returned, QTY, 85, "returned", project=True),
-    MCol("net", "Net Issued", lambda r: r.net, QTY, 90, "net", project=True, default=False),
+    MCol("net", "Net Issued", lambda r: r.net, QTY, 90, "net", project=True),
     MCol("remaining", "Remaining", lambda r: r.remaining, QTY, 95, "remaining", project=True),
     MCol("qty", "On Hand", lambda r: r.on_hand, QTY, 85, "qty"),
     MCol("available", "Available", lambda r: r.available, QTY, 90, "available"),
@@ -142,7 +146,7 @@ COLUMNS: list[MCol] = [
 BY_KEY = {c.key: c for c in COLUMNS}
 #: shown by default on a project's Materials tab (UI refactor spec 23)
 PROJECT_DEFAULT = {SELECT, "code", "name", "supplier", "required", "proj_reserved", "issued", "returned",
-                   "remaining", "available"}
+                   "net", "remaining", "available"}
 STATUS_COLOURS = {"OUT": theme.DANGER, "LOW": theme.WARNING, "ARCHIVED": "#98A2B3", "IN": theme.SUCCESS}
 
 
@@ -242,6 +246,8 @@ class MaterialsModel(QAbstractTableModel):
         if role == Qt.ItemDataRole.ToolTipRole:
             if c.key == SELECT:
                 return "Tick every material in the list (click again to clear the ticks)"
+            if c.key in HEADER_TIPS:
+                return HEADER_TIPS[c.key]
             if c.sort:
                 return "Click to sort by this column"
             return "Right-click the header to choose columns"
@@ -292,6 +298,12 @@ class MaterialsModel(QAbstractTableModel):
             return QBrush(QColor(theme.LOW_STOCK_BG))
         if role == Qt.ItemDataRole.ToolTipRole and c.key == "bin" and r.bins:
             return r.bins_detail
+        if role == Qt.ItemDataRole.ToolTipRole and c.key == "remaining" and r.required is not None:
+            # spec: show how the figure is made - Required - Net Issued - Reserved
+            net, res = r.net or 0, r.proj_reserved or 0
+            return (f"Remaining = Required {format_value(r.required, QTY)} - Net Issued {format_value(net, QTY)} "
+                    f"(Issued {format_value(r.issued or 0, QTY)} - Returned {format_value(r.returned or 0, QTY)}) "
+                    f"- Reserved {format_value(res, QTY)} = {format_value(r.remaining, QTY)}")
         if role == Qt.ItemDataRole.ToolTipRole and c.key == "required" and r.required is None:
             return "Not on the project's material list (reserved or issued only)"
         if role == Qt.ItemDataRole.ToolTipRole and c.kind not in (QTY,):
@@ -534,7 +546,7 @@ class MaterialsView(QWidget):
             keys = {k for k in saved.split(",") if k in BY_KEY}
             if keys:
                 if "required" in keys:
-                    keys.add("remaining")  # new in v1.13: show it to people who already chose columns
+                    keys |= {"net", "remaining"}  # v1.13: the whole calculation is visible to everyone
                 if mode == "project" and not keys & {c.key for c in COLUMNS if c.project}:
                     return default
                 return keys | {SELECT}

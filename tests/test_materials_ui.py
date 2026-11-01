@@ -79,9 +79,18 @@ def test_materials_header_columns_button_project_banner_and_assign(ui, sample): 
     assert v.project_title.text().startswith("PROJECT: RIVERSIDE APARTMENTS")
     assert v.project_figures["required"].text() == "Required: <b>40</b>"
     assert v.project_figures["remaining"].text() == "Remaining: <b>40</b>"
-    assert [c.key for c in v.model.cols if c.key in ("required", "proj_reserved", "issued", "returned",
-                                                     "remaining")] == ["required", "proj_reserved", "issued",
-                                                                      "returned", "remaining"]
+    # every figure of the Remaining calculation is on screen, in calculation order
+    assert [f.split(":")[0] for f in (v.project_figures[k].text() for k in v.project_figures)] == [
+        "Materials", "Required", "Reserved", "Issued", "Returned", "Net Issued", "Remaining"]
+    keys = [c.key for c in v.model.cols]
+    assert [k for k in keys if k in ("required", "proj_reserved", "issued", "returned", "net", "remaining")] == [
+        "required", "proj_reserved", "issued", "returned", "net", "remaining"]
+    from PySide6.QtCore import Qt
+    rem = keys.index("remaining")
+    assert "Required - Net Issued - Reserved" in v.model.headerData(rem, Qt.Orientation.Horizontal,
+                                                                    Qt.ItemDataRole.ToolTipRole)
+    tip = v.model.data(v.model.index(0, rem), Qt.ItemDataRole.ToolTipRole)
+    assert tip.startswith("Remaining = Required ") and "Net Issued" in tip and "Returned" in tip, tip
     assert "photo" not in [c.key for c in v.model.cols]  # project emphasis: its own column choice
     v.project.set_value(None)
     assert v.project_bar.isHidden() and "photo" in [c.key for c in v.model.cols]
@@ -364,7 +373,7 @@ def test_scenario_b_project_then_supplier_then_export_current_view(ui, sample, t
     header = [c.value for c in ws[header_row] if c.value]
     shown = [c.title for c in v.model.cols if c.key not in ("select", "photo")]
     assert header == ["Code", "Material", "Supplier", "Required", "Project Reserved", "Issued", "Returned",
-                      "Remaining", "Available"]
+                      "Net Issued", "Remaining", "Available"]
     assert len(header) == len(shown)
     data = [r[0].value for r in ws.iter_rows(min_row=header_row + 1) if r[0].value]
     assert data == codes(v) == ["MDF-18"]

@@ -68,13 +68,16 @@ ADMIN ▸     Users · Audit Log · Backup & Restore · Settings
 | **Reserved** | скільки відкладено на складі під проєкт і ще не видано |
 | **Issued** | скільки видано через Goods Out |
 | **Returned** | скільки повернулося з об'єкта |
-| **Remaining** | скільки ще треба видати або зарезервувати: Required − (Issued − Returned) − Reserved, не менше 0 |
+| **Net Issued** | Issued − Returned: скільки зараз фактично на об'єкті |
+| **Remaining** | скільки ще треба видати або зарезервувати: Required − Net Issued − Reserved, не менше 0 |
 
 Приклад зі специфікації (Tribeca): Required 1 842, Reserved 320, Issued 1 117, Returned 84.
-Програма показує Remaining = 1 842 − (1 117 − 84) − 320 = **489**. У специфікації стоїть 405, тобто
-повернення там не враховано. Ми враховуємо повернення: якщо 84 одиниці повернулися з об'єкта, їх
-знову треба видати, інакше проєкту не вистачить. Якщо вам потрібно саме 405, це одна формула в
-`MaterialsService.remaining_qty`, змінюється за хвилину.
+Програма показує Remaining = 1 842 − (1 117 − 84) − 320 = **489**. Повернене з об'єкта знову
+«потрібне», тому повернення збільшує Remaining. Цю формулу підтвердив Ihor 01/11/2026.
+
+На картці проєкту, у смужці проєкту на Materials і в таблиці видно всі шість цифр: Required, Reserved,
+Issued, Returned, **Net Issued** і Remaining. Наведіть мишу на Remaining у рядку, щоб побачити
+розрахунок, наприклад «Remaining = Required 100 − Net Issued 35 (Issued 40 − Returned 5) − Reserved 20 = 45».
 
 Вкладка Materials: **+ Add Material**, **Import Excel...**, **Export Excel ▾** (весь список /
 поточний вигляд / позначені).
