@@ -78,8 +78,10 @@ class ProductsPage(Page):
         self.table.activated_item.connect(self.open)
         self.table.allow_multi_select()
         self.body.addWidget(self.table, 1)
-        self.count = label("", "Muted")
-        self.body.addLayout(h(self.count, None, button("Open", lambda: self.open(self.table.current()))))
+        self.count = label("", "Muted", wrap=True)
+        footer = h(self.count, button("Open", lambda: self.open(self.table.current())))
+        footer.setStretch(0, 1)  # the count text takes the free width and wraps when it is long
+        self.body.addLayout(footer)
         self._filters_loaded = False
 
     def columns(self):

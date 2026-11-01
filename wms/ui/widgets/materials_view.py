@@ -410,14 +410,15 @@ class MaterialsView(QWidget):
         self.views_btn.setVisible(fixed_site_id is None and not picker)
         self.columns_btn.setVisible(not picker)
         self.count = label("", "Count")
+        # The drop-downs may shrink (to about 10 letters) so the filter row fits a 1366-pixel laptop
+        # screen; they grow back with the window.
+        for combo, n in ((self.project, 10), (self.supplier, 10), (self.bin, 8), (self.stock, 8),
+                         (self.status, 8)):
+            combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+            combo.setMinimumContentsLength(n)
         if compact:
             # two compact rows: search + count + table tools, then every filter + Clear filters.
-            # The drop-downs may shrink (to about 10 letters) so the row fits a 1366-pixel laptop screen.
             lay.setSpacing(6)
-            for combo, n in ((self.project, 10), (self.supplier, 10), (self.bin, 8), (self.stock, 8),
-                             (self.status, 8)):
-                combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-                combo.setMinimumContentsLength(n)
             first = h(self.search, 12, self.count, None, self.columns_btn, self.views_btn)
             first.setStretch(0, 3)
             first.setStretch(3, 1)
