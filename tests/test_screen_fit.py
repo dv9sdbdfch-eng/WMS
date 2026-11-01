@@ -48,14 +48,21 @@ def test_every_screen_fits_1366_pixels(themed, ui, sample):  # noqa: F811
     for section in list(win.sections):
         win._set_folded(section, False, save=False)  # MORE and ADMIN open: the worst case
     keys = [k for _s, k, _l, _p, f in _nav() if f] + [k for k, *_r in _hidden()]
+    # Measure the page itself: the window's own hint is the widest page opened so far (QStackedWidget).
+    # Text is sized in points, so on a machine with a higher logical DPI (Windows CI runs offscreen at
+    # its own DPI) every text width grows by dpi / 96; the 1366 px laptop runs at 96.
+    dpi = win.logicalDpiX()
+    limit = (SCREEN_W - win.nav.parentWidget().width()) * max(dpi, 96) / 96
     too_wide = {}
     for key in keys:
         win.go(key)
         _settle()
-        need = win.minimumSizeHint().width()
-        if need > SCREEN_W:
+        need = win.page(key).minimumSizeHint().width()
+        if need > limit:
             too_wide[key] = need
-    assert too_wide == {}, f"screens wider than {SCREEN_W} px: {too_wide}"
+    font = QApplication.font()
+    assert too_wide == {}, (f"screens wider than {limit:.0f} px (dpi {dpi}, font {font.family()} "
+                            f"{font.pointSizeF()}pt): {too_wide}")
 
 
 def test_sidebar_shows_every_entry_without_scrolling(themed, ui):  # noqa: F811
