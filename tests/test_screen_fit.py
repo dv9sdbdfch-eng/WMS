@@ -3,7 +3,9 @@ entry never runs into the version label."""
 
 from __future__ import annotations
 
+import re
 from datetime import date
+from pathlib import Path
 
 import pytest
 from PySide6.QtWidgets import QApplication
@@ -17,10 +19,25 @@ SCREEN_W, SCREEN_H = 1366, 768
 
 @pytest.fixture
 def themed(qapp):
-    """The real look (style sheet, Fusion, fonts) - paddings decide whether things fit."""
+    """The real look (style sheet, Fusion), with one known font on every machine.
+
+    Text decides most widths, and offscreen test machines have different fonts (Windows CI has no
+    Segoe UI offscreen and falls back to something much wider). Bitstream Vera Sans ships with
+    reportlab, so it is always there; it is wider than Segoe UI, which the program uses on Windows,
+    so a screen that fits here fits on the warehouse PC too.
+    """
+    import reportlab
+    from PySide6.QtGui import QFontDatabase
+
     from wms.ui.theme import apply_theme
+    fonts = Path(reportlab.__file__).parent / "fonts"
+    for f in ("Vera.ttf", "VeraBd.ttf"):
+        assert QFontDatabase.addApplicationFont(str(fonts / f)) != -1, f"cannot load {f}"
     old = qapp.styleSheet(), qapp.style().name(), qapp.palette()
     apply_theme(qapp)
+    sheet = qapp.styleSheet()
+    family = re.search(r"font-family: ([^;]+);", sheet).group(1)
+    qapp.setStyleSheet(sheet.replace(family, '"Bitstream Vera Sans"'))
     yield
     qapp.setStyleSheet(old[0])
     qapp.setStyle(old[1])
@@ -49,10 +66,7 @@ def test_every_screen_fits_1366_pixels(themed, ui, sample):  # noqa: F811
         win._set_folded(section, False, save=False)  # MORE and ADMIN open: the worst case
     keys = [k for _s, k, _l, _p, f in _nav() if f] + [k for k, *_r in _hidden()]
     # Measure the page itself: the window's own hint is the widest page opened so far (QStackedWidget).
-    # Text is sized in points, so on a machine with a higher logical DPI (Windows CI runs offscreen at
-    # its own DPI) every text width grows by dpi / 96; the 1366 px laptop runs at 96.
-    dpi = win.logicalDpiX()
-    limit = (SCREEN_W - win.nav.parentWidget().width()) * max(dpi, 96) / 96
+    limit = SCREEN_W - win.nav.parentWidget().width()
     too_wide = {}
     for key in keys:
         win.go(key)
@@ -60,9 +74,7 @@ def test_every_screen_fits_1366_pixels(themed, ui, sample):  # noqa: F811
         need = win.page(key).minimumSizeHint().width()
         if need > limit:
             too_wide[key] = need
-    font = QApplication.font()
-    assert too_wide == {}, (f"screens wider than {limit:.0f} px (dpi {dpi}, font {font.family()} "
-                            f"{font.pointSizeF()}pt): {too_wide}")
+    assert too_wide == {}, f"screens wider than {limit} px (page area next to the sidebar): {too_wide}"
 
 
 def test_sidebar_shows_every_entry_without_scrolling(themed, ui):  # noqa: F811
