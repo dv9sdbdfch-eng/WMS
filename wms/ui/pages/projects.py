@@ -716,8 +716,10 @@ class ProjectsPage(Page):
                 m.addAction("Remove", lambda: self.remove_material(node))
         if k in BRANCHES:
             m.addSeparator()
-            m.addAction("Expand Branch", lambda: self._expand_branch(item))
-            m.addAction("Collapse Branch", lambda: self._collapse_branch(item))
+            # by key, not by the row object: the tree may have been rebuilt while the menu was open
+            # (another change, the hourly backup), and the old row object is then gone
+            m.addAction("Expand Branch", lambda: self._expand_branch(self.items.get(key)))
+            m.addAction("Collapse Branch", lambda: self._collapse_branch(self.items.get(key)))
         return m
 
     def show_menu(self, item: QTreeWidgetItem, pos) -> None:
@@ -725,14 +727,18 @@ class ProjectsPage(Page):
         if self._menu.actions():
             self._menu.popup(pos)
 
-    def _expand_branch(self, item: QTreeWidgetItem) -> None:
+    def _expand_branch(self, item: QTreeWidgetItem | None) -> None:
+        if item is None:
+            return
         item.setExpanded(True)
         for i in range(item.childCount()):
             child = item.child(i)
             if kind_of(child.data(0, KEY)) in ("P", "B", "V", "U"):
                 self._expand_branch(child)
 
-    def _collapse_branch(self, item: QTreeWidgetItem) -> None:
+    def _collapse_branch(self, item: QTreeWidgetItem | None) -> None:
+        if item is None:
+            return
         for i in range(item.childCount()):
             self._collapse_branch(item.child(i))
         item.setExpanded(False)

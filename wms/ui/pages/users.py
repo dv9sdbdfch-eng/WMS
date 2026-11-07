@@ -215,7 +215,7 @@ class AuditDetailDialog(QDialog):
 
 
 class AuditPage(ListPage):
-    title = "Audit Trail"
+    title = "Audit Log"
     subtitle = "Every change made in the system: who, when, from which computer, and what changed"
     search_hint = "Search record, user, summary or changed values..."
 
