@@ -13,7 +13,7 @@ _OPEN = list(OPEN_SITE_STATUSES)
 
 
 class SitesPage(ListPage):
-    title = "Sites / Projects"
+    title = "Projects"
     subtitle = "Customer sites and projects. Open one to see every material issued and returned."
     search_hint = "Search project no., name, customer, address, postcode, manager..."
     date_filter = False

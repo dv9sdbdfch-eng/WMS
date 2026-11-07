@@ -420,6 +420,9 @@ class MainWindow(QMainWindow):
             page.search_for(text) if text else page.focus_box()
 
     def quick_action(self, key: str) -> None:
+        page = self.stack.currentWidget()
+        if hasattr(page, "quick_action_on_match") and page.quick_action_on_match(key):
+            return  # Search screen with a scanned / exact product: act on that product
         if key == "transfer":
             self.transfer()
         else:
@@ -451,7 +454,8 @@ class MainWindow(QMainWindow):
 
     def show_shortcuts(self):
         QMessageBox.information(self, "Keyboard Shortcuts", "\n".join(self.shortcut_hints + [
-            "Enter in the search box: open all results", "Ctrl+N: new record on the current screen",
+            "Enter in the search box: open all results",
+            "Search with one product found (scan): F2 / F3 / F4 act on that product, Ctrl+O opens it", "Ctrl+N: new record on the current screen",
             "Ctrl+S: post / save the current form", "Ctrl+Shift+S: save Goods In as a draft",
             "Click a blue code, bin, project or document in a table: open that record",
             "Double-click a row: open the record"]))

@@ -433,13 +433,19 @@ class SearchPage(Page):
         self.exact_label = label("", "")
         self.exact_label.setStyleSheet("color: #067647; font-weight: 600;")
         el.addWidget(self.exact_label, 1)
-        el.addWidget(button("View product", lambda: self._act_exact("view"), shortcut="F4"))
+        # F4 is Transfer on every screen (top bar), so "View product" must not use it: two owners of
+        # one key make Qt ignore the key. While an exact match is shown, the top-bar keys F2 / F3 / F4
+        # act on that product (MainWindow.quick_action); F6 / F7 / F8 stay as the older aliases.
+        el.addWidget(button("View product", lambda: self._act_exact("view"), shortcut="Ctrl+O"))
         if app.can(P.GOODS_IN_POST):
-            el.addWidget(button("Goods In", lambda: self._act_exact("goods_in"), shortcut="F6"))
+            el.addWidget(button("Goods In", lambda: self._act_exact("goods_in"), shortcut="F6",
+                                tooltip="Goods In for this product (F2 or F6)"))
         if app.can(P.GOODS_OUT_POST):
-            el.addWidget(button("Goods Out", lambda: self._act_exact("goods_out"), shortcut="F7"))
+            el.addWidget(button("Goods Out", lambda: self._act_exact("goods_out"), shortcut="F7",
+                                tooltip="Goods Out for this product (F3 or F7)"))
         if app.can(P.STOCK_TRANSFER):
-            el.addWidget(button("Transfer", lambda: self._act_exact("transfer"), shortcut="F8"))
+            el.addWidget(button("Transfer", lambda: self._act_exact("transfer"), shortcut="F8",
+                                tooltip="Transfer this product (F4 or F8)"))
         self.body.addWidget(self.exact_w)
         self.exact_w.hide()
         self.exact = None
@@ -843,6 +849,14 @@ class SearchPage(Page):
     def _act_exact(self, action: str):
         if self.exact is not None:
             self.product_action(action, product_id=self.exact.id)
+
+    def quick_action_on_match(self, action: str) -> bool:
+        """Top-bar Goods In / Goods Out / Transfer (F2 / F3 / F4) while one product is matched
+        exactly (a scanned barcode): do it for that product. False: nothing matched, act as usual."""
+        if self.exact is None or not self.exact_w.isVisible():
+            return False
+        self._act_exact(action)
+        return True
 
     def product_action(self, action: str, row=None, product_id: int | None = None):
         if product_id is None:

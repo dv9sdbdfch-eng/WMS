@@ -172,7 +172,7 @@ class BulkBinsDialog(QDialog):
 
 
 class LocationsPage(Page):
-    title = "Locations / Bins"
+    title = "Locations & Bins"
     subtitle = "Warehouse > Zone > Rack > Shelf > Bin. Double-click a bin to see what is in it."
 
     def __init__(self, app, parent=None):

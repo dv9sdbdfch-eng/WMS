@@ -11,7 +11,7 @@ from wms.ui.widgets.common import DATE, DATETIME, INT, MONEY, Col, PickCombo
 
 
 class DeliveryNotesPage(ListPage):
-    title = "Delivery Notes"
+    title = "Deliveries"
     subtitle = "Every delivery received, with its lines, stock transactions and the original scan"
     search_hint = "Search delivery note no., PO, supplier, product code or name..."
 
