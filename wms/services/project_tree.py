@@ -32,7 +32,7 @@ from wms.core.permissions import P
 from wms.db.models import Manager, Product, ProjectBlock, ProjectLevel, ProjectUnit, Site, Unit, UnitMaterial
 from wms.services import audit
 from wms.services.base import BaseService, clean_code, clean_str, like_pattern
-from wms.services.project_demand import line_total
+from wms.services.project_demand import line_total, sync_project_lists
 
 #: manager filter value for "projects without a manager"
 UNASSIGNED = -1
@@ -676,6 +676,7 @@ class ProjectTreeService(BaseService):
             s.add(new)
             s.flush()
             units, lines = self._copy_units(s, src.id, new.id)
+            self._sync(s, new.id)
             audit.record(s, self.ctx, "PROJECT_DUPLICATED", EntityType.SITE.value, new.id, new.display,
                          f"Copied from {src.display}: {units} unit(s), {lines} material line(s)",
                          new={"from": src.project_number, "units": units, "lines": lines})
@@ -731,6 +732,10 @@ class ProjectTreeService(BaseService):
             return _contents(s, site_id)
 
     # ---- units ------------------------------------------------------------------------------------
+    def _sync(self, s: Session, *site_ids: int | None) -> None:
+        """The projects' material lists (Required, used by Remaining) follow their units."""
+        sync_project_lists(s, self.ctx, site_ids)
+
     @staticmethod
     def _editable_site(s: Session, site_id: int) -> Site:
         site = s.get(Site, site_id)
@@ -781,6 +786,8 @@ class ProjectTreeService(BaseService):
             if n:
                 audit.record(s, self.ctx, "UNIT_UPDATED" if unit_id else "UNIT_CREATED", EntityType.PROJECT_UNIT.value,
                              u.id, f"{site.project_number} / {u.name}", old=o, new=n)
+            if "quantity" in (n or {}):
+                self._sync(s, site.id)
             saved = u.id
         return self.unit(saved)
 
@@ -804,6 +811,7 @@ class ProjectTreeService(BaseService):
             for i, r in enumerate(rows, start=1):
                 r.sort_order = i
             n = self._copy_lines(s, u.id, copy.id)
+            self._sync(s, site.id)
             audit.record(s, self.ctx, "UNIT_DUPLICATED", EntityType.PROJECT_UNIT.value, copy.id,
                          f"{site.project_number} / {copy.name}", f"Copy of {u.name} with {n} material line(s)")
             saved = copy.id
@@ -860,6 +868,8 @@ class ProjectTreeService(BaseService):
             u.sort_order = (s.scalar(select(func.max(ProjectUnit.sort_order))
                                      .where(*_siblings(dst.id, level_id), ProjectUnit.id != u.id)) or 0) + 1
             new = _place(s, dst, level_id)
+            if src.id != dst.id:
+                self._sync(s, src.id, dst.id)
             audit.record(s, self.ctx, "UNIT_MOVED", EntityType.PROJECT_UNIT.value, u.id, u.name,
                          f"Moved from {old} to {new}", old={"place": old}, new={"place": new})
         return self.unit(unit_id)
@@ -960,6 +970,7 @@ class ProjectTreeService(BaseService):
                          f"Block deleted with {n_levels} level(s), {units} unit(s), {lines} material line(s)",
                          old=audit.snapshot(b, GROUP_FIELDS) | {"levels": n_levels, "units": units, "lines": lines})
             s.delete(b)
+            self._sync(s, site.id)
             return n_levels, units, lines
 
     def delete_level(self, level_id: int) -> tuple[int, int]:
@@ -976,6 +987,7 @@ class ProjectTreeService(BaseService):
                          f"Level deleted with {units} unit(s), {lines} material line(s)",
                          old=audit.snapshot(lv, GROUP_FIELDS) | {"units": units, "lines": lines})
             s.delete(lv)
+            self._sync(s, site.id)
             return units, lines
 
     def duplicate_level(self, level_id: int) -> LevelNode:
@@ -993,6 +1005,7 @@ class ProjectTreeService(BaseService):
             rows.insert(rows.index(lv) + 1, copy)
             for i, r in enumerate(rows, start=1):
                 r.sort_order = i
+            self._sync(s, site.id)
             audit.record(s, self.ctx, "LEVEL_DUPLICATED", EntityType.SITE.value, site.id,
                          f"{site.project_number} / {copy.name}", f"Copy of {lv.name}")
             saved = copy.id
@@ -1019,6 +1032,7 @@ class ProjectTreeService(BaseService):
             rows.insert(rows.index(b) + 1, copy)
             for i, r in enumerate(rows, start=1):
                 r.sort_order = i
+            self._sync(s, site.id)
             audit.record(s, self.ctx, "BLOCK_DUPLICATED", EntityType.SITE.value, site.id,
                          f"{site.project_number} / {copy.name}", f"Copy of {b.name}")
             saved = copy.id
@@ -1047,6 +1061,7 @@ class ProjectTreeService(BaseService):
                          f"{site.project_number} / {u.name}", f"Unit deleted with {n} material line(s)",
                          old=audit.snapshot(u, UNIT_FIELDS) | {"material_lines": n})
             s.delete(u)
+            self._sync(s, site.id)
             return n
 
     # ---- unit materials ---------------------------------------------------------------------------
@@ -1079,6 +1094,7 @@ class ProjectTreeService(BaseService):
                              f"{site.project_number} / {u.name}",
                              f"{p.internal_code} x {line.quantity_per_unit} per unit",
                              new={"product": p.internal_code, "quantity_per_unit": str(line.quantity_per_unit)})
+            self._sync(s, site.id)
             return new
 
     def update_material(self, line_id: int, data: dict) -> MaterialNode:
@@ -1098,6 +1114,8 @@ class ProjectTreeService(BaseService):
             if n:
                 audit.record(s, self.ctx, "UNIT_MATERIAL_UPDATED", EntityType.PROJECT_UNIT.value, u.id,
                              f"{site.project_number} / {u.name}", line.product.internal_code, old=o, new=n)
+                if "quantity_per_unit" in n:
+                    self._sync(s, site.id)
         return self.material(line_id)
 
     def replace_material(self, line_id: int, product_id: int) -> MaterialNode:
@@ -1115,6 +1133,7 @@ class ProjectTreeService(BaseService):
                 audit.record(s, self.ctx, "UNIT_MATERIAL_REPLACED", EntityType.PROJECT_UNIT.value, u.id,
                              f"{site.project_number} / {u.name}", f"{old} replaced by {p.internal_code}",
                              old={"product": old}, new={"product": p.internal_code})
+                self._sync(s, site.id)
         return self.material(line_id)
 
     def remove_materials(self, line_ids: Iterable[int]) -> int:
@@ -1122,14 +1141,17 @@ class ProjectTreeService(BaseService):
         ids = list(line_ids)
         n = 0
         with self.db.session() as s:
+            sites = set()
             for lid in ids:
                 line, u, site = self._line(s, lid)
+                sites.add(site.id)
                 audit.record(s, self.ctx, "UNIT_MATERIAL_REMOVED", EntityType.PROJECT_UNIT.value, u.id,
                              f"{site.project_number} / {u.name}", line.product.internal_code,
                              old={"product": line.product.internal_code,
                                   "quantity_per_unit": str(line.quantity_per_unit)})
                 s.delete(line)
                 n += 1
+            self._sync(s, *sites)
         return n
 
     def move_material(self, line_id: int, delta: int) -> None:

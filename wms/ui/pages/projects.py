@@ -82,9 +82,10 @@ def id_of(key: str) -> int | None:
 
 
 class ProjectsPage(Page):
-    title = "Project Tree"
-    subtitle = ("Manager → Project → Block → Level → Unit → Materials (Block and Level are optional). Double-click a name or quantity to change it; right-click "
-                "or ⋯ for actions. Total required = unit quantity × quantity per unit.")
+    title = "Projects"
+    subtitle = ("Manager → Project → Block → Level → Unit → Materials (Block and Level are optional). Required "
+                "follows the units by itself; quantities typed by hand on top stay. Double-click a name or "
+                "quantity to change it; right-click or ⋯ for actions.")
 
     def __init__(self, app, parent=None):
         super().__init__(app, parent)
@@ -102,7 +103,10 @@ class ProjectsPage(Page):
         self.add_action(button("Material Demand...", self.show_demand,
                                tooltip="Required materials of every open project, calculated from the units"))
         if app.can(P.SITES_VIEW):
-            self.add_link("Project List", "sites", tooltip="The list of projects with customers, sites and stock")
+            self.add_link("Project List", "sites", tooltip="All projects as one table: customers, addresses, "
+                                                           "status - for searching, sorting and exporting")
+        if app.can(P.STOCK_VIEW):
+            self.add_link("Reservations", "reservations", tooltip="Stock set aside for projects, not yet issued")
         if self.can_edit:
             self.add_action(button("+  Project", lambda: self.add_project(None)))
             self.add_action(button("+  Manager", self.add_manager, primary=True, shortcut="Ctrl+N"))
@@ -673,7 +677,7 @@ class ProjectsPage(Page):
                 sub.addAction("Unassign (no manager)", lambda: self.change_manager(node, None)).setEnabled(
                     node.manager_id is not None)
                 if not ro and node.status not in CLOSED_SITE_STATUSES:
-                    m.addAction("Update Material List from Units...", lambda: self.apply_demand(node))
+                    m.addAction("Reset Required to Units...", lambda: self.apply_demand(node))
             m.addAction("Open Project Record", lambda: self.open_project(node))
             if e:
                 m.addSeparator()
@@ -853,8 +857,8 @@ class ProjectsPage(Page):
         if dlg.exec() and dlg.result_value is not None:
             self._after_project_change(dlg.result_value, dlg.result_value.manager_id)
 
-    def open_project(self, node) -> None:
-        self.app.open_entity("SITE", node.id, self)
+    def open_project(self, node, tab: str | None = None) -> None:
+        self.app.open_entity("SITE", node.id, self, tab=tab)
         self.dirty = True
         self.refresh()
 
@@ -870,7 +874,8 @@ class ProjectsPage(Page):
             return
         todo = [r for r in rows if r.from_units and not r.in_step]
         if not todo:
-            info(self, "Material list", f"The material list of {node.code} already matches its units.")
+            info(self, "Material list", f"The Required quantities of {node.code} already equal what its units "
+                                        f"need (nothing was added by hand on top).")
             return
         lines = "\n".join(f"• {r.code}: {fmt_qty(r.on_list) if r.on_list is not None else 'not on the list'} → "
                           f"{fmt_qty(r.from_units)} {r.uom}" for r in todo[:15])
@@ -878,10 +883,11 @@ class ProjectsPage(Page):
         only_list = sum(1 for r in rows if not r.from_units)
         keep = (f"\n\n{only_list} material(s) on the list but not in any unit are left as they are."
                 if only_list else "")
-        if not confirm(self, "Update material list from units",
-                       f"Set the Required quantity of {len(todo)} material(s) on project {node.code} to what its "
-                       f"units need:\n\n{lines}{more}{keep}\n\nRequired feeds Remaining. Stock is not changed.",
-                       yes="Update"):
+        if not confirm(self, "Reset Required to units",
+                       f"Required already follows the units by itself; the differences below were typed or "
+                       f"imported by hand. Set the Required quantity of {len(todo)} material(s) on project "
+                       f"{node.code} back to exactly what its units need:\n\n{lines}{more}{keep}\n\nRequired "
+                       f"feeds Remaining. Stock is not changed.", yes="Reset"):
             return
         n = run(self, self.app.services.project_demand.apply_to_project_list, node.id)
         if n is not None:
@@ -1148,10 +1154,17 @@ class NodePanel(QStackedWidget):
                         ("Status", self.p_status), ("Notes", self.p_notes)):
             form.addRow(text, e)
         self.p_save = button("Save", self.save_project, primary=True)
-        self.p_apply = button("Update Material List", lambda: self.page.apply_demand(self.node),
-                              tooltip="Set the project's Required quantities (used by Remaining) to what its "
-                                      "units need")
-        lay.addLayout(h(button("Open Record", lambda: self.page.open_project(self.node)), None, self.p_save))
+        self.p_apply = button("Reset Required to Units", lambda: self.page.apply_demand(self.node),
+                              tooltip="Required already follows the units by itself. This also removes what was "
+                                      "typed by hand on top, so Required = exactly what the units need")
+        lay.addLayout(h(button("Open Record", lambda: self.page.open_project(self.node),
+                               tooltip="The project's card: details, customer, documents, audit"), None, self.p_save))
+        # the old Projects screen's tabs, one click from the tree
+        lay.addLayout(h(*[button(text, lambda t=tab: self.page.open_project(self.node, t), tooltip=tip)
+                          for text, tab, tip in (
+                              ("Materials", "materials", "Required, Reserved, Issued, Returned and Remaining"),
+                              ("Movements", "history", "Every Goods Out and return for this project"),
+                              ("Reservations", "reservations", "Stock set aside for this project"))], None))
         self.p_info = label("", "Muted", wrap=True)
         lay.addWidget(self.p_info)
         self.p_table = DataTable([Col("Code", lambda r: r.code, width=84),

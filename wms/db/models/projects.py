@@ -29,6 +29,9 @@ class ProjectMaterial(IdMixin, TimestampMixin, Base):
     site_id: Mapped[int] = fk("sites.id", nullable=False, ondelete="CASCADE")
     product_id: Mapped[int] = fk("products.id", nullable=False)
     required_qty: Mapped[Decimal] = mapped_column(Quantity, nullable=False, default=Decimal(0))
+    #: the part of ``required_qty`` that came from the project's units (Project Tree). When the units
+    #: change, Required moves by the change only, so quantities typed or imported by hand stay.
+    units_qty: Mapped[Decimal] = mapped_column(Quantity, nullable=False, default=Decimal(0), server_default="0")
     notes: Mapped[str | None] = mapped_column(Text)
     created_by_id: Mapped[int | None] = fk("users.id")
 

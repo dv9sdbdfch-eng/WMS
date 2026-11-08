@@ -50,7 +50,6 @@ def _nav():
         reports,
         returns,
         settings,
-        sites,
         stocktake,
         users,
     )
@@ -61,8 +60,7 @@ def _nav():
         ("OPERATIONS", "goods_in", "Goods In", P.GOODS_IN_POST, goods_in.GoodsInPage),
         ("OPERATIONS", "goods_out", "Goods Out", P.GOODS_OUT_VIEW, goods_out.GoodsOutPage),
         ("OPERATIONS", ACTION + "transfer", "Transfer", P.STOCK_TRANSFER, None),
-        ("PROJECTS", "projects", "Project Tree", P.SITES_VIEW, projects.ProjectsPage),
-        ("PROJECTS", "sites", "Projects", P.SITES_VIEW, sites.SitesPage),
+        ("PROJECTS", "projects", "Projects", P.SITES_VIEW, projects.ProjectsPage),
         ("PURCHASING", "purchase_orders", "Purchase Orders", P.PURCHASING_VIEW, purchase_orders.PurchaseOrdersPage),
         ("PURCHASING", "delivery_notes", "Deliveries", P.GOODS_IN_VIEW, delivery_notes.DeliveryNotesPage),
         ("MORE", "stocktake", "Stocktake", P.STOCKTAKE_COUNT, stocktake.StocktakePage),
@@ -84,14 +82,22 @@ def _hidden():
     highlights ``parent`` so the person still knows where they are.
 
     (key, label, permission, page factory, parent sidebar key)"""
-    from wms.ui.pages import discrepancies, low_stock, movements, reservations, search
+    from wms.ui.pages import discrepancies, low_stock, movements, reservations, search, sites
     return [
         ("search", "Search", None, search.SearchPage, None),
         ("low_stock", "Reorder Required", P.PRODUCTS_VIEW, low_stock.LowStockPage, "products"),
-        ("reservations", "Reservations", P.STOCK_VIEW, reservations.ReservationsPage, "sites"),
+        ("reservations", "Reservations", P.STOCK_VIEW, reservations.ReservationsPage, "projects"),
+        # the projects as one flat table (search, sort, export); the tree is the Projects screen
+        ("sites", "Project List", P.SITES_VIEW, sites.SitesPage, "projects"),
         ("discrepancies", "Delivery Problems", P.PURCHASING_VIEW, discrepancies.DiscrepanciesPage, "delivery_notes"),
         ("movements", "Stock Movements", P.STOCK_VIEW, movements.MovementsPage, "reports"),
     ]
+
+
+#: panels that can be hidden to give the work area (Remaining / stock table) the whole window:
+#: (key, menu text, shortcut). Remembered between sessions.
+PANELS = (("sidebar", "Menu on the left", "Ctrl+B"), ("topbar", "Top bar (search, Goods In / Out, Transfer)", ""),
+          ("titles", "Screen titles", ""), ("statusbar", "Status bar at the bottom", ""))
 
 
 #: the three everyday operations: top bar buttons, keys and tooltips (spec 7)
@@ -171,6 +177,7 @@ class MainWindow(QMainWindow):
         sl.addWidget(self.nav, 1)
         sl.addWidget(label(f"v{__version__}", "AppVersion"))
         rl.addWidget(side)
+        self.sidebar = side
 
         # Main column
         main = QWidget()
@@ -180,8 +187,15 @@ class MainWindow(QMainWindow):
         top = QWidget()
         top.setObjectName("TopBar")
         tl = QHBoxLayout(top)
-        tl.setContentsMargins(20, 8, 20, 8)
+        tl.setContentsMargins(12, 8, 20, 8)
         tl.setSpacing(8)
+        # hide / show the sidebar (Ctrl+B): the whole width goes to the screen
+        self.side_btn = QToolButton()
+        self.side_btn.setObjectName("SideToggle")
+        self.side_btn.setText("☰")
+        self.side_btn.setToolTip("Hide or show the menu on the left (Ctrl+B)")
+        self.side_btn.clicked.connect(lambda: self.set_panel("sidebar", not self.sidebar.isVisible()))
+        tl.addWidget(self.side_btn)
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search everything (Ctrl+K): code, barcode, name, supplier, DN number, "
                                        "project, bin, reference...")
@@ -215,11 +229,22 @@ class MainWindow(QMainWindow):
         self.user_menu.addAction("Change Password...", self.change_password)
         self.user_menu.addAction("Settings", lambda: self.go("settings"))
         self.user_menu.addAction("Keyboard Shortcuts", self.show_shortcuts)
+        self.view_menu = self.user_menu.addMenu("View: hide / show panels")
+        self.view_actions = {}
+        for key, text, sc in PANELS:
+            act = self.view_menu.addAction(f"{text}\t{sc}" if sc else text)
+            act.setCheckable(True)
+            act.toggled.connect(lambda on, k=key: self.set_panel(k, on))
+            self.view_actions[key] = act
+        self.view_menu.addSeparator()
+        self.view_menu.addAction("Focus mode: only the work area\tF11", self.toggle_focus)
+        self.view_menu.addAction("Show everything", self.show_all_panels)
         self.user_menu.addSeparator()
         self.user_menu.addAction("Log Out", self.logout)
         self.user_button.setMenu(self.user_menu)
         tl.addWidget(self.user_button)
         ml.addWidget(top)
+        self.topbar = top
         self.stack = QStackedWidget()
         ml.addWidget(self.stack, 1)
         rl.addWidget(main, 1)
@@ -236,13 +261,109 @@ class MainWindow(QMainWindow):
                 QShortcut(QKeySequence(sc), self, lambda k=key: self.quick_action(k))
                 hints.append(f"{sc} {text.split(maxsplit=1)[1]}")
         QShortcut(QKeySequence("Ctrl+D"), self, lambda: self.go("dashboard"))
-        hints += ["Ctrl+K Search / scan", "Ctrl+D Dashboard", "F5 Refresh"]
+        QShortcut(QKeySequence("Ctrl+B"), self, lambda: self.set_panel("sidebar", not self.sidebar.isVisible()))
+        QShortcut(QKeySequence("F11"), self, self.toggle_focus)
+        hints += ["Ctrl+K Search / scan", "Ctrl+D Dashboard", "F5 Refresh", "Ctrl+B Menu", "F11 Focus"]
         self.shortcut_hints = hints
         self.keys_hint = label("   ·   ".join(hints), "Muted")
         self.statusBar().addPermanentWidget(self.keys_hint)
         self.statusBar().showMessage("Ready")
         app.data_changed.connect(self._data_changed)
+        # shown only while the top bar is hidden: one click brings the panels back
+        self.panels_btn = QToolButton(self.stack)
+        self.panels_btn.setObjectName("PanelsBack")
+        self.panels_btn.setText("☰")
+        self.panels_btn.setFixedSize(22, 22)
+        self.panels_btn.setToolTip("Show the hidden panels again (F11). Right-click: choose which panels")
+        self.panels_btn.clicked.connect(self._panels_back)
+        self.panels_btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.panels_btn.customContextMenuRequested.connect(
+            lambda pos: self.view_menu.popup(self.panels_btn.mapToGlobal(pos)))
+        self.panels_btn.hide()
+        self.stack.installEventFilter(self)
+        self._focus_saved: dict[str, bool] | None = None
+        self.panels = self._load_panels()
+        for key, on in self.panels.items():
+            self.view_actions[key].blockSignals(True)
+            self.view_actions[key].setChecked(on)
+            self.view_actions[key].blockSignals(False)
+            self._apply_panel(key, on)
         self.go("dashboard")
+
+    # -- panels: hide / show to enlarge the work area -----------------------------
+    def _load_panels(self) -> dict[str, bool]:
+        out = {}
+        for key, _t, _sc in PANELS:
+            try:
+                v = self._qs().value(f"layout/{key}")
+            except Exception:  # noqa: BLE001 - a convenience only
+                v = None
+            out[key] = str(v) != "0"
+        return out
+
+    def set_panel(self, key: str, visible: bool, save: bool = True) -> None:
+        """Show or hide one panel (sidebar, top bar, screen titles, status bar) and remember it."""
+        self.panels[key] = visible
+        act = self.view_actions[key]
+        if act.isChecked() != visible:
+            act.blockSignals(True)
+            act.setChecked(visible)
+            act.blockSignals(False)
+        self._apply_panel(key, visible)
+        if save:
+            self._focus_saved = None  # a manual choice ends focus mode
+            try:
+                self._qs().setValue(f"layout/{key}", "1" if visible else "0")
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _apply_panel(self, key: str, visible: bool) -> None:
+        if key == "sidebar":
+            self.sidebar.setVisible(visible)
+        elif key == "topbar":
+            self.topbar.setVisible(visible)
+            self.panels_btn.setVisible(not visible)
+            self._place_panels_btn()
+        elif key == "statusbar":
+            self.statusBar().setVisible(visible)
+        elif key == "titles":
+            for page in self.pages.values():
+                if hasattr(page, "set_titles_visible"):
+                    page.set_titles_visible(visible)
+
+    def toggle_focus(self) -> None:
+        """F11: hide every panel so the screen shows only its work area; F11 again brings back
+        exactly what was shown before."""
+        if self._focus_saved is not None:
+            saved, self._focus_saved = self._focus_saved, None
+            for key, on in saved.items():
+                self.set_panel(key, on, save=False)
+            return
+        saved = dict(self.panels)
+        for key in self.panels:
+            self.set_panel(key, False, save=False)
+        self._focus_saved = saved
+
+    def show_all_panels(self) -> None:
+        for key, _t, _sc in PANELS:
+            self.set_panel(key, True)
+
+    def _panels_back(self) -> None:
+        if self._focus_saved is not None:
+            self.toggle_focus()
+        else:
+            self.set_panel("topbar", True)
+
+    def _place_panels_btn(self) -> None:
+        # top-left corner, inside the screen's own margin, so it never covers a button or a figure
+        self.panels_btn.move(0, 0)
+        self.panels_btn.raise_()
+
+    def eventFilter(self, obj, event):  # noqa: N802
+        from PySide6.QtCore import QEvent
+        if obj is self.stack and event.type() == QEvent.Type.Resize and self.panels_btn.isVisible():
+            self._place_panels_btn()
+        return super().eventFilter(obj, event)
 
     # -- navigation ---------------------------------------------------------
     def nav_item(self, key: str) -> QListWidgetItem | None:
@@ -384,6 +505,8 @@ class MainWindow(QMainWindow):
         if page is None:
             page = self.factories[key](self.app)
             page.main_window = self
+            if not self.panels.get("titles", True) and hasattr(page, "set_titles_visible"):
+                page.set_titles_visible(False)
             self.pages[key] = page
             self.stack.addWidget(page)
             parent = self.hidden_parent.get(key)

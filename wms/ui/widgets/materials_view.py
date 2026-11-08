@@ -41,6 +41,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QTableView,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -416,10 +417,18 @@ class MaterialsView(QWidget):
                          (self.status, 8)):
             combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
             combo.setMinimumContentsLength(n)
+        # "Filters" folds the filter row away (more rows of the table on a small screen); the search
+        # box always stays. Remembered per table.
+        self.filters_btn = QToolButton()
+        self.filters_btn.setObjectName("FoldFilters")
+        self.filters_btn.setCheckable(True)
+        self.filters_btn.setToolTip("Show or hide the filter row (the search box always stays)")
+        self.filters_btn.setVisible(not picker)
+        self.filter_row = QWidget()
         if compact:
             # two compact rows: search + count + table tools, then every filter + Clear filters.
             lay.setSpacing(6)
-            first = h(self.search, 12, self.count, None, self.columns_btn, self.views_btn)
+            first = h(self.search, 12, self.count, None, self.filters_btn, self.columns_btn, self.views_btn)
             first.setStretch(0, 3)
             first.setStretch(3, 1)
             lay.addLayout(first)
@@ -428,18 +437,20 @@ class MaterialsView(QWidget):
                 top.setStretch(i, 2)
             top.setStretch(3, 1)
             top.setStretch(4, 1)
-            lay.addLayout(top)
         else:
             # spec 18: the search on its own line, the primary filters under it (Project first)
             self.status.setVisible(False)
             self.clear_btn.setVisible(False)
-            lay.addWidget(self.search)
-            top = h(self.project, self.supplier, self.bin, self.stock, self.more, None, self.columns_btn,
-                    self.views_btn)
+            first = h(self.search, self.filters_btn, self.columns_btn, self.views_btn)
+            first.setStretch(0, 1)
+            lay.addLayout(first)
+            top = h(self.project, self.supplier, self.bin, self.stock, self.more, None)
             for i in (0, 1, 2):
                 top.setStretch(i, 2)
             top.setStretch(3, 1)
-            lay.addLayout(top)
+        top.setContentsMargins(0, 0, 0, 0)
+        self.filter_row.setLayout(top)
+        lay.addWidget(self.filter_row)
 
         # -- project context (spec 21 / 23): the same banner on Materials -> Project and Project -> Materials
         self.project_bar = QFrame()
@@ -555,8 +566,26 @@ class MaterialsView(QWidget):
         self._visible = {"normal": self._load_visible("normal"), "project": self._load_visible("project")}
         self.widths: dict[str, int] = self._load_widths()
         self._apply_columns()
+        folded = False
+        if not picker:
+            try:
+                folded = str(self._qs().value(f"{self.settings_key}/filters_folded") or "") == "1"
+            except Exception:  # noqa: BLE001 - a convenience only
+                folded = False
+        self.filters_btn.setChecked(folded)
+        self._fold_filters(folded, save=False)
+        self.filters_btn.toggled.connect(self._fold_filters)
 
     # ---- settings (which columns, their widths) ------------------------------------------
+    def _fold_filters(self, folded: bool, save: bool = True) -> None:
+        self.filter_row.setVisible(not folded)
+        self.filters_btn.setText("Filters ▾" if folded else "Filters ▴")
+        if save:
+            try:
+                self._qs().setValue(f"{self.settings_key}/filters_folded", "1" if folded else "0")
+            except Exception:  # noqa: BLE001
+                pass
+
     def _qs(self) -> QSettings:
         return QSettings(QSettings.Format.IniFormat, QSettings.Scope.UserScope, "WMS", "WMS")
 

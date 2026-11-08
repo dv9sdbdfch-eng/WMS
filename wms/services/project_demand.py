@@ -134,6 +134,56 @@ def demand_by_project(s: Session, scope: DemandScope) -> dict[tuple[int, int], D
     return {(sid, pid): _from_raw(raw) for sid, pid, raw in s.execute(q)}
 
 
+def sync_project_lists(s: Session, ctx, site_ids: Iterable[int | None]) -> int:
+    """Make the material list (Required) of each project follow its units, inside the caller's
+    transaction. Called after every change to units, unit quantities or unit materials.
+
+    Required moves by the change in what the units need, never more: ``units_qty`` remembers how
+    much of Required came from the units last time, so anything typed or imported by hand on top
+    of it stays. A material the units need that is not on the list yet is added. Completed,
+    cancelled and archived projects are left alone (their lists are frozen). Never changes stock.
+    Returns the number of list rows changed."""
+    from wms.core.enums import CLOSED_SITE_STATUSES, EntityType
+    from wms.services import audit
+
+    changed = 0
+    for site_id in {i for i in site_ids if i}:
+        site = s.get(Site, site_id)
+        if site is None or site.status in CLOSED_SITE_STATUSES:
+            continue
+        s.flush()
+        need = {pid: q for (_sid, pid), q in demand_by_project(s, DemandScope(site_ids=[site_id])).items()}
+        rows = {pm.product_id: pm for pm in s.scalars(select(ProjectMaterial).where(ProjectMaterial.site_id == site_id))}
+        changes = []
+        for pid in set(need) | {p for p, pm in rows.items() if pm.units_qty}:
+            new = need.get(pid, ZERO)
+            pm = rows.get(pid)
+            if pm is None:
+                if new > ZERO:
+                    s.add(ProjectMaterial(site_id=site_id, product_id=pid, required_qty=new, units_qty=new,
+                                          created_by_id=ctx.user.id if ctx and ctx.user else None))
+                    changes.append([pid, None, str(new)])
+                continue
+            old_units = pm.units_qty or ZERO
+            if new == old_units:
+                continue
+            before = pm.required_qty
+            pm.required_qty = max(before + new - old_units, ZERO)
+            pm.units_qty = new
+            if pm.required_qty == ZERO and new == ZERO and not pm.notes:
+                s.delete(pm)  # it was only there because of the units
+                changes.append([pid, str(before), None])
+            elif pm.required_qty != before:
+                changes.append([pid, str(before), str(pm.required_qty)])
+        if changes:
+            s.flush()
+            audit.record(s, ctx, "PROJECT_MATERIALS_SET", EntityType.SITE.value, site_id, site.project_number,
+                         f"{len(changes)} required quantit{'y' if len(changes) == 1 else 'ies'} updated from "
+                         f"project units", new={"changes": changes[:500]})
+            changed += len(changes)
+    return changed
+
+
 @dataclass
 class ListComparison:
     """One material: what the units need against the project's material list (Required)."""
@@ -214,9 +264,14 @@ class ProjectDemandService(BaseService):
             lines = demand(s, DemandScope(site_ids=[site_id]))
             if not lines:
                 return 0
-            return upsert_project_materials(s, self.ctx, site_id, [(d.product_id, d.required) for d in lines],
-                                            replace=True, source="from project units")
+            n = upsert_project_materials(s, self.ctx, site_id, [(d.product_id, d.required) for d in lines],
+                                         replace=True, source="from project units")
+            need = {d.product_id: d.required for d in lines}
+            for pm in s.scalars(select(ProjectMaterial).where(ProjectMaterial.site_id == site_id,
+                                                              ProjectMaterial.product_id.in_(list(need)))):
+                pm.units_qty = need[pm.product_id]  # Required = units exactly; later changes follow
+            return n
 
 
 __all__ = ["DemandLine", "DemandScope", "ListComparison", "ProjectDemandService", "demand", "demand_by_project",
-           "line_total"]
+           "line_total", "sync_project_lists"]

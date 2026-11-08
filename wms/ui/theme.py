@@ -128,6 +128,15 @@ QToolButton#UserMenu {{ background: transparent; border: 1px solid transparent; 
     padding: 6px 10px; color: #344054; }}
 QToolButton#UserMenu:hover {{ background: #F2F4F7; border-color: #D0D5DD; }}
 QToolButton#UserMenu::menu-indicator {{ image: none; width: 0; }}
+QToolButton#SideToggle {{ background: transparent; border: 1px solid transparent; border-radius: 6px;
+    font-size: 13pt; padding: 2px 6px; color: #344054; }}
+QToolButton#SideToggle:hover {{ background: #F2F4F7; border-color: #D0D5DD; }}
+QToolButton#PanelsBack {{ background: #FFFFFF; border: 1px solid #D0D5DD; border-radius: 4px; color: #344054;
+    font-size: 10pt; padding: 0; }}
+QToolButton#PanelsBack:hover {{ background: #D6E6F7; }}
+QToolButton#FoldFilters {{ background: transparent; border: 1px solid #D0D5DD; border-radius: 6px;
+    padding: 4px 8px; color: #344054; }}
+QToolButton#FoldFilters:hover {{ background: #F2F4F7; }}
 """
 
 
