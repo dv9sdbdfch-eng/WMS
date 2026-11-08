@@ -1,5 +1,8 @@
 """Project Tree: Manager -> Project -> Block -> Level -> Unit -> Materials (v1.15).
 
+From v1.17 every level has its own column (Project Manager, Project, Block, Level, Unit, Material)
+and the Project Manager / Project headers set the expansion level (they never sort or filter).
+
 Block and Level are optional: a unit can sit directly in a project or on a level of a block.
 
 The tree only shows and edits what is in the database (``ProjectTreeService``). Branches are read
@@ -13,8 +16,8 @@ panel on the right for the other fields, or the ⋯ menu / right-click / keyboar
 
 from __future__ import annotations
 
-from PySide6.QtCore import QPoint, QSettings, Qt, QTimer
-from PySide6.QtGui import QBrush, QColor, QFont, QKeySequence, QShortcut
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QSettings, QSize, Qt, QTimer
+from PySide6.QtGui import QBrush, QColor, QFont, QIcon, QKeySequence, QPainter, QPixmap, QPolygonF, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -52,7 +55,13 @@ from wms.ui.dialogs.project_tree import (
 from wms.ui.pages.base import Page
 from wms.ui.widgets.common import QTY, Col, DataTable, DecimalEdit, SearchBox, button, confirm, h, info, label, run
 
-C_NAME, C_CODE, C_QTY, C_TOTAL, C_INFO, C_MENU = range(6)
+#: one column per level of the hierarchy (v1.17), then the shared value columns
+C_MGR, C_PRJ, C_BLK, C_LVL, C_UNIT, C_MAT, C_CODE, C_QTY, C_TOTAL, C_INFO, C_MENU = range(11)
+COLUMNS = ["Project Manager", "Project", "Block", "Level", "Unit", "Material", "Code / Ref", "Qty",
+           "Total required", "Details", ""]
+#: the column a row's name sits in, by row kind - a project is never shown in the manager column
+NAME_COL = {"M": C_MGR, "N": C_MGR, "P": C_PRJ, "B": C_BLK, "V": C_LVL, "U": C_UNIT, "L": C_MAT}
+ARROW = 12  # size of the expand / collapse arrow drawn in front of a name
 KEY, NODE, FULL, LOADED = (Qt.ItemDataRole.UserRole + i for i in range(4))
 UNASSIGNED_KEY = "N:"
 #: open the branches leading to search matches automatically up to this many matches
@@ -60,6 +69,9 @@ AUTO_EXPAND_MATCHES = 400
 MUTED = QColor("#8A94A6")
 MATCH = QColor("#FFF3C4")
 _SETTINGS_KEY = "project_tree/expanded"
+#: the two clickable headers (v1.17): expansion levels, never sorting or filtering
+MODE_MANAGERS, MODE_PROJECTS = "managers", "projects"
+HEADER_MODES = {C_MGR: MODE_MANAGERS, C_PRJ: MODE_PROJECTS}
 #: rows that hold other rows: manager, unassigned, project, block, level (V), unit
 BRANCHES = ("M", "N", "P", "B", "V", "U")
 
@@ -70,6 +82,55 @@ def _n(count: int, word: str) -> str:
 
 def _qs() -> QSettings:
     return QSettings(QSettings.Format.IniFormat, QSettings.Scope.UserScope, "WMS", "WMS")
+
+
+def name_col(key: str | None) -> int:
+    """Column holding the name of the row with this key."""
+    return NAME_COL.get(kind_of(key), C_MGR)
+
+
+def _arrow_icon(open_: bool | None) -> QIcon:
+    """▸ (closed), ▾ (open) or an empty space of the same size (nothing to open)."""
+    pm = QPixmap(ARROW, ARROW)
+    pm.fill(Qt.GlobalColor.transparent)
+    if open_ is not None:
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor("#5B6576"))
+        pts = ([QPointF(2, 3), QPointF(10, 3), QPointF(6, 9)] if open_
+               else [QPointF(3, 2), QPointF(9, 6), QPointF(3, 10)])
+        p.drawPolygon(QPolygonF(pts))
+        p.end()
+    return QIcon(pm)
+
+
+class _ArrowClicks(QObject):
+    """A click on the arrow in front of a name opens / closes that row (the arrow sits in the row's
+    own column, so Qt's own branch arrows, which live only in the first column, are switched off)."""
+
+    def __init__(self, page: "ProjectsPage"):
+        super().__init__(page)
+        self.page = page
+
+    def eventFilter(self, obj, ev) -> bool:  # noqa: N802 - Qt name
+        if ev.type() not in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick):
+            return False
+        if ev.button() != Qt.MouseButton.LeftButton:
+            return False
+        tree = self.page.tree
+        pos = ev.position().toPoint()
+        item = tree.itemAt(pos)
+        if item is None or not self.page.has_arrow(item):
+            return False
+        col = name_col(item.data(0, KEY))
+        left = tree.visualRect(tree.indexFromItem(item, col)).left()
+        if not left <= pos.x() <= left + ARROW + 8:
+            return False
+        if ev.type() == QEvent.Type.MouseButtonPress:
+            tree.setCurrentItem(item)
+            item.setExpanded(not item.isExpanded())
+        return True  # a double-click on the arrow must not start editing the name
 
 
 def kind_of(key: str | None) -> str:
@@ -83,7 +144,8 @@ def id_of(key: str) -> int | None:
 
 class ProjectsPage(Page):
     title = "Projects"
-    subtitle = ("Manager → Project → Block → Level → Unit → Materials (Block and Level are optional). Required "
+    subtitle = ("Manager → Project → Block → Level → Unit → Materials (Block and Level are optional). Click the "
+                "Project Manager or Project header to show just managers or all projects. Required "
                 "follows the units by itself; quantities typed by hand on top stay. Double-click a name or "
                 "quantity to change it; right-click or ⋯ for actions.")
 
@@ -111,14 +173,10 @@ class ProjectsPage(Page):
             self.add_action(button("+  Project", lambda: self.add_project(None)))
             self.add_action(button("+  Manager", self.add_manager, primary=True, shortcut="Ctrl+N"))
 
-        # filters (spec 8)
+        # search + status; the tree is opened with the two expansion buttons (v1.17)
         self.search = SearchBox("Search manager, project, block, level, unit, product code, VPK code or material...")
         self.search.setMinimumWidth(220)
         self.search.search.connect(lambda _t: self.refresh())
-        self.manager_filter = QComboBox()
-        self.project_filter = QComboBox()
-        self.project_filter.setMinimumContentsLength(14)
-        self.project_filter.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.status_filter = QComboBox()
         self.status_filter.addItem("Open projects", list(OPEN_SITE_STATUSES))
         self.status_filter.addItem("All except archived", [s for s, _t in SiteStatus.choices()
@@ -126,30 +184,51 @@ class ProjectsPage(Page):
         self.status_filter.addItem("All projects", None)
         for val, text in SiteStatus.choices():
             self.status_filter.addItem(text, [val])
-        for combo in (self.manager_filter, self.project_filter, self.status_filter):
-            combo.currentIndexChanged.connect(lambda _i: self.refresh())
-        self.body.addLayout(h(self.search, self.manager_filter, self.project_filter, self.status_filter,
-                              button("Expand all", self.expand_all, tooltip="Open every manager, project and unit"),
-                              button("Collapse all", self.collapse_all)))
+        self.status_filter.currentIndexChanged.connect(lambda _i: self.refresh())
+        bar = h(self.search, self.status_filter)
+        bar.setStretch(0, 3)
+        bar.addStretch(1)
+        self.body.addLayout(bar)
         self.body.layout().setStretch(0, 0)
 
         # tree + side panel
         self.tree = QTreeWidget()
-        self.tree.setColumnCount(6)
-        self.tree.setHeaderLabels(["Structure", "Code / Ref", "Qty", "Total required", "Details", ""])
+        self.tree.setColumnCount(len(COLUMNS))
+        self.tree.setHeaderLabels(COLUMNS)
         self.tree.setUniformRowHeights(True)
         self.tree.setAlternatingRowColors(True)
-        self.tree.setIndentation(22)
+        # each level has its own column, so no indentation and no arrows in the first column: the
+        # arrow is drawn in front of the name, in the row's own column
+        self.tree.setIndentation(0)
+        self.tree.setRootIsDecorated(False)
+        self.tree.setIconSize(QSize(ARROW, ARROW))
+        self.tree.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self.tree.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.last_mode: str | None = None
+        self._arrows = {state: _arrow_icon(state) for state in (True, False, None)}
         self.tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.tree.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._context_menu)
         hdr = self.tree.header()
         hdr.setStretchLastSection(False)
-        for col, width in ((C_NAME, 270), (C_CODE, 100), (C_QTY, 76), (C_TOTAL, 118), (C_INFO, 200), (C_MENU, 30)):
+        hdr.setMinimumSectionSize(40)
+        for col, width in ((C_MGR, 150), (C_PRJ, 170), (C_BLK, 100), (C_LVL, 100), (C_UNIT, 140), (C_MAT, 210),
+                           (C_CODE, 95), (C_QTY, 76), (C_TOTAL, 110), (C_INFO, 180), (C_MENU, 30)):
             self.tree.setColumnWidth(col, width)
-        hdr.setSectionResizeMode(C_INFO, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)  # drag a header edge to resize
         hdr.setSectionResizeMode(C_MENU, QHeaderView.ResizeMode.Fixed)
+        # the first two headers are expansion commands (not sorting): manager level / project level
+        hdr.setSectionsClickable(True)
+        hdr.setHighlightSections(False)
+        hdr.sectionClicked.connect(self._header_clicked)
+        head = self.tree.headerItem()
+        head.setToolTip(C_MGR, "Click: show only the project managers (closes every row)")
+        head.setToolTip(C_PRJ, "Click: open every manager to show all projects (blocks, levels, units and "
+                               "materials stay closed)")
+        for col in (C_BLK, C_LVL, C_UNIT, C_MAT):
+            head.setToolTip(col, f"{COLUMNS[col]} names. Open a row with the arrow in front of its name.")
+        self.tree.viewport().installEventFilter(_ArrowClicks(self))
         self.tree.itemExpanded.connect(self._expanded)
         self.tree.itemCollapsed.connect(self._collapsed)
         self.tree.itemClicked.connect(self._clicked)
@@ -176,28 +255,13 @@ class ProjectsPage(Page):
 
     # ---- loading -------------------------------------------------------------------------------
     def filter(self) -> TreeFilter:
-        return TreeFilter(self.manager_filter.currentData(), self.project_filter.currentData(),
-                          self.status_filter.currentData())
-
-    def _fill_filter_choices(self) -> None:
-        for combo, options, first in (
-                (self.manager_filter, [("Unassigned projects", UNASSIGNED)] + self.svc.manager_choices(True),
-                 "All managers"),
-                (self.project_filter, self.svc.project_choices(), "All projects")):
-            old = combo.currentData()
-            combo.blockSignals(True)
-            combo.clear()
-            combo.addItem(first, None)
-            for text, val in options:
-                combo.addItem(text, val)
-            i = combo.findData(old)
-            combo.setCurrentIndex(i if i >= 0 else 0)
-            combo.blockSignals(False)
+        """Only the project status narrows the tree; managers and projects are reached by opening
+        rows (the two expansion buttons) or by the search box."""
+        return TreeFilter(None, None, self.status_filter.currentData())
 
     def refresh(self) -> None:
         if self._skip_refresh:
             return
-        self._fill_filter_choices()
         selected = self.current_key()
         text = self.search.text().strip()
         flt = self.filter()
@@ -248,8 +312,10 @@ class ProjectsPage(Page):
     def _new_item(self, parent: QTreeWidgetItem, key: str, node, texts: list[str], children: bool,
                   full: bool) -> QTreeWidgetItem:
         self._loading = True
-        item = QTreeWidgetItem(texts + [""] * (5 - len(texts)) + ["⋯"])
+        item = QTreeWidgetItem([""] * len(COLUMNS))
         item.setData(0, KEY, key)
+        self._set_texts(item, texts)
+        item.setText(C_MENU, "⋯")
         item.setData(0, NODE, node)
         item.setData(0, FULL, full)
         item.setData(0, LOADED, False)
@@ -266,11 +332,38 @@ class ProjectsPage(Page):
         self.items[key] = item
         self._loading = False
         if self._is_match(key):
-            for c in range(6):
+            for c in range(len(COLUMNS)):
                 item.setBackground(c, QBrush(MATCH))
         if key in self.open_keys or (self.auto_expand and self._on_match_path(key)):
             item.setExpanded(True)
+        self._update_arrow(item)
         return item
+
+    def _set_texts(self, item: QTreeWidgetItem, texts: list[str]) -> None:
+        """``texts`` = [name, code, qty, total, details]; the name goes into the row's own column."""
+        nc = name_col(item.data(0, KEY))
+        item.setText(nc, texts[0])
+        item.setToolTip(nc, texts[0])  # long names stay readable
+        for col, t in zip((C_CODE, C_QTY, C_TOTAL, C_INFO), texts[1:], strict=False):
+            item.setText(col, t)
+
+    def has_arrow(self, item: QTreeWidgetItem) -> bool:
+        return kind_of(item.data(0, KEY)) in BRANCHES and (
+            item.childCount() > 0
+            or item.childIndicatorPolicy() == QTreeWidgetItem.ChildIndicatorPolicy.ShowIndicator)
+
+    def _update_arrow(self, item: QTreeWidgetItem) -> None:
+        if kind_of(item.data(0, KEY)) == "L":
+            return  # materials are the last level
+        state = item.isExpanded() if self.has_arrow(item) else None
+        was = self._loading
+        self._loading = True
+        item.setIcon(name_col(item.data(0, KEY)), self._arrows[state])
+        self._loading = was
+
+    def _update_all_arrows(self) -> None:
+        for item in self.items.values():
+            self._update_arrow(item)
 
     def _is_match(self, key: str) -> bool:
         m = self.matches
@@ -290,10 +383,11 @@ class ProjectsPage(Page):
                 or (k == "V" and i in m.level_paths) or (k == "U" and i in m.unit_paths))
 
     def _style(self, item: QTreeWidgetItem, bold: bool = False, muted: bool = False) -> None:
-        f = item.font(C_NAME)
+        nc = name_col(item.data(0, KEY))
+        f = item.font(nc)
         f.setBold(bold)
-        item.setFont(C_NAME, f)
-        for c in range(5):
+        item.setFont(nc, f)
+        for c in range(C_MENU):
             item.setForeground(c, QBrush(MUTED) if muted else QBrush())
 
     def _manager_texts(self, node) -> list[str]:
@@ -305,16 +399,16 @@ class ProjectsPage(Page):
         item = self._new_item(parent, f"M:{node.id}", node, self._manager_texts(node), node.projects > 0, full)
         self._style(item, bold=True, muted=not node.is_active)
         if node.notes:
-            item.setToolTip(C_NAME, node.notes)
+            item.setToolTip(C_MGR, f"{node.name}\n{node.notes}")
         return item
 
     def _add_unassigned(self, n: int) -> QTreeWidgetItem:
         item = self._new_item(self.tree.invisibleRootItem(), UNASSIGNED_KEY, n,
                               ["Unassigned projects", "", "", "", f"{n} project{'' if n == 1 else 's'} without a manager"],
                               n > 0, self.matches is None)
-        f = item.font(C_NAME)
+        f = item.font(C_MGR)
         f.setItalic(True)
-        item.setFont(C_NAME, f)
+        item.setFont(C_MGR, f)
         return item
 
     def _project_texts(self, node) -> list[str]:
@@ -326,13 +420,13 @@ class ProjectsPage(Page):
 
     def _add_project(self, parent, node, full: bool) -> QTreeWidgetItem:
         item = self._new_item(parent, f"P:{node.id}", node, self._project_texts(node), node.has_children, full)
-        f = item.font(C_NAME)
+        f = item.font(C_PRJ)
         f.setWeight(QFont.Weight.DemiBold)
-        item.setFont(C_NAME, f)
-        for c in range(5):
+        item.setFont(C_PRJ, f)
+        for c in range(C_MENU):
             item.setForeground(c, QBrush(MUTED) if node.status in CLOSED_SITE_STATUSES else QBrush())
         if node.notes:
-            item.setToolTip(C_NAME, node.notes)
+            item.setToolTip(C_PRJ, f"{node.name}\n{node.notes}")
         return item
 
     def _block_texts(self, node) -> list[str]:
@@ -340,11 +434,11 @@ class ProjectsPage(Page):
 
     def _add_block(self, parent, node, full: bool) -> QTreeWidgetItem:
         item = self._new_item(parent, f"B:{node.id}", node, self._block_texts(node), node.levels > 0, full)
-        f = item.font(C_NAME)
+        f = item.font(C_BLK)
         f.setWeight(QFont.Weight.Medium)
-        item.setFont(C_NAME, f)
+        item.setFont(C_BLK, f)
         if node.notes:
-            item.setToolTip(C_NAME, node.notes)
+            item.setToolTip(C_BLK, f"{node.name}\n{node.notes}")
         return item
 
     def _level_texts(self, node) -> list[str]:
@@ -353,7 +447,7 @@ class ProjectsPage(Page):
     def _add_level(self, parent, node, full: bool) -> QTreeWidgetItem:
         item = self._new_item(parent, f"V:{node.id}", node, self._level_texts(node), node.units > 0, full)
         if node.notes:
-            item.setToolTip(C_NAME, node.notes)
+            item.setToolTip(C_LVL, f"{node.name}\n{node.notes}")
         return item
 
     def _unit_texts(self, node) -> list[str]:
@@ -364,7 +458,7 @@ class ProjectsPage(Page):
         item = self._new_item(parent, f"U:{node.id}", node, self._unit_texts(node), node.materials > 0, full)
         item.setToolTip(C_QTY, "How many of this unit the project needs (double-click to change)")
         if node.notes:
-            item.setToolTip(C_NAME, node.notes)
+            item.setToolTip(C_UNIT, f"{node.name}\n{node.notes}")
         return item
 
     def _material_texts(self, node) -> list[str]:
@@ -378,7 +472,7 @@ class ProjectsPage(Page):
         item.setToolTip(C_QTY, "Quantity one unit needs (double-click to change)")
         if not node.product_active:
             self._style(item, muted=True)
-            item.setToolTip(C_NAME, "This material has been removed from active use")
+            item.setToolTip(C_MAT, "This material has been removed from active use")
         return item
 
     # lazy branches ------------------------------------------------------------------------------
@@ -391,10 +485,12 @@ class ProjectsPage(Page):
             self._save_open_keys()
         if not item.data(0, LOADED):
             self._load_children(item)
+        self._update_arrow(item)
 
     def _collapsed(self, item: QTreeWidgetItem) -> None:
         self.open_keys.discard(item.data(0, KEY))
         self._save_open_keys()
+        self._update_arrow(item)
 
     def _load_children(self, item: QTreeWidgetItem) -> None:
         key, full = item.data(0, KEY), bool(item.data(0, FULL))
@@ -425,6 +521,7 @@ class ProjectsPage(Page):
                 self._add_material(item, node)
         if item.childCount() == 0:
             item.setChildIndicatorPolicy(QTreeWidgetItem.ChildIndicatorPolicy.DontShowIndicatorWhenChildless)
+        self._update_arrow(item)
 
     def _load_units(self, item: QTreeWidgetItem, site_id, level_id, m: TreeMatches | None, full: bool) -> None:
         ids = None if m is None else (m.units | m.unit_paths)
@@ -473,11 +570,11 @@ class ProjectsPage(Page):
             return None
         self._loading = True
         item.setData(0, NODE, node)
-        for c, t in enumerate(texts):
-            item.setText(c, t)
+        self._set_texts(item, texts)
         item.setChildIndicatorPolicy(QTreeWidgetItem.ChildIndicatorPolicy.ShowIndicator if has
                                      else QTreeWidgetItem.ChildIndicatorPolicy.DontShowIndicatorWhenChildless)
         self._loading = False
+        self._update_arrow(item)
         if children and item.data(0, LOADED):
             self._forget(item)
             item.takeChildren()
@@ -541,6 +638,53 @@ class ProjectsPage(Page):
         self.tree.collapseAll()
         self.open_keys.clear()
         self._save_open_keys()
+        self._update_all_arrows()
+
+    # ---- expansion level: the Project Manager / Project headers (v1.17) --------------------------
+    def _header_clicked(self, col: int) -> None:
+        mode = HEADER_MODES.get(col)
+        if mode:
+            self.set_expand_mode(mode)
+
+    def expand_mode(self) -> str | None:
+        """The header command used last (manual opening of rows does not change it)."""
+        return self.last_mode
+
+    def set_expand_mode(self, mode: str) -> None:
+        """Reset the tree to one expansion level, whatever was open before. Only rows are opened or
+        closed: nothing is written to the database, the search and status filter stay as they are,
+        and only the managers' project lists that were never opened are read.
+
+        * ``managers`` (Project Manager header) - every row closed: just the managers.
+        * ``projects`` (Project header) - every manager open, every project and anything below closed.
+
+        The selected row stays selected even when its branch is closed."""
+        if mode not in (MODE_MANAGERS, MODE_PROJECTS):
+            return
+        self.last_mode = mode
+        selected = self.tree.currentItem()
+        self.tree.setUpdatesEnabled(False)
+        try:
+            self.tree.collapseAll()  # closes every level at once, no signal per row
+            self.open_keys.clear()
+            if mode == MODE_PROJECTS:
+                root = self.tree.invisibleRootItem()
+                for i in range(root.childCount()):
+                    top = root.child(i)
+                    if self.has_arrow(top):
+                        top.setExpanded(True)  # loads that manager's projects once (lazy)
+                        self.open_keys.add(top.data(0, KEY))
+            self._save_open_keys()
+            self._update_all_arrows()
+        finally:
+            self.tree.setUpdatesEnabled(True)
+        if selected is not None and self.tree.currentItem() is not selected:
+            self.tree.setCurrentItem(selected)
+        visible = selected
+        while visible is not None and visible.parent() is not None and not visible.parent().isExpanded():
+            visible = visible.parent()
+        if visible is not None:
+            self.tree.scrollToItem(visible)
 
     def _saved_open_keys(self) -> set[str]:
         try:
@@ -560,7 +704,7 @@ class ProjectsPage(Page):
     # ---- inline editing ------------------------------------------------------------------------
     def _editable(self, key: str, col: int) -> bool:
         k = kind_of(key)
-        return self.can_edit and ((k in ("M", "P", "B", "V", "U") and col == C_NAME)
+        return self.can_edit and ((k in ("M", "P", "B", "V", "U") and col == name_col(key))
                                   or (k in ("B", "V", "U") and col == C_CODE) or (k == "U" and col == C_QTY)
                                   or (k == "L" and col == C_QTY))
 
@@ -607,10 +751,10 @@ class ProjectsPage(Page):
         elif k == "P":
             ok = run(self, self.svc.save_project, oid, {"name": text})
         elif k in ("B", "V"):
-            field = {C_NAME: "name", C_CODE: "code"}[col]
+            field = "name" if col == name_col(key) else "code"
             ok = run(self, self.svc.save_block if k == "B" else self.svc.save_level, oid, {field: text})
         elif k == "U":
-            field = {C_NAME: "name", C_CODE: "unit_code", C_QTY: "quantity"}[col]
+            field = {C_UNIT: "name", C_CODE: "unit_code", C_QTY: "quantity"}[col]
             ok = run(self, self.svc.save_unit, oid, {field: text})
         else:
             ok = run(self, self.svc.update_material, oid, {"quantity_per_unit": text})
@@ -766,8 +910,8 @@ class ProjectsPage(Page):
 
     def rename_selected(self) -> None:
         item = self.tree.currentItem()
-        if item is not None and self._editable(item.data(0, KEY), C_NAME):
-            self.edit_inline(item, C_NAME)
+        if item is not None and self._editable(item.data(0, KEY), name_col(item.data(0, KEY))):
+            self.edit_inline(item, name_col(item.data(0, KEY)))
 
     def add_child_selected(self) -> None:
         key, node = self.current_key(), self.current_node()
