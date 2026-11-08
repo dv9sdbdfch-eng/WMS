@@ -17,6 +17,7 @@ from PySide6.QtCore import QPoint, QSettings, Qt, QTimer
 from PySide6.QtGui import QBrush, QColor, QFont, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -24,6 +25,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLineEdit,
     QMenu,
+    QPushButton,
     QSplitter,
     QStackedWidget,
     QTreeWidget,
@@ -60,6 +62,13 @@ AUTO_EXPAND_MATCHES = 400
 MUTED = QColor("#8A94A6")
 MATCH = QColor("#FFF3C4")
 _SETTINGS_KEY = "project_tree/expanded"
+_MODE_KEY = "project_tree/mode"
+#: the two expansion levels above the tree (v1.17). They only open/close rows, never filter data.
+MODE_MANAGERS, MODE_PROJECTS = "managers", "projects"
+EXPAND_MODES = {MODE_MANAGERS: ("Project Manager", "Show only the project managers - every manager closed. "
+                                                   "Open any manager by its arrow."),
+                MODE_PROJECTS: ("Project Name", "Open every manager to show all project names. Blocks, levels, "
+                                                "units and materials stay closed.")}
 #: rows that hold other rows: manager, unassigned, project, block, level (V), unit
 BRANCHES = ("M", "N", "P", "B", "V", "U")
 
@@ -111,14 +120,10 @@ class ProjectsPage(Page):
             self.add_action(button("+  Project", lambda: self.add_project(None)))
             self.add_action(button("+  Manager", self.add_manager, primary=True, shortcut="Ctrl+N"))
 
-        # filters (spec 8)
+        # search + status; the tree is opened with the two expansion buttons (v1.17)
         self.search = SearchBox("Search manager, project, block, level, unit, product code, VPK code or material...")
         self.search.setMinimumWidth(220)
         self.search.search.connect(lambda _t: self.refresh())
-        self.manager_filter = QComboBox()
-        self.project_filter = QComboBox()
-        self.project_filter.setMinimumContentsLength(14)
-        self.project_filter.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.status_filter = QComboBox()
         self.status_filter.addItem("Open projects", list(OPEN_SITE_STATUSES))
         self.status_filter.addItem("All except archived", [s for s, _t in SiteStatus.choices()
@@ -126,11 +131,31 @@ class ProjectsPage(Page):
         self.status_filter.addItem("All projects", None)
         for val, text in SiteStatus.choices():
             self.status_filter.addItem(text, [val])
-        for combo in (self.manager_filter, self.project_filter, self.status_filter):
-            combo.currentIndexChanged.connect(lambda _i: self.refresh())
-        self.body.addLayout(h(self.search, self.manager_filter, self.project_filter, self.status_filter,
-                              button("Expand all", self.expand_all, tooltip="Open every manager, project and unit"),
-                              button("Collapse all", self.collapse_all)))
+        self.status_filter.currentIndexChanged.connect(lambda _i: self.refresh())
+        # expansion level: exclusive pair, the checked one is the last mode used (manual opening
+        # and closing of rows afterwards does not change it)
+        self.mode_group = QButtonGroup(self)
+        self.mode_group.setExclusive(True)
+        self.mode_buttons: dict[str, QPushButton] = {}
+        saved_mode = self._saved_mode()
+        for mode, (text, tip) in EXPAND_MODES.items():
+            b = QPushButton(text)
+            b.setCheckable(True)
+            b.setAutoDefault(False)
+            b.setToolTip(tip)
+            b.setProperty("mode", mode)
+            b.setStyleSheet("QPushButton:checked { background: #2F6FB2; color: white; border-color: #2F6FB2; }")
+            b.setChecked(mode == saved_mode)
+            b.clicked.connect(lambda _=False, m=mode: self.set_expand_mode(m))
+            self.mode_group.addButton(b)
+            self.mode_buttons[mode] = b
+        modes = h(*self.mode_buttons.values())
+        modes.setSpacing(4)
+        bar = h(self.search, self.status_filter)
+        bar.addStretch(1)
+        bar.addLayout(modes)
+        bar.setStretch(0, 3)
+        self.body.addLayout(bar)
         self.body.layout().setStretch(0, 0)
 
         # tree + side panel
@@ -176,28 +201,13 @@ class ProjectsPage(Page):
 
     # ---- loading -------------------------------------------------------------------------------
     def filter(self) -> TreeFilter:
-        return TreeFilter(self.manager_filter.currentData(), self.project_filter.currentData(),
-                          self.status_filter.currentData())
-
-    def _fill_filter_choices(self) -> None:
-        for combo, options, first in (
-                (self.manager_filter, [("Unassigned projects", UNASSIGNED)] + self.svc.manager_choices(True),
-                 "All managers"),
-                (self.project_filter, self.svc.project_choices(), "All projects")):
-            old = combo.currentData()
-            combo.blockSignals(True)
-            combo.clear()
-            combo.addItem(first, None)
-            for text, val in options:
-                combo.addItem(text, val)
-            i = combo.findData(old)
-            combo.setCurrentIndex(i if i >= 0 else 0)
-            combo.blockSignals(False)
+        """Only the project status narrows the tree; managers and projects are reached by opening
+        rows (the two expansion buttons) or by the search box."""
+        return TreeFilter(None, None, self.status_filter.currentData())
 
     def refresh(self) -> None:
         if self._skip_refresh:
             return
-        self._fill_filter_choices()
         selected = self.current_key()
         text = self.search.text().strip()
         flt = self.filter()
@@ -541,6 +551,61 @@ class ProjectsPage(Page):
         self.tree.collapseAll()
         self.open_keys.clear()
         self._save_open_keys()
+
+    # ---- expansion level: Project Manager / Project Name (v1.17) -------------------------------
+    def expand_mode(self) -> str | None:
+        b = self.mode_group.checkedButton()
+        return b.property("mode") if b is not None else None
+
+    def set_expand_mode(self, mode: str) -> None:
+        """Reset the tree to one expansion level. Only rows are opened or closed: nothing is written
+        to the database and only the managers' project lists that were never opened are read.
+
+        * ``managers`` - every row closed: just the managers (and 'Unassigned projects').
+        * ``projects`` - every manager open, every project and anything below it closed.
+
+        The selected row stays selected even when its branch is closed, so opening the branch again
+        (or the side panel) still shows it."""
+        if mode not in EXPAND_MODES:
+            return
+        self.mode_buttons[mode].setChecked(True)
+        self._save_mode(mode)
+        selected = self.tree.currentItem()
+        self.tree.setUpdatesEnabled(False)
+        try:
+            self.tree.collapseAll()  # closes every level at once, no signal per row
+            self.open_keys.clear()
+            if mode == MODE_PROJECTS:
+                root = self.tree.invisibleRootItem()
+                for i in range(root.childCount()):
+                    top = root.child(i)
+                    if top.childIndicatorPolicy() == QTreeWidgetItem.ChildIndicatorPolicy.ShowIndicator \
+                            or top.childCount():
+                        top.setExpanded(True)  # loads that manager's projects once (lazy)
+                        self.open_keys.add(top.data(0, KEY))
+            self._save_open_keys()
+        finally:
+            self.tree.setUpdatesEnabled(True)
+        if selected is not None and self.tree.currentItem() is not selected:
+            self.tree.setCurrentItem(selected)
+        visible = selected
+        while visible is not None and visible.parent() is not None and not visible.parent().isExpanded():
+            visible = visible.parent()
+        if visible is not None:
+            self.tree.scrollToItem(visible)
+
+    def _saved_mode(self) -> str:
+        try:
+            mode = str(_qs().value(_MODE_KEY) or "")
+        except Exception:  # noqa: BLE001 - a convenience only
+            mode = ""
+        return mode if mode in EXPAND_MODES else MODE_MANAGERS
+
+    def _save_mode(self, mode: str) -> None:
+        try:
+            _qs().setValue(_MODE_KEY, mode)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _saved_open_keys(self) -> set[str]:
         try:

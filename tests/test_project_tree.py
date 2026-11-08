@@ -400,8 +400,7 @@ def test_tree_search_opens_the_matching_branch(ui, tribeca):  # noqa: F811
     page.search.setText("")
     page.refresh()
     assert page.status.text().endswith("Delete removes.")
-    page.manager_filter.setCurrentIndex(page.manager_filter.findData(UNASSIGNED))
-    assert f"M:{tribeca.john.id}" not in page.items and "N:" in page.items
+    assert f"M:{tribeca.john.id}" in page.items and "N:" in page.items  # whole tree back
     assert not _errors(msgs), msgs
 
 
