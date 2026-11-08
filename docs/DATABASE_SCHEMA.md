@@ -383,6 +383,7 @@ Protected tables (database triggers, see `wms.db.engine`):
 | site_id | Integer | no | FK sites.id, indexed |
 | product_id | Integer | no | FK products.id, indexed |
 | required_qty | Quantity | no |  |
+| units_qty | Quantity | no |  |
 | notes | Text | yes |  |
 | created_by_id | Integer | yes | FK users.id, indexed |
 | id | Integer | no | PK |

@@ -62,7 +62,8 @@ def test_materials_header_columns_button_project_banner_and_assign(ui, sample): 
     app.services.materials.set_required(sample.site.id, [(sample.mdf.id, "40")])
     page = page_of(win)
     v = page.view
-    assert v.layout().itemAt(0).widget() is v.search  # search line first
+    first = v.layout().itemAt(0)
+    assert (first.widget() or first.layout().itemAt(0).widget()) is v.search  # search line first
     assert [c.title for c in v.model.cols if c.title][:8] == ["Photo", "Code", "Material", "Product Number",
                                                               "Supplier", "On Hand", "Available", "Bin"]
     # Columns menu: the same choices as right-clicking the header
@@ -399,7 +400,7 @@ def test_sidebar_is_grouped_and_less_used_groups_fold(ui, sample):  # noqa: F811
         "HOME": ["Dashboard"],
         "WAREHOUSE": ["Materials", "Locations & Bins"],
         "OPERATIONS": ["Goods In", "Goods Out", "Transfer"],
-        "PROJECTS": ["Project Tree", "Projects"],
+        "PROJECTS": ["Projects"],
         "PURCHASING": ["Purchase Orders", "Deliveries"],
         "MORE": ["Stocktake", "Returns", "Finished Products", "Reports", "Import / Export", "Archived Records"],
         "ADMIN": ["Users", "Audit Log", "Backup & Restore", "Settings"],
@@ -440,7 +441,7 @@ def test_screens_without_a_sidebar_entry_open_in_context(ui, sample):  # noqa: F
     app, win, msgs, opened = ui
     keys = {i.data(Qt.ItemDataRole.UserRole) for items in win.section_items.values() for i in items}
     assert not keys & {"reservations", "low_stock", "discrepancies", "search", "movements"}
-    for key, parent in (("reservations", "sites"), ("low_stock", "products"),
+    for key, parent in (("reservations", "projects"), ("low_stock", "products"),
                         ("discrepancies", "delivery_notes"), ("movements", "reports")):
         win.go(parent)
         page = win.page(parent)
@@ -473,7 +474,8 @@ def test_top_bar_quick_actions_and_user_menu(ui, sample):  # noqa: F811
     win.quick["transfer"].click()
     assert "TransferDialog" in opened
     actions = [a.text() for a in win.user_menu.actions() if a.text()]
-    assert actions[-5:] == ["My Account", "Change Password...", "Settings", "Keyboard Shortcuts", "Log Out"]
+    assert actions[-6:] == ["My Account", "Change Password...", "Settings", "Keyboard Shortcuts",
+                            "View: hide / show panels", "Log Out"]
     # no permanent account buttons in the top bar any more
     from PySide6.QtWidgets import QPushButton
     texts = [b.text() for b in win.findChildren(QPushButton)]

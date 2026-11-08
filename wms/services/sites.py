@@ -111,6 +111,9 @@ class SiteService(BaseService):
             if n:
                 audit.record(s, self.ctx, "SITE_UPDATED" if site_id else "SITE_CREATED", "SITE", site.id,
                              site.display, old=o, new=n)
+            if site_id and "status" in (n or {}):
+                from wms.services.project_demand import sync_project_lists
+                sync_project_lists(s, self.ctx, [site.id])  # reopened: catch up with its units
             saved_id = site.id
         return self.get(saved_id)
 
@@ -136,8 +139,11 @@ class SiteService(BaseService):
                            already_archived=site.status == SiteStatus.ARCHIVED.value)
         plan.history = lifecycle.count(s, StockMovement.id, StockMovement.site_id == site.id)
         plan.references = sum(lifecycle.count(s, col, col == site.id) for col in (
-            GoodsIssue.site_id, StockReturn.site_id, ProductionOrder.site_id, FinishedProductInfo.site_id,
-            ProjectMaterial.site_id))
+            GoodsIssue.site_id, StockReturn.site_id, ProductionOrder.site_id, FinishedProductInfo.site_id))
+        # material-list rows count only where someone typed / imported them; rows that just mirror
+        # the units are part of the project structure below
+        plan.references += lifecycle.count(s, ProjectMaterial.id, ProjectMaterial.site_id == site.id,
+                                           ProjectMaterial.required_qty != ProjectMaterial.units_qty)
         plan.references += lifecycle.attachment_count(s, EntityType.SITE.value, site.id)
         from wms.services.project_tree import _contents
         units, lines = _contents(s, site.id)
@@ -201,6 +207,9 @@ class SiteService(BaseService):
             else:
                 audit.record(s, self.ctx, "SITE_STATUS_CHANGED", EntityType.SITE.value, site.id, site.display,
                              reason, old={"status": old}, new={"status": status})
+            if status in OPEN_SITE_STATUSES:
+                from wms.services.project_demand import sync_project_lists
+                sync_project_lists(s, self.ctx, [site.id])  # reopened: catch up with its units
         return self.get(site_id)
 
     def restore(self, site_id: int, reason: str | None = None) -> Site:

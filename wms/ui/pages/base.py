@@ -24,14 +24,18 @@ class Page(QWidget):
         outer.setContentsMargins(*self.margins)
         outer.setSpacing(self.spacing)
         head = QHBoxLayout()
-        titles = QVBoxLayout()
+        #: title + subtitle; hidden by View > Page titles (the action buttons next to it stay)
+        self.titles_widget = QWidget()
+        titles = QVBoxLayout(self.titles_widget)
+        titles.setContentsMargins(0, 0, 0, 0)
         titles.setSpacing(2)
         titles.addWidget(label(self.title, "PageTitle"))
         if self.subtitle:
             # Wraps onto a second line instead of widening the window: every screen has to fit a
             # 1366 x 768 laptop / warehouse PC screen next to the sidebar.
             titles.addWidget(label(self.subtitle, "PageSubtitle", wrap=True))
-        head.addLayout(titles, 1)
+        head.addWidget(self.titles_widget, 1)
+        head.addStretch(0)
         self.actions = QHBoxLayout()
         self.actions.setSpacing(8)
         head.addLayout(self.actions)
@@ -43,6 +47,11 @@ class Page(QWidget):
         self.body = QVBoxLayout()
         self.body.setSpacing(10)
         outer.addLayout(self.body, 1)
+
+    def set_titles_visible(self, visible: bool) -> None:
+        """View > Page titles: the heading and its explanation, not the buttons beside them."""
+        self.titles_widget.setVisible(visible)
+        self.head_widget.setVisible(self.show_header and (visible or self.actions.count() > 0))
 
     def add_action(self, widget) -> None:
         self.actions.addWidget(widget)

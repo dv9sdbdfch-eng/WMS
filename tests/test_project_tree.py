@@ -160,13 +160,54 @@ def test_demand_per_unit_project_manager_and_all(svc, tribeca):
     assert _required(d.calculate(DemandScope(statuses=None)))["H3311"] == D("90.833")
 
 
-def test_demand_feeds_project_material_list_on_request(svc, tribeca):
-    rows = svc.project_demand.compare_with_project_list(tribeca.project.id)
-    assert all(r.on_list is None for r in rows)
-    assert svc.project_demand.apply_to_project_list(tribeca.project.id) == 3
-    summ = svc.materials.project_summary(tribeca.project.id)
-    assert summ.required == D("330")  # 48 + 90 + 192
-    assert all(r.in_step for r in svc.project_demand.compare_with_project_list(tribeca.project.id))
+def _required_on_list(svc, site_id):
+    from wms.db.models import ProjectMaterial
+    with svc.ctx.db.read_session() as s:
+        return {pm.product.internal_code: pm.required_qty for pm in s.scalars(
+            select(ProjectMaterial).where(ProjectMaterial.site_id == site_id))}
+
+
+def test_material_list_follows_units_automatically(svc, tribeca):
+    """v1.16: no button needed - every change to units moves Required by that change."""
+    pid = tribeca.project.id
+    assert all(r.in_step for r in svc.project_demand.compare_with_project_list(pid))
+    assert svc.materials.project_summary(pid).required == D("330")  # 48 + 90 + 192
+    assert svc.project_demand.apply_to_project_list(pid) == 0  # already in step
+
+
+def test_manual_extra_is_kept_when_units_change(svc, tribeca):
+    t, pid = svc.project_tree, tribeca.project.id
+    # +5 sheets wastage typed by hand on top of what the units need (90)
+    svc.materials.set_required(pid, [(tribeca.h3311.id, "95")])
+    t.save_unit(tribeca.kitchen.id, {"quantity": "25"})  # 25 x 3 + 18 = 93 (+3)
+    assert _required_on_list(svc, pid)["H3311"] == D("98")  # 95 + 3: the extra 5 stays
+    # remove the wardrobe (12 x 1.5 = 18 of H3311): 98 - 18
+    t.delete_unit(tribeca.wardrobe.id)
+    assert _required_on_list(svc, pid)["H3311"] == D("80")
+    # a new material in a unit appears on the list; removing it takes it off again
+    [line] = t.add_materials(tribeca.kitchen.id, [(tribeca.sample.edge.id, "2")])
+    assert _required_on_list(svc, pid)["EDGE-W22"] == D("50")
+    t.remove_materials([line])
+    assert "EDGE-W22" not in _required_on_list(svc, pid)
+
+
+def test_moving_a_unit_moves_its_demand(svc, tribeca):
+    t = svc.project_tree
+    other = t.save_project(None, {"project_number": "MAY", "name": "Mayfair"})
+    t.move_unit_to_project(tribeca.wardrobe.id, other.id)
+    assert _required_on_list(svc, other.id)["H3311"] == D("18")
+    assert _required_on_list(svc, tribeca.project.id)["H3311"] == D("72")
+
+
+def test_closed_project_list_is_frozen_until_reopened(svc, tribeca):
+    pid = tribeca.project.id
+    svc.sites.set_status(pid, "COMPLETED")
+    with svc.ctx.db.session() as s:  # units can't be edited on a closed project from the screens;
+        from wms.db.models import ProjectUnit  # simulate an old change made while it was closed
+        s.get(ProjectUnit, tribeca.kitchen.id).quantity = D("25")
+    assert _required_on_list(svc, pid)["H3311"] == D("90")
+    svc.sites.set_status(pid, "ACTIVE")
+    assert _required_on_list(svc, pid)["H3311"] == D("93")
 
 
 # ---- acceptance 12: search ---------------------------------------------------------------------------
@@ -269,7 +310,7 @@ def test_upgrade_turns_typed_manager_names_into_managers(svc, sample):
     db.migrate()
     from pathlib import Path
     file = Path(db.engine.url.database)
-    assert file.with_name(f"{file.stem}.before-0012{file.suffix}").exists()  # copy made before the upgrade
+    assert list(file.parent.glob(f"{file.stem}.before-*{file.suffix}"))  # copy made before the upgrade
     managers = {m.name: m for m in svc.project_tree.managers()}
     assert set(managers) == {"Anna Lee", "John Smith"}
     assert {p.code for p in svc.project_tree.projects(managers["John Smith"].id)} == {"P-2", "P-3"}
