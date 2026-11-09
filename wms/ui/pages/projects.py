@@ -2,6 +2,8 @@
 
 From v1.17 every level has its own column (Project Manager, Project, Block, Level, Unit, Material)
 and the Project Manager / Project headers set the expansion level (they never sort or filter).
+From v1.18 the rows of the selected row's project are painted light green (by project id) and the
+details panel on the right can be hidden.
 
 Block and Level are optional: a unit can sit directly in a project or on a level of a block.
 
@@ -24,11 +26,14 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QFormLayout,
+    QHBoxLayout,
     QHeaderView,
     QLineEdit,
     QMenu,
     QSplitter,
     QStackedWidget,
+    QStyledItemDelegate,
+    QToolButton,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -62,7 +67,12 @@ COLUMNS = ["Project Manager", "Project", "Block", "Level", "Unit", "Material", "
 #: the column a row's name sits in, by row kind - a project is never shown in the manager column
 NAME_COL = {"M": C_MGR, "N": C_MGR, "P": C_PRJ, "B": C_BLK, "V": C_LVL, "U": C_UNIT, "L": C_MAT}
 ARROW = 12  # size of the expand / collapse arrow drawn in front of a name
-KEY, NODE, FULL, LOADED = (Qt.ItemDataRole.UserRole + i for i in range(4))
+KEY, NODE, FULL, LOADED, PROJECT = (Qt.ItemDataRole.UserRole + i for i in range(5))
+#: background of every visible row of the project the selected row belongs to (v1.18)
+ACTIVE_PROJECT = QColor("#E8F5E9")
+#: frame around the exact cell that was clicked, so it stands out inside the green project
+CURRENT_CELL = QColor("#2F6FB2")
+_PANEL_KEY = "project_tree/details_hidden"
 UNASSIGNED_KEY = "N:"
 #: open the branches leading to search matches automatically up to this many matches
 AUTO_EXPAND_MATCHES = 400
@@ -133,6 +143,31 @@ class _ArrowClicks(QObject):
         return True  # a double-click on the arrow must not start editing the name
 
 
+class _ProjectRowsDelegate(QStyledItemDelegate):
+    """Paints the active project's rows light green across the whole width and frames the current
+    cell. Membership is the project id stored on each row (``PROJECT``), never its text or place,
+    so two projects with the same name are never mixed up. Only visible rows are painted, so rows
+    that appear when a branch is opened get the colour by themselves."""
+
+    def __init__(self, page: "ProjectsPage"):
+        super().__init__(page.tree)
+        self.page = page
+
+    def paint(self, painter, option, index) -> None:
+        pid = self.page.active_project
+        if pid is not None and index.siblingAtColumn(0).data(PROJECT) == pid:
+            painter.fillRect(option.rect, ACTIVE_PROJECT)
+        super().paint(painter, option, index)
+        if index == self.page.tree.currentIndex():
+            painter.save()
+            pen = painter.pen()
+            pen.setColor(CURRENT_CELL)
+            pen.setWidth(2)
+            painter.setPen(pen)
+            painter.drawRect(option.rect.adjusted(1, 1, -1, -1))
+            painter.restore()
+
+
 def kind_of(key: str | None) -> str:
     return (key or "?:")[0]
 
@@ -185,6 +220,12 @@ class ProjectsPage(Page):
         for val, text in SiteStatus.choices():
             self.status_filter.addItem(text, [val])
         self.status_filter.currentIndexChanged.connect(lambda _i: self.refresh())
+        # hide / show the details panel on the right (v1.18): the table takes the whole width
+        self.panel_btn = QToolButton()
+        self.panel_btn.setAutoRaise(False)
+        self.panel_btn.setFixedSize(26, 26)
+        self.panel_btn.setCheckable(True)
+        self.panel_btn.clicked.connect(lambda checked: self.set_details_visible(not checked))
         bar = h(self.search, self.status_filter)
         bar.setStretch(0, 3)
         bar.addStretch(1)
@@ -207,6 +248,9 @@ class ProjectsPage(Page):
         self.last_mode: str | None = None
         self._arrows = {state: _arrow_icon(state) for state in (True, False, None)}
         self.tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        # only the clicked cell is selected (blue + frame); the rest of its row keeps the project
+        # colour, so "selected cell" and "active project" are two different looks (v1.18)
+        self.tree.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
         self.tree.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._context_menu)
@@ -234,22 +278,38 @@ class ProjectsPage(Page):
         self.tree.itemClicked.connect(self._clicked)
         self.tree.itemDoubleClicked.connect(self._double_clicked)
         self.tree.itemChanged.connect(self._item_changed)
+        self.active_project: int | None = None
+        self._panel_stale = False
+        self.tree.setItemDelegate(_ProjectRowsDelegate(self))
         self.tree.itemDelegate().closeEditor.connect(lambda *_: QTimer.singleShot(0, self._editor_closed))
-        self.tree.currentItemChanged.connect(lambda cur, _prev: self.panel.show_item(cur))
+        self.tree.currentItemChanged.connect(self._current_changed)
         for keys, slot in (("Ctrl+Up", lambda: self.move_selected(-1)), ("Ctrl+Down", lambda: self.move_selected(1)),
                            ("Delete", self.delete_selected), ("F2", self.rename_selected),
                            ("Insert", self.add_child_selected), ("Menu", self._menu_for_current)):
             QShortcut(QKeySequence(keys), self.tree, slot, context=Qt.ShortcutContext.WidgetShortcut)
 
         self.panel = NodePanel(self)
-        split = QSplitter(Qt.Orientation.Horizontal)
-        split.addWidget(self.tree)
+        # the arrow button sits on the right edge of the table, next to the panel it hides
+        table = QWidget()
+        table_lay = QHBoxLayout(table)
+        table_lay.setContentsMargins(0, 0, 0, 0)
+        table_lay.setSpacing(2)
+        table_lay.addWidget(self.tree, 1)
+        edge = QVBoxLayout()
+        edge.setContentsMargins(0, 0, 0, 0)
+        edge.addWidget(self.panel_btn)
+        edge.addStretch(1)
+        table_lay.addLayout(edge)
+        self.table_box = table
+        self.split = split = QSplitter(Qt.Orientation.Horizontal)
+        split.addWidget(table)
         split.addWidget(self.panel)
         split.setStretchFactor(0, 1)
         split.setStretchFactor(1, 0)
         split.setSizes([700, 360])
         split.setChildrenCollapsible(False)
         self.body.addWidget(split, 1)
+        self.set_details_visible(not self._saved_panel_hidden(), save=False)
         self.status = label("", "Muted", wrap=True)
         self.body.addWidget(self.status)
 
@@ -319,6 +379,9 @@ class ProjectsPage(Page):
         item.setData(0, NODE, node)
         item.setData(0, FULL, full)
         item.setData(0, LOADED, False)
+        # the project this row belongs to (its own id for a project row; None for managers)
+        k = kind_of(key)
+        item.setData(0, PROJECT, id_of(key) if k == "P" else (None if k in ("M", "N") else parent.data(0, PROJECT)))
         item.setTextAlignment(C_QTY, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         item.setTextAlignment(C_TOTAL, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         item.setTextAlignment(C_MENU, Qt.AlignmentFlag.AlignCenter)
@@ -685,6 +748,59 @@ class ProjectsPage(Page):
             visible = visible.parent()
         if visible is not None:
             self.tree.scrollToItem(visible)
+
+    # ---- active project and the details panel (v1.18) -----------------------------------------
+    def _current_changed(self, cur: QTreeWidgetItem | None, _prev=None) -> None:
+        pid = cur.data(0, PROJECT) if cur is not None else None
+        if pid != self.active_project:
+            self.active_project = pid
+            self.tree.viewport().update()  # repaint the visible rows only; nothing is read again
+        if not self.panel.isHidden():
+            self.panel.show_item(cur)
+        else:
+            self._panel_stale = True  # filled in when the panel is shown again
+
+    def project_rows(self) -> list[QTreeWidgetItem]:
+        """Visible rows painted as the active project (what the user sees in green)."""
+        pid = self.active_project
+        if pid is None:
+            return []
+        out = []
+        for item in self.items.values():
+            if item.data(0, PROJECT) != pid or item.isHidden():
+                continue
+            parent = item.parent()
+            while parent is not None and parent.isExpanded():
+                parent = parent.parent()
+            if parent is None:
+                out.append(item)
+        return out
+
+    def details_visible(self) -> bool:
+        return not self.panel.isHidden()
+
+    def set_details_visible(self, show: bool, save: bool = True) -> None:
+        """Hide or show the details panel. Hiding keeps the panel (and anything typed in it) as it
+        is; the table takes the freed width. Selecting rows never opens the panel by itself."""
+        self.panel.setVisible(show)
+        self.panel_btn.setChecked(not show)
+        self.panel_btn.setText("◂" if not show else "▸")
+        self.panel_btn.setToolTip("Show the details panel" if not show else "Hide the details panel - the table "
+                                                                            "uses the whole width")
+        if show and self._panel_stale:  # the selection changed while it was hidden
+            self._panel_stale = False
+            self.panel.show_item(self.tree.currentItem())
+        if save:
+            try:
+                _qs().setValue(_PANEL_KEY, "1" if not show else "0")
+            except Exception:  # noqa: BLE001 - a convenience only
+                pass
+
+    def _saved_panel_hidden(self) -> bool:
+        try:
+            return str(_qs().value(_PANEL_KEY) or "0") == "1"
+        except Exception:  # noqa: BLE001
+            return False
 
     def _saved_open_keys(self) -> set[str]:
         try:
