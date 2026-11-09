@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QFormLayout,
+    QHBoxLayout,
     QHeaderView,
     QLineEdit,
     QMenu,
@@ -228,7 +229,6 @@ class ProjectsPage(Page):
         bar = h(self.search, self.status_filter)
         bar.setStretch(0, 3)
         bar.addStretch(1)
-        bar.addWidget(self.panel_btn)
         self.body.addLayout(bar)
         self.body.layout().setStretch(0, 0)
 
@@ -248,6 +248,9 @@ class ProjectsPage(Page):
         self.last_mode: str | None = None
         self._arrows = {state: _arrow_icon(state) for state in (True, False, None)}
         self.tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        # only the clicked cell is selected (blue + frame); the rest of its row keeps the project
+        # colour, so "selected cell" and "active project" are two different looks (v1.18)
+        self.tree.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
         self.tree.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._context_menu)
@@ -286,8 +289,20 @@ class ProjectsPage(Page):
             QShortcut(QKeySequence(keys), self.tree, slot, context=Qt.ShortcutContext.WidgetShortcut)
 
         self.panel = NodePanel(self)
+        # the arrow button sits on the right edge of the table, next to the panel it hides
+        table = QWidget()
+        table_lay = QHBoxLayout(table)
+        table_lay.setContentsMargins(0, 0, 0, 0)
+        table_lay.setSpacing(2)
+        table_lay.addWidget(self.tree, 1)
+        edge = QVBoxLayout()
+        edge.setContentsMargins(0, 0, 0, 0)
+        edge.addWidget(self.panel_btn)
+        edge.addStretch(1)
+        table_lay.addLayout(edge)
+        self.table_box = table
         self.split = split = QSplitter(Qt.Orientation.Horizontal)
-        split.addWidget(self.tree)
+        split.addWidget(table)
         split.addWidget(self.panel)
         split.setStretchFactor(0, 1)
         split.setStretchFactor(1, 0)

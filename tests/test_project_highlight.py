@@ -11,7 +11,7 @@ from PySide6.QtWidgets import QApplication
 from test_project_tree import _open_page, tower, tribeca  # noqa: F401 - shared fixtures
 from test_ui_smoke import _errors, ui  # noqa: F401 - the shared screen fixture
 
-from wms.ui.pages.projects import ACTIVE_PROJECT, C_INFO, C_MGR, C_PRJ, KEY, PROJECT, ProjectsPage
+from wms.ui.pages.projects import ACTIVE_PROJECT, C_BLK, C_INFO, C_MGR, C_PRJ, KEY, PROJECT, ProjectsPage
 
 
 def _surrey(svc, tribeca):  # noqa: F811
@@ -54,7 +54,7 @@ def test_1_2_details_panel_collapses_and_restores(ui, tribeca):  # noqa: F811
     QApplication.processEvents()
     assert not page.details_visible() and page.panel.isHidden()
     assert page.tree.width() > width  # the table takes the freed space
-    assert page.split.width() - page.tree.width() <= page.split.handleWidth() + 2  # no blank space left
+    assert page.split.width() - page.table_box.width() <= page.split.handleWidth() + 2  # no blank space left
     assert page.current_key() == f"M:{tribeca.john.id}"  # selection kept
     page.select(f"P:{tribeca.project.id}")
     assert page.panel.isHidden()  # selecting never reopens it
@@ -176,3 +176,34 @@ def test_selection_does_not_query_the_database(ui, tribeca, monkeypatch):  # noq
     page.select(f"U:{tribeca.kitchen.id}")
     page.select(f"P:{tribeca.project.id}")
     assert calls == []
+
+
+def test_selected_cell_differs_from_the_green_row(ui, tribeca, tower):  # noqa: F811
+    _app, win, _msgs, _ = ui
+    page = _open_page(win)
+    _open(page, f"M:{tribeca.john.id}", f"P:{tribeca.project.id}", f"B:{tower.block.id}")
+    block = page.items[f"B:{tower.block.id}"]
+    page.tree.setCurrentItem(block, C_BLK)
+    assert _pixel(page, block, C_BLK) != ACTIVE_PROJECT  # the clicked cell: selection colour + frame
+    assert _pixel(page, block, C_INFO) == ACTIVE_PROJECT  # the rest of its row stays green
+    assert [i.column() for i in page.tree.selectedIndexes()] == [C_BLK]
+
+
+def test_button_sits_on_the_table_edge_and_scroll_is_kept(ui, tribeca):  # noqa: F811
+    app, win, _msgs, _ = ui
+    t = app.services.project_tree
+    for i in range(40):
+        t.save_project(None, {"project_number": f"X{i:02}", "name": f"Extra {i}", "manager_id": tribeca.john.id})
+    page = _open_page(win)
+    win.resize(1366, 768)
+    QApplication.processEvents()
+    btn, tree = page.panel_btn, page.tree
+    assert btn.parentWidget() is page.table_box
+    assert 0 <= btn.geometry().left() - tree.geometry().right() <= 8  # right next to the table
+    _open(page, f"M:{tribeca.john.id}")
+    bar = tree.verticalScrollBar()
+    bar.setValue(bar.maximum() // 2)
+    pos = bar.value()
+    visible = tree.itemAt(5, 5)
+    tree.setCurrentItem(visible, C_PRJ)
+    assert bar.value() == pos
