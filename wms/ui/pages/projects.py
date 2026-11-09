@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLineEdit,
     QMenu,
+    QMessageBox,
     QSplitter,
     QStackedWidget,
     QStyledItemDelegate,
@@ -168,6 +169,25 @@ class _ProjectRowsDelegate(QStyledItemDelegate):
             painter.restore()
 
 
+SAVE, DISCARD, CANCEL = "save", "discard", "cancel"
+
+
+def ask_unsaved(parent) -> str:
+    """Unsaved Changes: Save Changes / Discard Changes / Cancel. Returns SAVE, DISCARD or CANCEL."""
+    box = QMessageBox(parent)
+    box.setIcon(QMessageBox.Icon.Warning)
+    box.setWindowTitle("Unsaved Changes")
+    box.setText("You have unsaved changes. What would you like to do?")
+    save = box.addButton("Save Changes", QMessageBox.ButtonRole.AcceptRole)
+    discard = box.addButton("Discard Changes", QMessageBox.ButtonRole.DestructiveRole)
+    cancel = box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+    box.setDefaultButton(save)
+    box.setEscapeButton(cancel)
+    box.exec()
+    clicked = box.clickedButton()
+    return SAVE if clicked is save else DISCARD if clicked is discard else CANCEL
+
+
 def kind_of(key: str | None) -> str:
     return (key or "?:")[0]
 
@@ -211,7 +231,8 @@ class ProjectsPage(Page):
         # search + status; the tree is opened with the two expansion buttons (v1.17)
         self.search = SearchBox("Search manager, project, block, level, unit, product code, VPK code or material...")
         self.search.setMinimumWidth(220)
-        self.search.search.connect(lambda _t: self.refresh())
+        self.search.search.connect(lambda _t: self._filter_changed())
+        self._last_search = ""
         self.status_filter = QComboBox()
         self.status_filter.addItem("Open projects", list(OPEN_SITE_STATUSES))
         self.status_filter.addItem("All except archived", [s for s, _t in SiteStatus.choices()
@@ -219,7 +240,8 @@ class ProjectsPage(Page):
         self.status_filter.addItem("All projects", None)
         for val, text in SiteStatus.choices():
             self.status_filter.addItem(text, [val])
-        self.status_filter.currentIndexChanged.connect(lambda _i: self.refresh())
+        self.status_filter.currentIndexChanged.connect(lambda _i: self._filter_changed())
+        self._last_status = 0
         # hide / show the details panel on the right (v1.18): the table takes the whole width
         self.panel_btn = QToolButton()
         self.panel_btn.setAutoRaise(False)
@@ -280,6 +302,9 @@ class ProjectsPage(Page):
         self.tree.itemChanged.connect(self._item_changed)
         self.active_project: int | None = None
         self._panel_stale = False
+        self._reverting = False
+        self._rebuilding = False
+        self._current_col = 0
         self.tree.setItemDelegate(_ProjectRowsDelegate(self))
         self.tree.itemDelegate().closeEditor.connect(lambda *_: QTimer.singleShot(0, self._editor_closed))
         self.tree.currentItemChanged.connect(self._current_changed)
@@ -334,7 +359,11 @@ class ProjectsPage(Page):
         elif self._normal_keys is not None:
             self.open_keys, self._normal_keys = self._normal_keys, None
         self._loading = True
-        self.tree.clear()
+        self._rebuilding = True
+        try:
+            self.tree.clear()
+        finally:
+            self._rebuilding = False
         self.items.clear()
         self._loading = False
         m = self.matches
@@ -363,10 +392,14 @@ class ProjectsPage(Page):
             self.status.setText(f"{len(managers)} manager(s). Projects without a manager are under 'Unassigned "
                                 f"projects'. Ctrl+Up / Ctrl+Down moves the selected row, Insert adds below it, "
                                 f"F2 renames, Delete removes.")
-        if selected and selected in self.items:
-            self.tree.setCurrentItem(self.items[selected])
-        else:
-            self.panel.show_item(self.tree.currentItem())
+        self._rebuilding = True  # re-selecting the same row must not wipe typed, unsaved panel edits
+        try:
+            if selected and selected in self.items:
+                self.tree.setCurrentItem(self.items[selected])
+            elif not self.panel.is_dirty():
+                self.panel.show_item(self.tree.currentItem())
+        finally:
+            self._rebuilding = False
 
     # item creation ------------------------------------------------------------------------------
     def _new_item(self, parent: QTreeWidgetItem, key: str, node, texts: list[str], children: bool,
@@ -642,7 +675,7 @@ class ProjectsPage(Page):
             self._forget(item)
             item.takeChildren()
             self._load_children(item)
-        if item is self.tree.currentItem():
+        if item is self.tree.currentItem() and not self.panel.is_dirty():
             self.panel.show_item(item)
         return item
 
@@ -658,7 +691,7 @@ class ProjectsPage(Page):
     def select(self, key: str) -> None:
         item = self.items.get(key)
         if item is not None:
-            self.tree.setCurrentItem(item)
+            self.tree.setCurrentItem(item, name_col(key))
             self.tree.scrollToItem(item)
 
     def _parent_key(self, key: str) -> str | None:
@@ -750,11 +783,74 @@ class ProjectsPage(Page):
             self.tree.scrollToItem(visible)
 
     # ---- active project and the details panel (v1.18) -----------------------------------------
-    def _current_changed(self, cur: QTreeWidgetItem | None, _prev=None) -> None:
+    def _current_changed(self, cur: QTreeWidgetItem | None, prev=None) -> None:
+        if self._reverting:
+            return
+        if self.panel.is_dirty():
+            same = cur is not None and cur.data(0, KEY) == self.panel.shown_key
+            if self._rebuilding or same:
+                self._apply_current(cur, refill=False)  # the edited row again: keep what was typed
+                return
+            if prev is not None and prev.treeWidget() is self.tree:  # (a deleted row has nothing to keep)
+                target = cur.data(0, KEY) if cur is not None else None
+                target_col = max(self.tree.currentColumn(), 0)
+                self._revert_to(prev)  # stay on the edited row (and cell) while the user decides
+                if not self.confirm_unsaved():
+                    return
+                if target and target in self.items:
+                    self.tree.setCurrentItem(self.items[target], target_col)
+                elif target is None:
+                    self.tree.setCurrentItem(None)
+                return
+            self.panel.mark_clean()
+        self._apply_current(cur)
+
+    def _revert_to(self, item: QTreeWidgetItem) -> None:
+        self._reverting = True
+        try:
+            self.tree.setCurrentItem(item, self._current_col)
+        finally:
+            self._reverting = False
+
+    def confirm_unsaved(self) -> bool:
+        """Ask what to do with unsaved panel edits. True = go on (saved or discarded), False = stay
+        (Cancel, or saving failed - the typed values are kept)."""
+        if not self.panel.is_dirty():
+            return True
+        answer = ask_unsaved(self)
+        if answer == SAVE:
+            return self.panel.save_current()
+        if answer == DISCARD:
+            self.panel.discard()
+            return True
+        return False
+
+    def can_leave(self) -> bool:
+        """Asked before another screen opens or the program closes."""
+        return self.confirm_unsaved()
+
+    def _filter_changed(self) -> None:
+        if not self.confirm_unsaved():
+            # put the search text / status back as it was, the list stays as it is
+            self.search.blockSignals(True)
+            self.search.setText(self._last_search)
+            self.search.blockSignals(False)
+            self.status_filter.blockSignals(True)
+            self.status_filter.setCurrentIndex(self._last_status)
+            self.status_filter.blockSignals(False)
+            return
+        self._last_search = self.search.text()
+        self._last_status = self.status_filter.currentIndex()
+        self.refresh()
+
+    def _apply_current(self, cur: QTreeWidgetItem | None, refill: bool = True) -> None:
+        self._current_col = max(self.tree.currentColumn(), 0)
         pid = cur.data(0, PROJECT) if cur is not None else None
         if pid != self.active_project:
             self.active_project = pid
             self.tree.viewport().update()  # repaint the visible rows only; nothing is read again
+        if not refill:
+            return
         if not self.panel.isHidden():
             self.panel.show_item(cur)
         else:
@@ -787,7 +883,7 @@ class ProjectsPage(Page):
         self.panel_btn.setText("◂" if not show else "▸")
         self.panel_btn.setToolTip("Show the details panel" if not show else "Hide the details panel - the table "
                                                                             "uses the whole width")
-        if show and self._panel_stale:  # the selection changed while it was hidden
+        if show and self._panel_stale and not self.panel.is_dirty():  # selection changed while hidden
             self._panel_stale = False
             self.panel.show_item(self.tree.currentItem())
         if save:
@@ -1367,6 +1463,8 @@ class NodePanel(QStackedWidget):
         self.setMinimumWidth(330)
         self.setMaximumWidth(460)
         self.node = None
+        self.shown_key: str | None = None
+        self._snapshot: tuple | None = None  # field values as last shown / saved
         self.empty = label("Select a manager, project, block, level, unit or material to see and change its details here.\n\n"
                            "Right-click a row (or click ⋯) for its actions.", "Muted", wrap=True)
         self.empty.setAlignment(Qt.AlignmentFlag.AlignTop)
@@ -1504,12 +1602,60 @@ class NodePanel(QStackedWidget):
         key = item.data(0, KEY) if item is not None else None
         k = kind_of(key)
         if key is None or k not in self.pages:
-            self.node = None
+            self.node, self.shown_key, self._snapshot = None, None, None
             self.setCurrentWidget(self.empty)
             return
         self.node = item.data(0, NODE)
         getattr(self, f"_show_{k.lower()}")(self.node)
         self.setCurrentWidget(self.pages[k])
+        self.shown_key = key
+        self._snapshot = self._values()
+
+    # ---- unsaved changes (v1.19) -----------------------------------------------------------------
+    def _fields(self) -> list:
+        k = kind_of(self.shown_key)
+        return {"M": [self.m_name, self.m_email, self.m_phone, self.m_active, self.m_notes],
+                "P": [self.p_code, self.p_name, self.p_manager, self.p_status, self.p_notes],
+                "B": [self.b_name, self.b_code, self.b_notes], "V": [self.v_name, self.v_code, self.v_notes],
+                "U": [self.u_name, self.u_code, self.u_qty, self.u_notes],
+                "L": [self.l_qty, self.l_vpk, self.l_notes]}.get(k, [])
+
+    def _values(self) -> tuple:
+        out = []
+        for w in self._fields():
+            if isinstance(w, QCheckBox):
+                out.append(w.isChecked())
+            elif isinstance(w, QComboBox):
+                out.append(w.currentData())
+            elif hasattr(w, "toPlainText"):
+                out.append(w.toPlainText())
+            else:
+                out.append(w.text())
+        return tuple(out)
+
+    def is_dirty(self) -> bool:
+        """Something was typed in the panel and not saved yet (compared with what was shown)."""
+        return (self.page.can_edit and self.node is not None and self._snapshot is not None
+                and self._values() != self._snapshot)
+
+    def mark_clean(self) -> None:
+        self._snapshot = self._values() if self.node is not None else None
+
+    def discard(self) -> None:
+        """Forget the typed values: show the saved ones again."""
+        key = self.shown_key
+        item = self.page.items.get(key) if key else None
+        if item is not None:
+            self.show_item(item)
+        else:
+            self.mark_clean()
+
+    def save_current(self) -> bool:
+        """Save with the panel's own Save. False (and the typed values kept) when it fails."""
+        k = kind_of(self.shown_key)
+        fn = {"M": self.save_manager, "P": self.save_project, "B": lambda: self.save_group("b"),
+              "V": lambda: self.save_group("v"), "U": self.save_unit, "L": self.save_material}.get(k)
+        return bool(fn and fn())
 
     def _enable(self, *widgets, on: bool) -> None:
         for wdg in widgets:
@@ -1594,42 +1740,57 @@ class NodePanel(QStackedWidget):
                      on=self.page.can_edit)
 
     # ---- saving ---------------------------------------------------------------------------------
-    def save_manager(self) -> None:
+    def save_manager(self) -> bool:
         n = self.node
         if run(self, self.svc.save_manager, n.id, {"name": self.m_name.text(), "email": self.m_email.text(),
                                                    "phone": self.m_phone.text(), "is_active": self.m_active.isChecked(),
                                                    "notes": self.m_notes.toPlainText()}) is not None:
+            self.mark_clean()
             self.page.reload_item(f"M:{n.id}")
             self.page._changed()
+            return True
+        return False
 
-    def save_project(self) -> None:
+    def save_project(self) -> bool:
         n = self.node
         saved = run(self, self.svc.save_project, n.id, {
             "project_number": self.p_code.text(), "name": self.p_name.text(), "manager_id": self.p_manager.currentData(),
             "status": self.p_status.currentData(), "notes": self.p_notes.toPlainText()}, n.version)
         if saved is not None:
+            self.mark_clean()
             self.page._after_project_change(saved, n.manager_id)
+            return True
+        return False
 
-    def save_group(self, p: str) -> None:
+    def save_group(self, p: str) -> bool:
         n = self.node
         fn = self.svc.save_block if p == "b" else self.svc.save_level
         data = {"name": getattr(self, f"{p}_name").text(), "code": getattr(self, f"{p}_code").text(),
                 "notes": getattr(self, f"{p}_notes").toPlainText()}
         if run(self, fn, n.id, data) is not None:
+            self.mark_clean()
             key = f"{'B' if p == 'b' else 'V'}:{n.id}"
             self.page.reload_item(key, children=False)
             self.page._changed()
+            return True
+        return False
 
-    def save_unit(self) -> None:
+    def save_unit(self) -> bool:
         n = self.node
         if run(self, self.svc.save_unit, n.id, {"name": self.u_name.text(), "unit_code": self.u_code.text(),
                                                 "quantity": self.u_qty.text(),
                                                 "notes": self.u_notes.toPlainText()}) is not None:
+            self.mark_clean()
             self.page._refresh_keys(f"U:{n.id}", select=f"U:{n.id}")
+            return True
+        return False
 
-    def save_material(self) -> None:
+    def save_material(self) -> bool:
         n = self.node
         if run(self, self.svc.update_material, n.id, {"quantity_per_unit": self.l_qty.text(),
                                                       "vpk_code": self.l_vpk.text(),
                                                       "notes": self.l_notes.toPlainText()}) is not None:
+            self.mark_clean()
             self.page._refresh_keys(f"L:{n.id}", select=f"L:{n.id}")
+            return True
+        return False

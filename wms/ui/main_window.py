@@ -501,6 +501,13 @@ class MainWindow(QMainWindow):
         self._show_page(key)
 
     def _show_page(self, key: str) -> None:
+        current = self.stack.currentWidget()
+        if current is not None and current is not self.pages.get(key) and hasattr(current, "can_leave") \
+                and not current.can_leave():
+            # unsaved changes and the user chose Cancel (or saving failed): stay on this screen
+            here = next((k for k, p in self.pages.items() if p is current), None)
+            self._highlight(self.hidden_parent.get(here, here))
+            return
         page = self.pages.get(key)
         if page is None:
             page = self.factories[key](self.app)
@@ -629,6 +636,10 @@ class MainWindow(QMainWindow):
         return path
 
     def closeEvent(self, event):  # noqa: N802
+        for page in list(self.pages.values()):
+            if hasattr(page, "can_leave") and not page.can_leave():
+                event.ignore()  # unsaved changes kept: the program stays open
+                return
         cfg = self.app.ctx.config
         if cfg.auto_backup_on_exit and cfg.is_sqlite and not self.app.restart_required:
             try:
