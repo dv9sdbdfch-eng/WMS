@@ -81,14 +81,27 @@ class LinesEditor(QWidget):
                         button("Remove line", self.remove_row), None, self.total_label))
         self._products: dict[int, object] = {}
         self._product_opts: list = []
+        self._product_ids: set[int] = set()
         self._bin_opts: list = []
         self.reload_options()
 
     def reload_options(self):
-        rows = self.app.services.products.list(item_types=self.product_types)
-        self._products = {r.product.id: r for r in rows}
-        self._product_opts = [(f"{r.product.internal_code} - {r.product.name}", r.product.id) for r in rows]
+        # names only (fast on any size of catalogue); stock of a product is read when it is picked
+        self._product_opts = self.app.services.products.options(item_types=self.product_types)
+        self._product_ids = {pid for _, pid in self._product_opts}
+        self._products = {}
         self._bin_opts = self.app.bin_options()
+
+    def _row(self, pid: int | None):
+        """The product with its stock (cached per form; refreshed with the pick list)."""
+        if pid is None or pid not in self._product_ids:
+            return None
+        if pid not in self._products:
+            try:
+                self._products[pid] = self.app.services.products.row(pid)
+            except Exception:  # noqa: BLE001 - removed meanwhile: treat as not on the list
+                return None
+        return self._products[pid]
 
     def _col(self, name_start: str) -> int:
         return next(i for i, c in enumerate(self.cols) if c.startswith(name_start))
@@ -197,7 +210,7 @@ class LinesEditor(QWidget):
         if r < 0:
             return
         pid = prod_widget.value()
-        row = self._products.get(pid)
+        row = self._row(pid)
         unit = self.table.cellWidget(r, 2)
         unit.setText(row.product.unit.code if row else "")
         if self.show_stock:
@@ -216,7 +229,7 @@ class LinesEditor(QWidget):
     def add_product(self, product_id: int) -> None:
         """Put a product on the form (from search): into the empty last line, or a new line.
         The cursor lands in its Quantity box."""
-        if product_id not in self._products:
+        if product_id not in self._product_ids:
             self.reload_options()
         r = self.table.rowCount() - 1
         prod = self.table.cellWidget(r, 0) if r >= 0 else None
@@ -295,7 +308,7 @@ class LinesEditor(QWidget):
     def duplicate_products(self) -> list[str]:
         seen, dups = set(), []
         for v in self.values(validate=False):
-            if v.product_id in seen and v.product_id in self._products:
-                dups.append(self._products[v.product_id].product.internal_code)
+            if v.product_id in seen and self._row(v.product_id) is not None:
+                dups.append(self._row(v.product_id).product.internal_code)
             seen.add(v.product_id)
         return dups

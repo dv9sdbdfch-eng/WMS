@@ -12,6 +12,7 @@ from wms.ui.widgets.common import DATE, INT, MONEY, Col, PickCombo, button
 
 
 class PurchaseOrdersPage(ListPage):
+    default_period = "ALL"  # an open order can be months old: never hide it by default
     title = "Purchase Orders"
     subtitle = "Orders to suppliers. Deliveries are received against them in Goods In, in one or several parts."
     search_hint = "Search PO no., supplier, supplier reference, project, product code or name..."
@@ -59,7 +60,7 @@ class PurchaseOrdersPage(ListPage):
         st = self.status.currentData()
         return self.app.services.purchasing.list(self.search.text(), None if st in ("OPEN", "OVERDUE") else st,
                                                  self.supplier.value(), open_only=st == "OPEN",
-                                                 date_from=d1, date_to=d2, overdue_only=st == "OVERDUE")
+                                                 date_from=d1, date_to=d2, overdue_only=st == "OVERDUE", limit=None)
 
     def describe(self, rows):
         overdue = sum(1 for r in rows if r.is_overdue)

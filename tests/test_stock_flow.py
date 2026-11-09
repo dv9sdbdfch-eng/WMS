@@ -161,14 +161,34 @@ def test_returns_from_site_and_to_supplier(svc, sample):
     svc.goods_out.post({"issue_date": date.today(), "site_id": sample.site.id}, [IssueLine(sample.mdf.id, "6")])
     svc.stock.post_return({"return_type": "FROM_SITE", "return_date": date.today(), "site_id": sample.site.id},
                           [ReturnLineInput(sample.mdf.id, "2", sample.bin1.id, "USABLE"),
-                           ReturnLineInput(sample.mdf.id, "1", sample.quarantine.id, "DAMAGED")])
-    assert on_hand(svc, sample.mdf) == (D("7"), D("6"))
+                           ReturnLineInput(sample.mdf.id, "1", sample.bin1.id, "DAMAGED")])
+    # v1.20: damaged material does not come back into stock - only the 2 usable sheets do
+    assert on_hand(svc, sample.mdf) == (D("6"), D("6"))
     summary = svc.sites.material_summary(sample.site.id)
+    # ...but it has left the project, so the project needs it again
     assert (summary[0].issued, summary[0].returned, summary[0].net) == (D("6"), D("3"), D("3"))
     svc.stock.post_return({"return_type": "TO_SUPPLIER", "return_date": date.today(),
                            "supplier_id": sample.supplier.id, "reason": "Damaged on arrival"},
-                          [ReturnLineInput(sample.mdf.id, "1", sample.quarantine.id, "DAMAGED")])
-    assert on_hand(svc, sample.mdf) == (D("6"), D("6"))
+                          [ReturnLineInput(sample.mdf.id, "1", sample.bin1.id, "DAMAGED")])
+    assert on_hand(svc, sample.mdf) == (D("5"), D("5"))
+    assert_consistent(svc)
+
+
+def test_damaged_return_is_written_off_and_reversal_undoes_both(svc, sample):
+    sample.receive(sample.mdf, 10)
+    svc.goods_out.post({"issue_date": date.today(), "site_id": sample.site.id}, [IssueLine(sample.mdf.id, "6")])
+    ret = svc.stock.post_return({"return_type": "FROM_SITE", "return_date": date.today(), "site_id": sample.site.id},
+                                [ReturnLineInput(sample.mdf.id, "4", sample.bin1.id, "DAMAGED")])
+    assert on_hand(svc, sample.mdf) == (D("4"), D("4"))
+    offs = svc.stock.damaged_write_offs(ret.id)
+    assert list(offs) == [1]
+    adj = next(a for a in svc.stock.adjustments() if a.adjustment_number == offs[1])
+    assert (adj.reason_code, adj.difference) == ("DAMAGED", D("-4"))
+    assert ret.return_number in adj.reason
+    svc.stock.reverse_return(ret.id, "Entered by mistake")
+    assert on_hand(svc, sample.mdf) == (D("4"), D("4"))
+    summary = svc.sites.material_summary(sample.site.id)
+    assert (summary[0].returned, summary[0].net) == (D("0"), D("6"))
     assert_consistent(svc)
 
 

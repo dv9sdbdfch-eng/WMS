@@ -241,8 +241,9 @@ class ReturnEntryDialog(QDialog):
         from_site = self.rtype.currentData() == ReturnType.FROM_SITE.value
         self.form.setRowVisible(self.site, from_site)
         self.form.setRowVisible(self.supplier, not from_site)
-        self.hint.setText("Material coming back from site is added to the chosen bin. Put damaged material in the "
-                          "QUARANTINE bin so it cannot be issued." if from_site else
+        self.hint.setText("Usable material coming back from site is added to the chosen bin. Lines marked "
+                          "Damaged do NOT come back into stock: they are booked off the project and written off "
+                          "(Stock Adjustment 'Damaged')." if from_site else
                           "Goods going back to the supplier are taken out of the chosen bin.")
         default = "RETURNED_FROM_PROJECT" if from_site else "SUPPLIER_RETURN"
         idx = self.reason_code.findData(default)

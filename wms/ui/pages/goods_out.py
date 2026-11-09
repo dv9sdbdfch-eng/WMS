@@ -62,7 +62,7 @@ class IssueHistory(ListPage):
     def fetch(self):
         d1, d2 = self.dates()
         return self.app.services.goods_out.search(self.search.text(), self.site.value(), d1, d2,
-                                                  self.status.currentData())
+                                                  self.status.currentData(), limit=None)
 
     def describe(self, rows):
         return f"{len(rows)} Goods Out record(s)"

@@ -41,7 +41,7 @@ class ReturnsPage(ListPage):
 
     def fetch(self):
         d1, d2 = self.dates()
-        return self.app.services.stock.returns(self.search.text(), self.rtype.currentData(), d1, d2)
+        return self.app.services.stock.returns(self.search.text(), self.rtype.currentData(), d1, d2, limit=None)
 
     def describe(self, rows):
         return f"{len(rows)} return(s)"

@@ -140,7 +140,7 @@ class StocktakePage(Page):
     # -- list ---------------------------------------------------------------
     def refresh(self):
         val = self.status.currentData()
-        rows = self.app.services.stocktake.list(None if val in (None, "active") else val)
+        rows = self.app.services.stocktake.list(None if val in (None, "active") else val, limit=None)
         if val == "active":
             rows = [c for c in rows if c.status in (CountStatus.OPEN.value, CountStatus.SUBMITTED.value)]
         # Only the list is reloaded here: the open count keeps any quantities typed but not yet saved.

@@ -52,7 +52,8 @@ class DeliveryNotesPage(ListPage):
     def fetch(self):
         d1, d2 = self.dates()
         return self.app.services.goods_in.search(self.search.text(), self.supplier.value(), d1, d2,
-                                                 self.status.currentData(), scan=self.scan.currentData())
+                                                 self.status.currentData(), scan=self.scan.currentData(),
+                                                 limit=None)
 
     def describe(self, rows):
         total = sum((r[2] for r in rows if r[0].status == "POSTED"), 0)

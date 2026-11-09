@@ -10,6 +10,7 @@ from wms.ui.widgets.common import PickCombo, button
 
 
 class DiscrepanciesPage(ListPage):
+    default_period = "ALL"  # an open problem must stay in sight however old it is
     title = "Delivery Problems"
     subtitle = "Short, over, damaged, rejected or wrong goods, with photos. Open ones show on the dashboard."
     search_hint = "Search number, supplier, PO, delivery note, product or notes..."
@@ -39,7 +40,8 @@ class DiscrepanciesPage(ListPage):
     def fetch(self):
         d1, d2 = self.dates()
         return self.app.services.purchasing.discrepancies(self.search.text(), self.status.currentData(),
-                                                          self.supplier.value(), date_from=d1, date_to=d2)
+                                                          self.supplier.value(), date_from=d1, date_to=d2,
+                                                          limit=None)
 
     def describe(self, rows):
         return f"{len(rows)} delivery problem(s)"

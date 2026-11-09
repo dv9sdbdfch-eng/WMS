@@ -51,8 +51,7 @@ class App(QObject):
 
     # -- pick-list options --------------------------------------------------
     def product_options(self, item_types: list[str] | None = None, include_inactive: bool = False):
-        rows = self.services.products.list(item_types=item_types, include_inactive=include_inactive)
-        return [(f"{r.product.internal_code} - {r.product.name}", r.product.id) for r in rows]
+        return self.services.products.options(item_types=item_types, include_inactive=include_inactive)
 
     def bin_options(self, available_only: bool = False, include_inactive: bool = False):
         """Active bins for posting screens. Search and history pass include_inactive=True so bins removed

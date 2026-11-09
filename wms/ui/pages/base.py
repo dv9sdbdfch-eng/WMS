@@ -83,6 +83,26 @@ class Page(QWidget):
         pass
 
 
+#: the period choices of every document list (Ihor, 09.11.2026)
+PERIODS = (("WEEK", "Last week"), ("MONTH", "Last month"), ("QUARTER", "Last quarter"),
+           ("YEAR", "Last year"), ("ALL", "All"), ("CUSTOM", "Custom dates"))
+
+
+def period_start(key: str, today=None):
+    """First day shown for a period: the last 7 days, 1 / 3 / 12 calendar months back, or None (all)."""
+    from datetime import date, timedelta
+    today = today or date.today()
+    if key == "WEEK":
+        return today - timedelta(days=7)
+    months = {"MONTH": 1, "QUARTER": 3, "YEAR": 12}.get(key)
+    if months is None:
+        return None
+    y, m = divmod(today.month - 1 - months, 12)
+    year, month = today.year + y, m + 1
+    import calendar
+    return date(year, month, min(today.day, calendar.monthrange(year, month)[1]))
+
+
 class ListPage(Page):
     """A searchable list of records with an optional date range.
 
@@ -92,6 +112,8 @@ class ListPage(Page):
 
     search_hint = "Search..."
     date_filter = True
+    #: period shown when the screen opens (v1.20: a choice of period instead of a hidden row limit)
+    default_period = "MONTH"
 
     def __init__(self, app, parent=None):
         super().__init__(app, parent)
@@ -100,9 +122,18 @@ class ListPage(Page):
         self.search.search.connect(lambda _: self.refresh())
         self.filters = h(self.search)
         if self.date_filter:
+            from PySide6.QtWidgets import QComboBox
+            self.period = QComboBox()
+            for key, text in PERIODS:
+                self.period.addItem(text, key)
+            self.period.setToolTip("Which records to show, by date. 'All' shows every record.")
             self.date_from, self.date_to = OptionalDateEdit(), OptionalDateEdit()
+            self._set_period(self.default_period)
+            self.period.currentIndexChanged.connect(lambda _: self._period_picked())
             for d in (self.date_from, self.date_to):
-                d.edit.editingFinished.connect(self.refresh)
+                d.edit.editingFinished.connect(self._dates_typed)
+            self.filters.addWidget(label("Period", "Muted"))
+            self.filters.addWidget(self.period)
             self.filters.addWidget(label("From", "Muted"))
             self.filters.addWidget(self.date_from)
             self.filters.addWidget(label("To", "Muted"))
@@ -115,6 +146,33 @@ class ListPage(Page):
         self.footer = h(self.count, button("Open", lambda: self._open(self.table.current())))
         self.footer.setStretch(0, 1)  # the count text takes the free width and wraps when it is long
         self.body.addLayout(self.footer)
+
+    # -- period (last week / month / quarter / year / all) ---------------------
+    def _set_period(self, key: str) -> None:
+        """Select ``key`` and put its dates in From / To (signals blocked: no refresh here)."""
+        self.period.blockSignals(True)
+        self.period.setCurrentIndex(max(self.period.findData(key), 0))
+        self.period.blockSignals(False)
+        if key != "CUSTOM":
+            start = period_start(key)
+            self.date_from.set_value(start)
+            self.date_to.set_value(None)
+
+    def _period_picked(self) -> None:
+        key = self.period.currentData()
+        if key != "CUSTOM":
+            self._set_period(key)
+        self.refresh()
+
+    def _dates_typed(self) -> None:
+        """Dates typed by hand: the period becomes "Custom" unless they still match it."""
+        key = self.period.currentData()
+        d1, d2 = self.dates()
+        if key != "CUSTOM" and (d2 is not None or d1 != period_start(key)):
+            self.period.blockSignals(True)
+            self.period.setCurrentIndex(self.period.findData("CUSTOM"))
+            self.period.blockSignals(False)
+        self.refresh()
 
     def add_filter(self, widget, signal=None) -> None:
         self.filters.addWidget(widget)
@@ -155,12 +213,16 @@ class ListPage(Page):
         from wms.ui.widgets.common import OptionalDateEdit
         self.search.setText("")
         if self.date_filter:  # a preset shows exactly its records: no leftover date range
+            self._set_period("ALL")
             for d in (self.date_from, self.date_to):
                 d.set_value(None)
         for name, value in preset.items():
             widget = getattr(self, name, None)
             if isinstance(widget, OptionalDateEdit):
                 widget.set_value(value)
+                self.period.blockSignals(True)
+                self.period.setCurrentIndex(self.period.findData("CUSTOM"))
+                self.period.blockSignals(False)
             elif isinstance(widget, QComboBox):
                 i = widget.findData(value)
                 if i >= 0:
