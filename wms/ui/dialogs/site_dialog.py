@@ -91,6 +91,11 @@ class SiteDialog(QDialog):
                 quick.append(button("−  Goods Out to this Project", self.goods_out))
             if open_site and app.can(P.RESERVATIONS_EDIT):
                 quick.append(button("Reserve Stock...", self.reserve))
+                quick.append(button("Reserve Remaining...", self.reserve_remaining,
+                                    tooltip="Reserve everything this project still has To Allocate, in one go"))
+            if open_site:
+                quick.append(button("Picking List...", self.picking_list,
+                                    tooltip="What to pick for this project, bin by bin in walking order (PDF)"))
             lay.addLayout(h(self.facts, None, *quick))
         self.tabs = QTabWidget()
         lay.addWidget(self.tabs, 1)
@@ -125,12 +130,13 @@ class SiteDialog(QDialog):
         self.cards = {k: Card(t) for k, t in (("materials", "Materials"), ("required", "Required"),
                                               ("reserved", "Reserved"), ("issued", "Issued"),
                                               ("returned", "Returned"), ("net", "Net Issued"),
-                                              ("remaining", "Remaining"), ("value", "Material value on site"))}
+                                              ("remaining", "Remaining"), ("to_allocate", "To Allocate"),
+                                              ("value", "Material value on site"))}
         lay.addLayout(h(*self.cards.values()))
         lay.addWidget(label("Required = the project's material list (a plan, never stock).  Reserved = held in the "
                             "warehouse for it.  Issued / Returned = posted Goods Out and returns.  Net Issued = "
-                            "Issued - Returned.  Remaining = Required - Net Issued - Reserved (still to reserve or "
-                            "issue; a return makes that quantity needed again).", "Muted", wrap=True))
+                            "Issued - Returned.  Remaining = Required - Net Issued (still needed; a return makes that "
+                            "quantity needed again).  To Allocate = Remaining - Reserved (not set aside yet).", "Muted", wrap=True))
         lay.addWidget(details, 1)
         self._fill_cards()
         return w
@@ -142,7 +148,7 @@ class SiteDialog(QDialog):
             return
         value = sum((r.value for r in self.app.services.sites.material_summary(self.site.id)), 0)
         self.cards["materials"].set_value(f"{summ.materials:,}")
-        for k in ("required", "reserved", "issued", "returned", "net", "remaining"):
+        for k in ("required", "reserved", "issued", "returned", "net", "remaining", "to_allocate"):
             self.cards[k].set_value(fmt_qty(getattr(summ, k)))
         self.cards["value"].set_value(fmt_money(value))
 
@@ -272,6 +278,16 @@ class SiteDialog(QDialog):
         self.tabs.setCurrentWidget(self.reservations)
         self.reservations.new()
         self._fill_cards()
+
+    def reserve_remaining(self) -> None:
+        from wms.ui.dialogs.allocation import ReserveRemainingDialog
+        if ReserveRemainingDialog(self.app, self.site.id, self).exec():
+            self.reservations.refresh()
+            self._fill_cards()
+
+    def picking_list(self) -> None:
+        from wms.ui.dialogs.allocation import PickListDialog
+        PickListDialog(self.app, self.site.id, self).exec()
 
     def add_materials(self) -> bool:
         """Choose existing materials, then their Required quantity (spec section 7). No stock moves."""

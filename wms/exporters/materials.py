@@ -84,6 +84,7 @@ SCREEN_COLUMNS = {
     "proj_reserved": Col("Project Reserved", QTY, 11, lambda r: _qty(r.proj_reserved)),
     "issued": _BY_TITLE["Issued"], "returned": _BY_TITLE["Returned"], "net": _BY_TITLE["Net Issued"],
     "remaining": Col("Remaining", QTY, 11, lambda r: _qty(r.remaining)),
+    "to_allocate": Col("To Allocate", QTY, 11, lambda r: _qty(r.to_allocate)),
     "qty": _BY_TITLE["On Hand"], "available": _BY_TITLE["Available"], "bin": _BY_TITLE["Bins"],
     "status": _BY_TITLE["Stock Status"], "unit": _BY_TITLE["Unit"], "reserved": _BY_TITLE["Reserved"],
     "incoming": _BY_TITLE["Incoming"], "description": _BY_TITLE["Description"], "barcode": _BY_TITLE["Barcode"],

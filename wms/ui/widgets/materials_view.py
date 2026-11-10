@@ -89,8 +89,10 @@ PROJECT_FIGURES = (
     ("issued", "Issued", "Sent from the warehouse to the project (Goods Out)"),
     ("returned", "Returned", "Physically returned from the project"),
     ("net", "Net Issued", "Net Issued = Issued - Returned (what is still out on the project)"),
-    ("remaining", "Remaining", "Remaining = Required - Net Issued - Reserved, never below 0: what is still to "
-                               "reserve or issue. A return makes that quantity needed again."),
+    ("remaining", "Remaining", "Remaining = Required - Net Issued, never below 0: what the project still needs "
+                               "from the warehouse. A return makes that quantity needed again."),
+    ("to_allocate", "To Allocate", "To Allocate = Remaining - Reserved, never below 0: still needed and not "
+                                   "reserved yet (reserve it, or buy it)."),
 )
 #: header tooltips of the project columns, so the Remaining calculation can be followed on screen
 HEADER_TIPS = {k: tip for k, _t, tip in PROJECT_FIGURES if k != "materials"}
@@ -128,6 +130,7 @@ COLUMNS: list[MCol] = [
     MCol("returned", "Returned", lambda r: r.returned, QTY, 85, "returned", project=True),
     MCol("net", "Net Issued", lambda r: r.net, QTY, 90, "net", project=True),
     MCol("remaining", "Remaining", lambda r: r.remaining, QTY, 95, "remaining", project=True),
+    MCol("to_allocate", "To Allocate", lambda r: r.to_allocate, QTY, 95, "to_allocate", project=True),
     MCol("qty", "On Hand", lambda r: r.on_hand, QTY, 85, "qty"),
     MCol("available", "Available", lambda r: r.available, QTY, 90, "available"),
     MCol("bin", "Bin", lambda r: r.bin_text, width=90, sort="bin"),
@@ -149,7 +152,7 @@ COLUMNS: list[MCol] = [
 BY_KEY = {c.key: c for c in COLUMNS}
 #: shown by default on a project's Materials tab (UI refactor spec 23)
 PROJECT_DEFAULT = {SELECT, "code", "name", "supplier", "required", "proj_reserved", "issued", "returned",
-                   "net", "remaining", "available"}
+                   "net", "remaining", "to_allocate", "available"}
 STATUS_COLOURS = {"OUT": theme.DANGER, "LOW": theme.WARNING, "ARCHIVED": "#98A2B3", "IN": theme.SUCCESS}
 
 
@@ -302,11 +305,14 @@ class MaterialsModel(QAbstractTableModel):
         if role == Qt.ItemDataRole.ToolTipRole and c.key == "bin" and r.bins:
             return r.bins_detail
         if role == Qt.ItemDataRole.ToolTipRole and c.key == "remaining" and r.required is not None:
-            # spec: show how the figure is made - Required - Net Issued - Reserved
-            net, res = r.net or 0, r.proj_reserved or 0
+            # spec: show how the figure is made - Required - Net Issued
+            net = r.net or 0
             return (f"Remaining = Required {format_value(r.required, QTY)} - Net Issued {format_value(net, QTY)} "
                     f"(Issued {format_value(r.issued or 0, QTY)} - Returned {format_value(r.returned or 0, QTY)}) "
-                    f"- Reserved {format_value(res, QTY)} = {format_value(r.remaining, QTY)}")
+                    f"= {format_value(r.remaining, QTY)}")
+        if role == Qt.ItemDataRole.ToolTipRole and c.key == "to_allocate" and r.required is not None:
+            return (f"To Allocate = Remaining {format_value(r.remaining, QTY)} - Reserved "
+                    f"{format_value(r.proj_reserved or 0, QTY)} = {format_value(r.to_allocate, QTY)}")
         if role == Qt.ItemDataRole.ToolTipRole and c.key == "required" and r.required is None:
             return "Not on the project's material list (reserved or issued only)"
         if role == Qt.ItemDataRole.ToolTipRole and c.kind not in (QTY,):
@@ -618,7 +624,7 @@ class MaterialsView(QWidget):
             keys = {k for k in saved.split(",") if k in BY_KEY}
             if keys:
                 if "required" in keys:
-                    keys |= {"net", "remaining"}  # v1.13: the whole calculation is visible to everyone
+                    keys |= {"net", "remaining", "to_allocate"}  # the whole calculation is visible to everyone
                 if mode == "project" and not keys & {c.key for c in COLUMNS if c.project}:
                     return default
                 return keys | {SELECT}
