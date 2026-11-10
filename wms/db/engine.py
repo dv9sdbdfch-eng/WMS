@@ -64,22 +64,25 @@ LINE_TABLES = ("delivery_note_lines", "goods_issue_lines", "return_lines", "prod
 REVERSIBLE_TABLES = ("delivery_notes", "goods_issues", "stock_returns", "production_orders")
 
 
-def _sqlite_document_triggers() -> list[str]:
+def _sqlite_document_triggers(documents=DOCUMENT_TABLES, lines=LINE_TABLES, reversible=REVERSIBLE_TABLES,
+                              extra: bool = True) -> list[str]:
     def abort(name: str, when: str, table: str, event: str, msg: str) -> str:
         return (f"CREATE TRIGGER IF NOT EXISTS trg_{table}_{name} BEFORE {event} ON {table} "
                 f"{('WHEN ' + when) if when else ''} BEGIN SELECT RAISE(ABORT, '{msg}'); END;")
 
     stmts = []
-    for t in (*DOCUMENT_TABLES, *LINE_TABLES, "stock_count_lines"):
+    for t in (*documents, *lines, *(("stock_count_lines",) if extra else ())):
         stmts.append(abort("no_delete", "", t, "DELETE", f"{t}: stock records cannot be deleted - reverse instead"))
-    for t in LINE_TABLES:
+    for t in lines:
         stmts.append(abort("posted_fixed", "OLD.movement_id IS NOT NULL", t,
                            "UPDATE OF product_id, quantity, bin_id, movement_id",
                            f"{t}: a posted line cannot be changed - reverse the document instead"))
         stmts.append(abort("qty_positive", "NEW.quantity <= 0", t, "INSERT", f"{t}: quantity must be above zero"))
-    for t in REVERSIBLE_TABLES:
+    for t in reversible:
         stmts.append(abort("reversed_final", "OLD.status = 'REVERSED'", t, "UPDATE",
                            f"{t}: a reversed document cannot be changed or reopened"))
+    if not extra:
+        return stmts
     for t in ("stock_adjustments", "stock_transfers"):
         stmts.append(abort("posted_fixed", "OLD.movement_id IS NOT NULL", t, "UPDATE",
                            f"{t}: a posted record cannot be changed"))
@@ -90,12 +93,12 @@ def _sqlite_document_triggers() -> list[str]:
     return stmts
 
 
-def _postgres_document_triggers() -> list[str]:
+def _postgres_document_triggers(tables=(*DOCUMENT_TABLES, *LINE_TABLES, "stock_count_lines")) -> list[str]:
     stmts = [
         "CREATE OR REPLACE FUNCTION wms_no_delete() RETURNS trigger AS $$ "
         "BEGIN RAISE EXCEPTION '%: stock records cannot be deleted', TG_TABLE_NAME; END; $$ LANGUAGE plpgsql;"
     ]
-    for t in (*DOCUMENT_TABLES, *LINE_TABLES, "stock_count_lines"):
+    for t in tables:
         stmts.append(f"DROP TRIGGER IF EXISTS trg_{t}_no_delete ON {t};")
         stmts.append(f"CREATE TRIGGER trg_{t}_no_delete BEFORE DELETE ON {t} "
                      f"FOR EACH ROW EXECUTE FUNCTION wms_no_delete();")
@@ -147,9 +150,23 @@ def ledger_trigger_sql(dialect_name: str) -> list[str]:
     return []
 
 
+# Added by migration 0014 (Dispatch / outgoing Delivery Note): the same protection as the other
+# stock documents. Kept apart for the same reason as LEDGER_APPEND_ONLY_TABLES.
+DISPATCH_TABLES = ("dispatches",)
+DISPATCH_LINE_TABLES = ("dispatch_lines",)
+
+
+def dispatch_trigger_sql(dialect_name: str) -> list[str]:
+    if dialect_name == "sqlite":
+        return _sqlite_document_triggers(DISPATCH_TABLES, DISPATCH_LINE_TABLES, DISPATCH_TABLES, extra=False)
+    if dialect_name == "postgresql":
+        return _postgres_document_triggers((*DISPATCH_TABLES, *DISPATCH_LINE_TABLES))
+    return []
+
+
 def all_trigger_sql(dialect_name: str) -> list[str]:
     """Every database-level guard, for a newly created database."""
-    return integrity_trigger_sql(dialect_name) + ledger_trigger_sql(dialect_name)
+    return integrity_trigger_sql(dialect_name) + ledger_trigger_sql(dialect_name) + dispatch_trigger_sql(dialect_name)
 
 
 def append_only_trigger_sql(dialect_name: str) -> list[str]:

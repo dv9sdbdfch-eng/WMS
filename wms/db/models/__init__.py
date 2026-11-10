@@ -3,6 +3,8 @@
 from wms.db.models.documents import (
     DeliveryNote,
     DeliveryNoteLine,
+    Dispatch,
+    DispatchLine,
     GoodsIssue,
     GoodsIssueLine,
     ProductionLine,
@@ -37,6 +39,8 @@ __all__ = [
     "DeliveryDiscrepancy",
     "DeliveryNote",
     "DeliveryNoteLine",
+    "Dispatch",
+    "DispatchLine",
     "FinishedProductInfo",
     "GoodsIssue",
     "GoodsIssueLine",

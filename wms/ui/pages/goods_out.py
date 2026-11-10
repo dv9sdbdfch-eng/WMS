@@ -7,6 +7,7 @@ from datetime import date
 
 from PySide6.QtWidgets import QComboBox, QFormLayout, QLineEdit, QTabWidget, QVBoxLayout, QWidget
 
+from wms.core.enums import ItemType
 from wms.core.exceptions import ValidationError
 from wms.core.numbers import fmt_datetime
 from wms.core.permissions import P
@@ -119,7 +120,9 @@ class GoodsOutPage(Page):
                         button("Load from project...", self.load_from_project,
                                tooltip="Fill the lines from what is reserved for / still needed by the chosen "
                                        "project, bin by bin in walking order")))
-        self.lines = LinesEditor(self.app, show_bin=True, bin_optional=True, show_stock=True)
+        # materials only: finished products leave with Dispatch (Delivery Note, v1.22)
+        self.lines = LinesEditor(self.app, show_bin=True, bin_optional=True, show_stock=True,
+                                 product_types=[t.value for t in ItemType if t is not ItemType.FINISHED])
         lay.addWidget(self.lines, 1)
         lay.addLayout(h(label("Leave the bin empty to pick automatically (default bin first, then the bins with most "
                               "stock). Quarantine bins are never used.", "Muted"), None,

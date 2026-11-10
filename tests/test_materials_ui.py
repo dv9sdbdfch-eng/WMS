@@ -399,7 +399,7 @@ def test_sidebar_is_grouped_and_less_used_groups_fold(ui, sample):  # noqa: F811
     assert texts == {
         "HOME": ["Dashboard"],
         "WAREHOUSE": ["Materials", "Locations & Bins"],
-        "OPERATIONS": ["Goods In", "Goods Out", "Transfer"],
+        "OPERATIONS": ["Goods In", "Goods Out", "Dispatch", "Transfer"],
         "PROJECTS": ["Projects"],
         "PURCHASING": ["Purchase Orders", "Deliveries"],
         "MORE": ["Stocktake", "Returns", "Finished Products", "Reports", "Import / Export", "Archived Records"],

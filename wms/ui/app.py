@@ -101,6 +101,9 @@ class App(QObject):
         elif entity_type == EntityType.GOODS_ISSUE.value:
             from wms.ui.dialogs.documents import GoodsIssueDialog
             GoodsIssueDialog(self, entity_id, parent).exec()
+        elif entity_type == EntityType.DISPATCH.value:
+            from wms.ui.pages.dispatch import DispatchDialog
+            DispatchDialog(self, entity_id, parent).exec()
         elif entity_type == EntityType.SITE.value:
             from wms.ui.dialogs.site_dialog import SiteDialog
             SiteDialog(self, entity_id, parent, tab=tab).exec()

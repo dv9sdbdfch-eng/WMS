@@ -89,6 +89,11 @@ class Services:
         return ProjectTreeService(self.ctx)
 
     @cached_property
+    def dispatch(self):
+        from wms.services.dispatch import DispatchService
+        return DispatchService(self.ctx)
+
+    @cached_property
     def allocation(self):
         from wms.services.allocation import AllocationService
         return AllocationService(self.ctx)

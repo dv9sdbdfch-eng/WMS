@@ -568,7 +568,7 @@ def product_history_columns() -> list[Col]:
 
 def open_movement(app, m, parent) -> None:
     """Open the document behind a movement, or the movement itself when it has no document screen."""
-    if m.doc_type in ("DELIVERY_NOTE", "GOODS_ISSUE", "RETURN", "PRODUCTION") and m.doc_id:
+    if m.doc_type in ("DELIVERY_NOTE", "GOODS_ISSUE", "DISPATCH", "RETURN", "PRODUCTION") and m.doc_id:
         app.open_entity(m.doc_type, m.doc_id, parent)
     else:
         from wms.ui.pages.movements import MovementDetailDialog

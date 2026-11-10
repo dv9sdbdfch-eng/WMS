@@ -171,6 +171,55 @@ class GoodsIssueLine(_LineHistory, IdMixin, Base):
     movement = _movement_link(movement_id)
 
 
+# --- Dispatch of finished products (outgoing Delivery Note, v1.22) -------------------
+
+class Dispatch(IdMixin, _SiteSnapshot, _PostedDocument, Base):
+    """Finished products sent to a customer or project. Its number (DEL-...) is the number of the
+    Delivery Note printed for the driver and signed by whoever receives the goods."""
+
+    __tablename__ = "dispatches"
+
+    dispatch_number: Mapped[str] = mapped_column(String(30), unique=True, nullable=False)
+    dispatch_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    site_id: Mapped[int | None] = fk("sites.id")
+    customer: Mapped[str | None] = mapped_column(String(200))
+    delivery_address: Mapped[str | None] = mapped_column(Text)
+    contact: Mapped[str | None] = mapped_column(String(200))  # name / phone of whoever receives it
+    vehicle: Mapped[str | None] = mapped_column(String(120))  # own van / driver, free text
+    reference: Mapped[str | None] = mapped_column(String(80), index=True)  # customer order / job ref
+    dispatched_by: Mapped[str] = mapped_column(String(120), nullable=False)
+    user_id: Mapped[int] = fk("users.id", nullable=False)
+    reversed_by_id: Mapped[int | None] = fk("users.id")
+
+    site = relationship("Site", lazy="joined")
+    user = relationship("User", foreign_keys=[user_id], lazy="joined")
+    reversed_by = relationship("User", foreign_keys=[reversed_by_id], lazy="joined")
+    lines: Mapped[list[DispatchLine]] = relationship(
+        back_populates="dispatch", order_by="DispatchLine.line_no", cascade="all, delete-orphan"
+    )
+
+    @property
+    def deliver_to(self) -> str:
+        return " - ".join(x for x in (self.customer, self.site_label) if x)
+
+
+class DispatchLine(_LineHistory, IdMixin, Base):
+    __tablename__ = "dispatch_lines"
+
+    dispatch_id: Mapped[int] = fk("dispatches.id", nullable=False, ondelete="CASCADE")
+    line_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    product_id: Mapped[int] = fk("products.id", nullable=False)
+    quantity: Mapped[Decimal] = mapped_column(Quantity, nullable=False)
+    bin_id: Mapped[int] = fk("bins.id", nullable=False)
+    notes: Mapped[str | None] = mapped_column(Text)
+    movement_id: Mapped[int | None] = fk("stock_movements.id")
+
+    dispatch: Mapped[Dispatch] = relationship(back_populates="lines")
+    product = relationship("Product", lazy="joined")
+    bin = relationship("Bin", lazy="joined")
+    movement = _movement_link(movement_id)
+
+
 # --- Returns -------------------------------------------------------------------
 
 class StockReturn(IdMixin, _SiteSnapshot, _PostedDocument, Base):

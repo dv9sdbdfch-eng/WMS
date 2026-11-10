@@ -17,6 +17,9 @@ class FinishedPage(ProductsPage):
         super().__init__(app, parent)
         if app.can(P.PRODUCTION_POST):
             self.add_action(button("Record production", self.record))
+        if app.can(P.GOODS_OUT_VIEW):
+            self.add_link("Dispatch / Delivery Notes", "dispatch",
+                          tooltip="Send finished products to a customer or project with a Delivery Note")
         self.body.addWidget(label("Production history", "SectionTitle"))
         self.orders = DataTable([
             Col("Date", lambda o: o.production_date, DATE, 95),

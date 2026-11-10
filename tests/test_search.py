@@ -548,8 +548,13 @@ def _reserve_and_set_reorder_levels(svc) -> None:
             continue
         res = svc.reservations.reserve({"product_id": r.product.id, "site_id": site_id, "quantity": qty})
         if rnd.random() < 0.4:
-            svc.goods_out.post({"site_id": site_id, "issue_date": TODAY},
-                               [IssueLine(r.product.id, max(D(1), (qty / 2).to_integral_value()))])
+            half = max(D(1), (qty / 2).to_integral_value())
+            if r.product.item_type == "FINISHED":  # finished products leave by Dispatch (v1.22)
+                from wms.services.dispatch import DispatchLineInput
+                svc.dispatch.post({"site_id": site_id, "dispatch_date": TODAY},
+                                  [DispatchLineInput(r.product.id, half)])
+            else:
+                svc.goods_out.post({"site_id": site_id, "issue_date": TODAY}, [IssueLine(r.product.id, half)])
         assert res.reservation.number.startswith("RES-")
 
 
