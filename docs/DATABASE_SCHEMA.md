@@ -162,6 +162,46 @@ Protected tables (database triggers, see `wms.db.engine`):
 * UNIQUE INDEX ix_delivery_notes_client_token (client_token)
 * UNIQUE INDEX uq_delivery_notes_supplier_number (supplier_id, dn_number_norm) WHERE status = 'POSTED'
 
+## dispatch_lines
+
+| Column | Type | Null | Key / reference |
+|---|---|---|---|
+| dispatch_id | Integer | no | FK dispatches.id, indexed |
+| line_no | Integer | no |  |
+| product_id | Integer | no | FK products.id, indexed |
+| quantity | Quantity | no |  |
+| bin_id | Integer | no | FK bins.id, indexed |
+| notes | Text | yes |  |
+| movement_id | Integer | yes | FK stock_movements.id, indexed |
+| id | Integer | no | PK |
+
+## dispatches
+
+| Column | Type | Null | Key / reference |
+|---|---|---|---|
+| dispatch_number | String(30) | no | UNIQUE |
+| dispatch_date | Date | no | indexed |
+| site_id | Integer | yes | FK sites.id, indexed |
+| customer | String(200) | yes |  |
+| delivery_address | Text | yes |  |
+| contact | String(200) | yes |  |
+| vehicle | String(120) | yes |  |
+| reference | String(80) | yes | indexed |
+| dispatched_by | String(120) | no |  |
+| user_id | Integer | no | FK users.id, indexed |
+| reversed_by_id | Integer | yes | FK users.id, indexed |
+| id | Integer | no | PK |
+| site_number_snapshot | String(50) | yes |  |
+| site_name_snapshot | String(200) | yes |  |
+| status | String(20) | no | indexed |
+| notes | Text | yes |  |
+| created_at | UTCDateTime | no |  |
+| reversed_at | UTCDateTime | yes |  |
+| reversal_reason | Text | yes |  |
+| client_token | String(40) | yes | UNIQUE, indexed |
+
+* UNIQUE INDEX ix_dispatches_client_token (client_token)
+
 ## document_drafts
 
 | Column | Type | Null | Key / reference |

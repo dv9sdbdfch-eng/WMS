@@ -26,8 +26,10 @@ Project figures (spec section 6; UI refactor spec 24) are separate things and ar
 * Issued     - posted Goods Out to the project (reversals netted off);
 * Returned   - posted returns from the project (reversals netted off);
 * Net Issued - Issued - Returned (what is physically on the project now);
-* Remaining  - Required - Net Issued - Reserved, never below 0: what is neither on site nor set
-               aside yet, i.e. still to be reserved or issued. Blank when the material is not on
+* Remaining  - Required - Net Issued, never below 0: what the project still needs from the
+               warehouse (v1.21, Ihor 09.11.2026 - before it also took off Reserved).
+* To Allocate - Remaining - Reserved, never below 0: still needed and not set aside yet, i.e.
+               still to be reserved (or bought). Both are blank when the material is not on
                the project's list (no Required quantity).
 
 None of them changes stock; only Goods In / Out / Transfer / Return / Adjustment / Stocktake do.
@@ -41,7 +43,7 @@ from dataclasses import dataclass, field, fields
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 
-from sqlalchemy import and_, case, delete, exists, func, or_, select, true, type_coerce, update
+from sqlalchemy import and_, case, delete, exists, func, or_, select, true, type_coerce, union, update
 from sqlalchemy.orm import Session, selectinload
 
 from wms.core.enums import (
@@ -108,16 +110,24 @@ ITEM_TYPES = {"RAW": "Materials and components", "FINISHED": "Finished products"
 #: sort keys the table header understands (column -> key)
 SORT_KEYS = ("code", "name", "product_no", "supplier", "category", "brand", "qty", "available", "reserved",
              "incoming", "bin", "status", "received", "issued_date", "updated", "created",
-             "required", "proj_reserved", "issued", "returned", "net", "remaining")
+             "required", "proj_reserved", "issued", "returned", "net", "remaining", "to_allocate")
 STOCK_SORTS = {"qty", "available", "reserved", "incoming", "status"}
-PROJECT_SORTS = {"required", "proj_reserved", "issued", "returned", "net", "remaining"}
+PROJECT_SORTS = {"required", "proj_reserved", "issued", "returned", "net", "remaining", "to_allocate"}
 
 
-def remaining_qty(required: Decimal | None, net_issued: Decimal, reserved: Decimal) -> Decimal | None:
-    """Remaining = Required - Net Issued - Reserved, never below 0 (see the module docstring)."""
+def remaining_qty(required: Decimal | None, net_issued: Decimal) -> Decimal | None:
+    """Remaining = Required - Net Issued, never below 0 (see the module docstring)."""
     if required is None:
         return None
-    left = required - net_issued - reserved
+    left = required - net_issued
+    return left if left > 0 else ZERO
+
+
+def to_allocate_qty(remaining: Decimal | None, reserved: Decimal) -> Decimal | None:
+    """To Allocate = Remaining - Reserved, never below 0."""
+    if remaining is None:
+        return None
+    left = remaining - reserved
     return left if left > 0 else ZERO
 
 RECENT_DAYS = 30
@@ -253,7 +263,11 @@ class MaterialRow:
 
     @property
     def remaining(self) -> Decimal | None:
-        return remaining_qty(self.required, self.net, self.proj_reserved)
+        return remaining_qty(self.required, self.net)
+
+    @property
+    def to_allocate(self) -> Decimal | None:
+        return to_allocate_qty(self.remaining, self.proj_reserved)
 
     @property
     def reorder_point(self) -> Decimal | None:
@@ -302,6 +316,7 @@ class ProjectSummary:
     issued: Decimal
     returned: Decimal
     remaining: Decimal = ZERO  # sum of each material's Remaining (not the totals' difference)
+    to_allocate: Decimal = ZERO  # sum of each material's To Allocate
 
     @property
     def net(self) -> Decimal:
@@ -450,8 +465,10 @@ class _Project:
         self.issued = _q(func.coalesce(self.mov.c.issued, 0))
         self.returned = _q(func.coalesce(self.mov.c.returned, 0))
         self.net = _q(self.issued - self.returned)
-        left = self.required - self.net - self.reserved
+        left = self.required - self.net
         self.remaining = _q(case((self.req.c.pid.is_(None), None), (left > 0, left), else_=0))
+        alloc = self.remaining - self.reserved
+        self.to_allocate = _q(case((self.req.c.pid.is_(None), None), (alloc > 0, alloc), else_=0))
 
     def join(self, q):
         return (q.outerjoin(self.req, self.req.c.pid == Product.id)
@@ -467,12 +484,13 @@ class _Project:
 def project_product_ids(site_ids):
     """Products associated with any of the given projects (a select of site ids)."""
     m = StockMovement
-    return (select(ProjectMaterial.product_id).where(ProjectMaterial.site_id.in_(site_ids))
-            .union(select(StockReservation.product_id).where(StockReservation.site_id.in_(site_ids),
-                                                             StockReservation.status != ReservationStatus.RELEASED.value))
-            .union(select(m.product_id).where(m.site_id.in_(site_ids),
-                                              m.movement_type.in_((MovementType.GOODS_OUT.value,
-                                                                   MovementType.RETURN_FROM_SITE.value)))))
+    return union(
+        select(ProjectMaterial.product_id).where(ProjectMaterial.site_id.in_(site_ids)),
+        select(StockReservation.product_id).where(StockReservation.site_id.in_(site_ids),
+                                                  StockReservation.status != ReservationStatus.RELEASED.value),
+        select(m.product_id).where(m.site_id.in_(site_ids),
+                                   m.movement_type.in_((MovementType.GOODS_OUT.value,
+                                                        MovementType.RETURN_FROM_SITE.value))))
 
 
 # --- the service ---------------------------------------------------------------------------------
@@ -603,7 +621,8 @@ class MaterialsService(BaseService):
                    "incoming": st.incoming, "status": status}[key]
         elif key in PROJECT_SORTS and pj is not None:
             col = {"required": pj.required, "proj_reserved": pj.reserved, "issued": pj.issued,
-                   "returned": pj.returned, "net": pj.net, "remaining": pj.remaining}[key]
+                   "returned": pj.returned, "net": pj.net, "remaining": pj.remaining,
+                   "to_allocate": pj.to_allocate}[key]
         else:
             col = {
                 "name": func.lower(Product.name),
@@ -711,11 +730,12 @@ class MaterialsService(BaseService):
                 raise NotFoundError("Project not found.")
             pj = _Project(site_id)
             q = pj.join(select(func.count(Product.id), func.sum(pj.required), func.sum(pj.reserved),
-                               func.sum(pj.issued), func.sum(pj.returned), func.sum(pj.remaining))
+                               func.sum(pj.issued), func.sum(pj.returned), func.sum(pj.remaining),
+                               func.sum(pj.to_allocate))
                         .select_from(Product)).where(pj.associated())
-            n, req, res, iss, ret, rem = s.execute(q).one()
+            n, req, res, iss, ret, rem, alloc = s.execute(q).one()
             return ProjectSummary(site, n or 0, _q_value(req), _q_value(res), _q_value(iss), _q_value(ret),
-                                  _q_value(rem))
+                                  _q_value(rem), _q_value(alloc))
 
     # ---- choices for the filter drop-downs ------------------------------------------------------
     def bin_choices(self, include_archived: bool = False) -> list[Bin]:

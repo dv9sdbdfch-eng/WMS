@@ -55,6 +55,7 @@ SEQUENCES = [
     ("PURCHASE_ORDER", "PO-"),
     ("DISCREPANCY", "DSC-"),
     ("RESERVATION", "RES-"),
+    ("DISPATCH", "DEL-"),
 ]
 
 

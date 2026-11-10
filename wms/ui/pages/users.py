@@ -215,6 +215,7 @@ class AuditDetailDialog(QDialog):
 
 
 class AuditPage(ListPage):
+    default_period = "WEEK"
     title = "Audit Log"
     subtitle = "Every change made in the system: who, when, from which computer, and what changed"
     search_hint = "Search record, user, summary or changed values..."
@@ -250,10 +251,10 @@ class AuditPage(ListPage):
     def fetch(self):
         d1, d2 = self.dates()
         return self.app.services.audit.search(self.search.text() or None, self.entity.currentData(),
-                                              self.action.currentData(), d1, d2)
+                                              self.action.currentData(), d1, d2, limit=None)
 
     def describe(self, rows):
-        return f"{len(rows)} entr{'y' if len(rows) == 1 else 'ies'}" + ("  (latest 2,000)" if len(rows) >= 2000 else "")
+        return f"{len(rows):,} entr{'y' if len(rows) == 1 else 'ies'}"
 
     def open_item(self, item):
         AuditDetailDialog(item, self).exec()

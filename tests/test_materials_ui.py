@@ -82,13 +82,13 @@ def test_materials_header_columns_button_project_banner_and_assign(ui, sample): 
     assert v.project_figures["remaining"].text() == "Remaining: <b>40</b>"
     # every figure of the Remaining calculation is on screen, in calculation order
     assert [f.split(":")[0] for f in (v.project_figures[k].text() for k in v.project_figures)] == [
-        "Materials", "Required", "Reserved", "Issued", "Returned", "Net Issued", "Remaining"]
+        "Materials", "Required", "Reserved", "Issued", "Returned", "Net Issued", "Remaining", "To Allocate"]
     keys = [c.key for c in v.model.cols]
     assert [k for k in keys if k in ("required", "proj_reserved", "issued", "returned", "net", "remaining")] == [
         "required", "proj_reserved", "issued", "returned", "net", "remaining"]
     from PySide6.QtCore import Qt
     rem = keys.index("remaining")
-    assert "Required - Net Issued - Reserved" in v.model.headerData(rem, Qt.Orientation.Horizontal,
+    assert "Required - Net Issued" in v.model.headerData(rem, Qt.Orientation.Horizontal,
                                                                     Qt.ItemDataRole.ToolTipRole)
     tip = v.model.data(v.model.index(0, rem), Qt.ItemDataRole.ToolTipRole)
     assert tip.startswith("Remaining = Required ") and "Net Issued" in tip and "Returned" in tip, tip
@@ -374,7 +374,7 @@ def test_scenario_b_project_then_supplier_then_export_current_view(ui, sample, t
     header = [c.value for c in ws[header_row] if c.value]
     shown = [c.title for c in v.model.cols if c.key not in ("select", "photo")]
     assert header == ["Code", "Material", "Supplier", "Required", "Project Reserved", "Issued", "Returned",
-                      "Net Issued", "Remaining", "Available"]
+                      "Net Issued", "Remaining", "To Allocate", "Available"]
     assert len(header) == len(shown)
     data = [r[0].value for r in ws.iter_rows(min_row=header_row + 1) if r[0].value]
     assert data == codes(v) == ["MDF-18"]
@@ -399,7 +399,7 @@ def test_sidebar_is_grouped_and_less_used_groups_fold(ui, sample):  # noqa: F811
     assert texts == {
         "HOME": ["Dashboard"],
         "WAREHOUSE": ["Materials", "Locations & Bins"],
-        "OPERATIONS": ["Goods In", "Goods Out", "Transfer"],
+        "OPERATIONS": ["Goods In", "Goods Out", "Dispatch", "Transfer"],
         "PROJECTS": ["Projects"],
         "PURCHASING": ["Purchase Orders", "Deliveries"],
         "MORE": ["Stocktake", "Returns", "Finished Products", "Reports", "Import / Export", "Archived Records"],

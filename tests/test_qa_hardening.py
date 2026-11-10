@@ -359,15 +359,16 @@ def test_barcode_must_identify_one_product(svc, sample):
 
 
 def test_archive_blocked_while_any_bin_holds_stock_even_if_total_is_zero(svc, sample):
-    svc.stock.adjust(sample.cabinet.id, sample.bin1.id, "5", "FOUND", "found")
-    issue(svc, sample, IssueLine(sample.cabinet.id, "5", sample.bin2.id), override_reason="count wrong")
-    assert total(svc, sample.cabinet) == 0
-    p = svc.products.get(sample.cabinet.id)
-    data = {"item_type": "FINISHED", "internal_code": p.internal_code, "name": p.name, "unit_id": p.unit_id,
+    # a material: finished products leave by Dispatch, which never goes below zero (v1.22)
+    svc.stock.adjust(sample.edge.id, sample.bin1.id, "5", "FOUND", "found")
+    issue(svc, sample, IssueLine(sample.edge.id, "5", sample.bin2.id), override_reason="count wrong")
+    assert total(svc, sample.edge) == 0
+    p = svc.products.get(sample.edge.id)
+    data = {"item_type": "RAW_MATERIAL", "internal_code": p.internal_code, "name": p.name, "unit_id": p.unit_id,
             "is_active": False}
     with pytest.raises(ValidationError, match="2 bin"):
         svc.products.save(p.id, data)
-    svc.stock.transfer(sample.cabinet.id, sample.bin1.id, sample.bin2.id, "5")
+    svc.stock.transfer(sample.edge.id, sample.bin1.id, sample.bin2.id, "5")
     assert svc.products.save(p.id, data).is_active is False  # archived, history kept
     assert len(svc.products.movements(p.id)) == 3
     with pytest.raises(ValidationError, match="inactive"):

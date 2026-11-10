@@ -52,6 +52,11 @@ class ReturnLineInput:
     notes: str | None = None
 
 
+def write_off_token(return_id: int, line_no: int) -> str:
+    """Links a damaged return line to its write-off adjustment (no extra column needed)."""
+    return f"return-damaged:{return_id}:{line_no}"
+
+
 def net_issued_to_site(s, site_id: int, product_id: int) -> Decimal:
     """Issued to the site minus already returned from it (reversals netted off)."""
     out = ZERO
@@ -69,8 +74,11 @@ class StockOpsService(BaseService):
     def post_return(self, header: dict, lines: list[ReturnLineInput], override_reason: str | None = None) -> StockReturn:
         """Return from site (stock back in) or return to supplier (stock out).
 
-        Usable material from site goes to the chosen bin; damaged material
-        should go to a quarantine bin (not available for issue).
+        Usable material from site goes back into the chosen bin. Damaged material from site does
+        NOT come back into stock: it is booked off the project (so the project needs it again) and
+        written off in the same transaction - a Stock Adjustment "Damaged" linked to the return,
+        so the bin balance and Available never include it and the loss shows in the Adjustments
+        report. Damaged goods going back to a supplier simply leave stock, as before.
         """
         self.require(P.RETURNS_POST)
         try:
@@ -135,6 +143,9 @@ class StockOpsService(BaseService):
                 )
                 ret.lines.append(ReturnLine(line_no=i, product_id=product.id, quantity=qty, bin_id=b.id,
                                             condition=cond, notes=clean_str(ln.notes), movement_id=mv.id))
+                if rtype is ReturnType.FROM_SITE and cond == ReturnCondition.DAMAGED.value:
+                    s.flush()
+                    self._write_off_damaged(s, engine, ret, i, product, b, qty)
             s.flush()
             label = site.display if site else supplier.name
             audit.record(s, self.ctx, "RETURN_POSTED", EntityType.RETURN.value, ret.id,
@@ -155,6 +166,13 @@ class StockOpsService(BaseService):
                 raise ValidationError("This return has already been reversed.")
             engine = StockEngine(s, self.ctx)
             for line in ret.lines:
+                # a damaged line's write-off goes first: the bin gets the quantity back, then the
+                # return movement takes it out again - the balance never dips below where it was
+                wo = s.scalar(select(StockAdjustment).where(
+                    StockAdjustment.client_token == write_off_token(ret.id, line.line_no)))
+                if wo is not None and wo.movement_id:
+                    engine.reverse(s.get(StockMovement, wo.movement_id), f"{ret.return_number} reversed: {reason}",
+                                   override_reason=override_reason, reason_code=reason_code)
                 engine.reverse(s.get(StockMovement, line.movement_id), f"{ret.return_number} reversed: {reason}",
                                override_reason=override_reason, reason_code=reason_code)
             ret.status = DocumentStatus.REVERSED.value
@@ -163,6 +181,31 @@ class StockOpsService(BaseService):
             ret.reversal_reason = reason
             audit.record(s, self.ctx, "RETURN_REVERSED", EntityType.RETURN.value, ret.id, ret.return_number, reason)
         return self.get_return(return_id)
+
+    def _write_off_damaged(self, s, engine: StockEngine, ret: StockReturn, line_no: int, product: Product,
+                           b: Bin, qty: Decimal) -> StockAdjustment:
+        """Damaged material back from a project never becomes stock again (Ihor, 09.11.2026)."""
+        code = AdjustmentReason.DAMAGED.value
+        try:
+            require_reason(s, code, ReasonUse.ADJUSTMENT)
+        except ValidationError:  # "Damaged" switched off in Settings: still write it off, as "Other"
+            code = AdjustmentReason.OTHER.value
+        current = engine.qty_in_bin(product.id, b.id)
+        return self.adjust_in_session(
+            s, product.id, b.id, current - qty, code,
+            f"Damaged on return {ret.return_number} from {ret.site_number_snapshot or ''} - not returned to stock",
+            client_token=write_off_token(ret.id, line_no))
+
+    def damaged_write_offs(self, return_id: int) -> dict[int, str]:
+        """{line_no: adjustment number} for the damaged lines of a return that were written off."""
+        with self.db.read_session() as s:
+            ret = s.get(StockReturn, return_id)
+            if ret is None:
+                return {}
+            tokens = {write_off_token(ret.id, l.line_no): l.line_no for l in ret.lines}
+            return {tokens[t]: n for t, n in s.execute(
+                select(StockAdjustment.client_token, StockAdjustment.adjustment_number)
+                .where(StockAdjustment.client_token.in_(list(tokens))))}
 
     def get_return(self, return_id: int) -> StockReturn:
         with self.db.read_session() as s:

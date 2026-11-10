@@ -43,7 +43,7 @@ class ReservationsPage(ListPage):
 
     def fetch(self):
         return self.app.services.reservations.list(self.status.currentData(), site_id=self.site.value(),
-                                                   text=self.search.text())
+                                                   text=self.search.text(), limit=None)
 
     def describe(self, rows):
         return f"{len(rows)} reservation(s)"

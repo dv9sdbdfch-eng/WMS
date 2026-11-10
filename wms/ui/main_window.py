@@ -40,6 +40,7 @@ def _nav():
     from wms.ui.pages import (
         dashboard,
         delivery_notes,
+        dispatch,
         finished,
         goods_in,
         goods_out,
@@ -59,6 +60,7 @@ def _nav():
         ("WAREHOUSE", "locations", "Locations & Bins", P.LOCATIONS_VIEW, locations.LocationsPage),
         ("OPERATIONS", "goods_in", "Goods In", P.GOODS_IN_POST, goods_in.GoodsInPage),
         ("OPERATIONS", "goods_out", "Goods Out", P.GOODS_OUT_VIEW, goods_out.GoodsOutPage),
+        ("OPERATIONS", "dispatch", "Dispatch", P.GOODS_OUT_VIEW, dispatch.DispatchPage),
         ("OPERATIONS", ACTION + "transfer", "Transfer", P.STOCK_TRANSFER, None),
         ("PROJECTS", "projects", "Projects", P.SITES_VIEW, projects.ProjectsPage),
         ("PURCHASING", "purchase_orders", "Purchase Orders", P.PURCHASING_VIEW, purchase_orders.PurchaseOrdersPage),

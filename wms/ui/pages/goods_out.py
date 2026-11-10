@@ -7,6 +7,7 @@ from datetime import date
 
 from PySide6.QtWidgets import QComboBox, QFormLayout, QLineEdit, QTabWidget, QVBoxLayout, QWidget
 
+from wms.core.enums import ItemType
 from wms.core.exceptions import ValidationError
 from wms.core.numbers import fmt_datetime
 from wms.core.permissions import P
@@ -62,7 +63,7 @@ class IssueHistory(ListPage):
     def fetch(self):
         d1, d2 = self.dates()
         return self.app.services.goods_out.search(self.search.text(), self.site.value(), d1, d2,
-                                                  self.status.currentData())
+                                                  self.status.currentData(), limit=None)
 
     def describe(self, rows):
         return f"{len(rows)} Goods Out record(s)"
@@ -115,8 +116,13 @@ class GoodsOutPage(Page):
         form.addRow("Job reference", self.reference)
         form.addRow("Notes", self.notes)
         lay.addLayout(form)
-        lay.addWidget(label("Materials", "SectionTitle"))
-        self.lines = LinesEditor(self.app, show_bin=True, bin_optional=True, show_stock=True)
+        lay.addLayout(h(label("Materials", "SectionTitle"), None,
+                        button("Load from project...", self.load_from_project,
+                               tooltip="Fill the lines from what is reserved for / still needed by the chosen "
+                                       "project, bin by bin in walking order")))
+        # materials only: finished products leave with Dispatch (Delivery Note, v1.22)
+        self.lines = LinesEditor(self.app, show_bin=True, bin_optional=True, show_stock=True,
+                                 product_types=[t.value for t in ItemType if t is not ItemType.FINISHED])
         lay.addWidget(self.lines, 1)
         lay.addLayout(h(label("Leave the bin empty to pick automatically (default bin first, then the bins with most "
                               "stock). Quarantine bins are never used.", "Muted"), None,
@@ -140,6 +146,28 @@ class GoodsOutPage(Page):
         if site_id and self.site.value() is None:
             self.site.set_value(site_id)
         self.lines.add_product(product_id)
+
+    def load_from_project(self) -> bool:
+        """Put the project's picking list on the form (reserved or remaining, whole project or one part)."""
+        from wms.ui.dialogs.allocation import PickListDialog
+        if not self.site.value():
+            info(self, "Load from project", "Choose the site / project first.")
+            return False
+        dlg = PickListDialog(self.app, self.site.value(), self, for_goods_out=True)
+        if not dlg.exec() or not dlg.picked_rows:
+            return False
+        self.fill_lines(dlg.picked_rows)
+        return True
+
+    def fill_lines(self, rows) -> None:
+        """Replace the empty lines with one line per pick (product, quantity, bin)."""
+        for r in reversed(range(self.lines.table.rowCount())):
+            w = self.lines.table.cellWidget(r, 0)
+            if w is not None and w.value() is None:
+                self.lines.table.removeRow(r)
+        for p in rows:
+            self.lines.add_row(p.product_id, p.quantity, p.bin_id)
+        self.lines.add_row()
 
     def clear(self):
         self.requested_by.clear()

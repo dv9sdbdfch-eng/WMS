@@ -329,11 +329,15 @@ class ReturnDialog(QDialog):
         lay.addLayout(_form([("Date", fmt_date(r.return_date)), ("Reference", r.reference or ""),
                              ("Reason", " - ".join(x for x in (app.services.reasons.label(r.reason_code), r.reason or "") if x)), ("Entered by", f"{r.user.full_name}, "
                                                                         f"{fmt_datetime(r.created_at)}")]))
+        offs = app.services.stock.damaged_write_offs(r.id)  # damaged from site: never back into stock
         t = DataTable([Col("Code", lambda l: l.product_code, width=110),
                        Col("Product", lambda l: l.product_name, width=260), Col("Qty", lambda l: l.quantity, QTY, 90),
                        Col("Unit", lambda l: l.product.unit.code, width=55),
                        Col("Condition", lambda l: ReturnCondition(l.condition).label, width=90),
-                       Col("Bin", lambda l: l.bin_code, width=220), Col("Notes", lambda l: l.notes or "")])
+                       Col("Bin", lambda l: "" if l.line_no in offs else l.bin_code, width=220),
+                       Col("Into stock", lambda l: f"No - written off ({offs[l.line_no]})" if l.line_no in offs
+                           else "Yes" if r.return_type == ReturnType.FROM_SITE.value else "-", width=210),
+                       Col("Notes", lambda l: l.notes or "")])
         t.set_items(r.lines)
         lay.addWidget(t, 1)
         buttons = []

@@ -45,6 +45,7 @@ class MovementType(LabelledEnum):
     PRODUCTION_CONSUME = "PRODUCTION_CONSUME"
     OPENING_BALANCE = "OPENING_BALANCE"
     STOCKTAKE_ADJUSTMENT = "STOCKTAKE_ADJUSTMENT"
+    DISPATCH = "DISPATCH"  # finished products sent out on a Delivery Note (v1.22)
     # Never stored: a reversal keeps the type of the movement it reverses (so every "Goods Out"
     # total nets off automatically) and is marked by reversal_of_id + a movement_reversals row.
     # Used as a filter / display value only. See docs/STOCK_LEDGER.md.
@@ -164,6 +165,7 @@ class EntityType(LabelledEnum):
     PRODUCT = "PRODUCT"
     DELIVERY_NOTE = "DELIVERY_NOTE"
     GOODS_ISSUE = "GOODS_ISSUE"
+    DISPATCH = "DISPATCH"
     SITE = "SITE"
     MANAGER = "MANAGER"
     PROJECT_UNIT = "PROJECT_UNIT"
@@ -198,6 +200,7 @@ OUTBOUND_TYPES = {
     MovementType.ADJUSTMENT_OUT,
     MovementType.RETURN_TO_SUPPLIER,
     MovementType.PRODUCTION_CONSUME,
+    MovementType.DISPATCH,
 }
 
 _LABELS = {
@@ -207,6 +210,7 @@ _LABELS = {
     ItemType.FINISHED: "Finished Product",
     MovementType.GOODS_IN: "Goods In",
     MovementType.GOODS_OUT: "Goods Out",
+    MovementType.DISPATCH: "Dispatch",
     MovementType.TRANSFER: "Bin Transfer",
     MovementType.ADJUSTMENT_IN: "Adjustment (+)",
     MovementType.ADJUSTMENT_OUT: "Adjustment (-)",
@@ -226,6 +230,7 @@ _LABELS = {
     AdjustmentReason.DATA_ENTRY_ERROR: "Data Entry Error",
     AdjustmentReason.OPENING_BALANCE: "Opening Balance",
     EntityType.GOODS_ISSUE: "Goods Out",
+    EntityType.DISPATCH: "Dispatch (Delivery Note)",
     EntityType.STOCK_COUNT: "Stocktake",
     CountStatus.SUBMITTED: "Awaiting Approval",
     StockStatus.OUT: "Out of Stock",

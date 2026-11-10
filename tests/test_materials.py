@@ -87,13 +87,18 @@ def test_project_list_reservation_issue_and_return_are_separate(svc, ws):
     assert (oak.required, oak.proj_reserved, oak.issued, oak.returned, oak.net) == (D(50), D(10), D(20), 0, D(20))
     assert (grey.required, grey.issued, grey.on_list) == (D(25), 0, True)
     assert (mdf.required, mdf.issued, mdf.returned, mdf.net, mdf.on_list) == (None, D(6), D(2), D(4), False)
-    # Remaining = Required - Net Issued - Reserved, never below 0; blank when not on the list
-    assert (oak.remaining, grey.remaining, mdf.remaining) == (D(20), D(25), None)
+    # Remaining = Required - Net Issued, never below 0; blank when not on the list (v1.21)
+    assert (oak.remaining, grey.remaining, mdf.remaining) == (D(30), D(25), None)
+    # To Allocate = Remaining - Reserved: what still needs a reservation
+    assert (oak.to_allocate, grey.to_allocate, mdf.to_allocate) == (D(20), D(25), None)
     summary = svc.materials.project_summary(site.id)
     assert (summary.materials, summary.required, summary.issued, summary.returned) == (3, D(75), D(26), D(2))
-    assert summary.remaining == D(45)
+    assert summary.remaining == D(55)
+    assert summary.to_allocate == D(45)
     assert [r.product.internal_code for r in svc.materials.page(F(site_id=site.id, sort="remaining"))] == \
-        ["H3311", "U708", "MDF-18"]  # empty (not on the list) last
+        ["U708", "H3311", "MDF-18"]  # 25 < 30; empty (not on the list) last
+    assert [r.product.internal_code for r in svc.materials.page(F(site_id=site.id, sort="to_allocate"))] == \
+        ["H3311", "U708", "MDF-18"]  # 20 < 25
     # over-issued never shows a negative Remaining
     issue(svc, site, ws.oak, 40, ws.bin1)
     assert svc.materials.page(F(site_id=site.id, text="H3311"))[0].remaining == 0

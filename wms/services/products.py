@@ -246,6 +246,18 @@ class ProductService(BaseService):
             rows = [r for r in rows if r.is_low]
         return rows
 
+    def options(self, item_types: list[str] | None = None, include_inactive: bool = False) -> list[tuple[str, int]]:
+        """("CODE - Name", id) for every product, for pick lists. Only three columns are read - no
+        stock totals - so a form opens at once even with 50 000+ materials (v1.20; the full
+        ``list()`` took 2.5 s there). Stock for the chosen product comes from ``row()``."""
+        q = select(Product.id, Product.internal_code, Product.name).order_by(Product.internal_code)
+        if not include_inactive:
+            q = q.where(Product.is_active.is_(True))
+        if item_types:
+            q = q.where(Product.item_type.in_(item_types))
+        with self.db.read_session() as s:
+            return [(f"{code} - {name}", pid) for pid, code, name in s.execute(q)]
+
     def low_stock(self) -> list[ProductRow]:
         """Reorder required: Available at or below the reorder level / minimum."""
         return self.list(low_only=True)

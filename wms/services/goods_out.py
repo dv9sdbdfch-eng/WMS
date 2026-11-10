@@ -9,7 +9,7 @@ from decimal import Decimal
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
-from wms.core.enums import CLOSED_SITE_STATUSES, DocumentStatus, EntityType, MovementType, SiteStatus
+from wms.core.enums import CLOSED_SITE_STATUSES, DocumentStatus, EntityType, ItemType, MovementType, SiteStatus
 from wms.core.exceptions import InsufficientStockError, NotFoundError, ValidationError
 from wms.core.numbers import ZERO, to_qty, utcnow
 from wms.core.permissions import P
@@ -110,6 +110,10 @@ class GoodsOutService(BaseService):
                 product = s.get(Product, ln.product_id)
                 if product is None:
                     raise ValidationError(f"Line {i}: product not found.")
+                if product.item_type == ItemType.FINISHED.value:
+                    raise ValidationError(f"Line {i}: {product.internal_code} is a finished product. Finished "
+                                          f"products leave with Dispatch (Finished Products), which prints the "
+                                          f"Delivery Note.")
                 qty = to_qty(ln.quantity, f"line {i} quantity")
                 if qty <= ZERO:
                     raise ValidationError(f"Line {i} ({product.internal_code}): quantity must be greater than zero.")

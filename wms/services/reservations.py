@@ -188,20 +188,27 @@ class ReservationService(BaseService):
                 raise ValidationError(f"Project {site.display} is closed - reopen it to reserve stock for it.",
                                       "site_id")
             qty = self._qty(product, data.get("quantity"))
-            self._check_available(s, product, qty)
-            r = StockReservation(number=next_number(s, "RESERVATION"), product_id=product.id, site_id=site.id,
-                                 site_number_snapshot=site.project_number, site_name_snapshot=site.name,
-                                 quantity=qty, required_by=data.get("required_by") or None,
-                                 notes=clean_str(data.get("notes")), status=ReservationStatus.ACTIVE.value,
-                                 created_by_id=self.user.id, client_token=data.get("client_token") or None)
-            s.add(r)
-            s.flush()
-            audit.record(s, self.ctx, "RESERVATION_CREATED", EntityType.RESERVATION.value, r.id, r.number,
-                         f"{fmt_qty(qty)} {product.unit.code} {product.internal_code} for {site.display}",
-                         new={"product_id": product.id, "site_id": site.id, "quantity": qty,
-                              "required_by": r.required_by})
+            r = self._create(s, product, site, qty, data.get("required_by") or None, data.get("notes"),
+                             data.get("client_token") or None)
             rid = r.id
         return self.get(rid)
+
+    def _create(self, s: Session, product: Product, site: Site, qty: Decimal, required_by: date | None,
+                notes: str | None, client_token: str | None) -> StockReservation:
+        """One new reservation (checks what is available; also used by Reserve remaining)."""
+        self._check_available(s, product, qty)
+        r = StockReservation(number=next_number(s, "RESERVATION"), product_id=product.id, site_id=site.id,
+                             site_number_snapshot=site.project_number, site_name_snapshot=site.name,
+                             quantity=qty, required_by=required_by, notes=clean_str(notes),
+                             status=ReservationStatus.ACTIVE.value, created_by_id=self.user.id,
+                             client_token=client_token)
+        s.add(r)
+        s.flush()
+        audit.record(s, self.ctx, "RESERVATION_CREATED", EntityType.RESERVATION.value, r.id, r.number,
+                     f"{fmt_qty(qty)} {product.unit.code} {product.internal_code} for {site.display}",
+                     new={"product_id": product.id, "site_id": site.id, "quantity": qty,
+                          "required_by": r.required_by})
+        return r
 
     def update(self, reservation_id: int, quantity, required_by: date | None = None,
                notes: str | None = None) -> ReservationView:
