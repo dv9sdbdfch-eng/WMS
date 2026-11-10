@@ -552,13 +552,16 @@ def in_cell_pictures(path: Path) -> dict[str, dict[tuple[int, int], tuple[bytes,
             if part not in names:
                 continue
             found: dict[tuple[int, int], tuple[bytes, str]] = {}
-            for _ev, el in ET.iterparse(z.open(part)):
-                if _local(el.tag) == "c" and el.get("vm"):
-                    pic = picture(int(el.get("vm")))
-                    if pic:
-                        row, col = _ref(el.get("r", ""))
-                        found[(row, col)] = pic
-                    el.clear()
+            # closed explicitly: an open member keeps the workbook file locked on Windows until the
+            # garbage collector runs, so it could not be moved or deleted after an import
+            with z.open(part) as fh:
+                for _ev, el in ET.iterparse(fh):
+                    if _local(el.tag) == "c" and el.get("vm"):
+                        pic = picture(int(el.get("vm")))
+                        if pic:
+                            row, col = _ref(el.get("r", ""))
+                            found[(row, col)] = pic
+                        el.clear()
             if found:
                 out[sheet] = found
     return out
