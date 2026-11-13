@@ -13,6 +13,9 @@ class Site(IdMixin, TimestampMixin, VersionMixin, Base):
 
     project_number: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)
     name: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
+    #: v1.23: the name as compared for duplicates ("Riverside  apartments" = "RIVERSIDE APARTMENTS").
+    #: Kept by the services; see ``wms.services.sites.project_name_key``.
+    name_key: Mapped[str | None] = mapped_column(String(200), index=True)
     customer: Mapped[str | None] = mapped_column(String(200), index=True)
     address: Mapped[str | None] = mapped_column(Text)
     postcode: Mapped[str | None] = mapped_column(String(12))

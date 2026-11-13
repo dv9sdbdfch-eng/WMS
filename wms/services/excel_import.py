@@ -1235,7 +1235,12 @@ class ExcelImportService(BaseService):
             if s.scalar(select(Site.id).where(func.upper(Site.project_number) == number.upper())):
                 raise ValidationError(f"Project {number} already exists - choose 'Match' for it. Nothing was "
                                       f"imported.")
+            from wms.services.sites import project_name_key
+            if s.scalar(select(Site.id).where(Site.name_key == project_name_key(c.text[:200]))):
+                raise ValidationError(f"A project named '{c.text[:200]}' already exists - choose 'Match' for it. "
+                                      f"Nothing was imported.")
             site = Site(project_number=number, name=c.text[:200], status=SiteStatus.ACTIVE.value,
+                        name_key=project_name_key(c.text[:200]),
                         notes=f"Created by Excel import of {plan.source.name}")
             s.add(site)
             s.flush()
