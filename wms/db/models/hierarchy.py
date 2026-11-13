@@ -30,7 +30,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import CheckConstraint, Date, Index, Integer, String, Text, func
+from sqlalchemy import CheckConstraint, Date, Index, Integer, String, Text, func, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from wms.core.numbers import utcnow
@@ -150,20 +150,40 @@ class UnitMaterialNorm(IdMixin, Base):
     changed_by_name_snapshot: Mapped[str | None] = mapped_column(String(120))
 
 
+#: production stages of a unit (v1.24, Production dashboard), in the order they happen
+STAGE_DONE = "DONE"              # made in the workshop
+STAGE_DISPATCHED = "DISPATCHED"  # left the workshop / warehouse
+STAGE_ON_SITE = "ON_SITE"        # delivered / installed on site
+STAGES = (STAGE_DONE, STAGE_DISPATCHED, STAGE_ON_SITE)
+
+
 class UnitCompletion(IdMixin, Base):
     """N units of a unit type made / installed. Never edited; a mistake is cancelled (kept, not counted).
 
     ``recorded_at`` (when it was entered) decides which norm the units were made with: a norm change
     entered later for FUTURE units does not touch them. ``completed_on`` is the date shown in reports.
+
+    v1.24: ``stage`` says what happened (DONE / DISPATCHED / ON_SITE). Only DONE rows count as units
+    made for the norms. ``piece_no`` is set on marks made on the Production dashboard, where every
+    piece of a unit type (1..quantity) is its own row: such a row is always ``quantity`` 1. A row
+    without ``piece_no`` is a batch ("6 done") recorded for the unit type as a whole.
     """
 
     __tablename__ = "unit_completions"
     __table_args__ = (
         CheckConstraint("quantity > 0", name="qty_positive"),
+        CheckConstraint("stage IN ('DONE', 'DISPATCHED', 'ON_SITE')", name="stage_valid"),
+        CheckConstraint("piece_no IS NULL OR piece_no >= 1", name="piece_no_valid"),
         Index("ix_unit_completions_unit_time", "unit_id", "recorded_at"),
+        # one live mark per piece and stage (cancelled marks stay as history)
+        Index("ux_unit_completions_piece_stage", "unit_id", "piece_no", "stage", unique=True,
+              sqlite_where=text("cancelled_at IS NULL AND piece_no IS NOT NULL"),
+              postgresql_where=text("cancelled_at IS NULL AND piece_no IS NOT NULL")),
     )
 
     unit_id: Mapped[int] = fk("project_units.id", nullable=False, ondelete="CASCADE", index=False)
+    stage: Mapped[str] = mapped_column(String(12), nullable=False, default=STAGE_DONE, server_default=STAGE_DONE)
+    piece_no: Mapped[int | None] = mapped_column(Integer)
     quantity: Mapped[Decimal] = mapped_column(Quantity, nullable=False)
     completed_on: Mapped[date] = mapped_column(Date, nullable=False, index=True)
     recorded_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False, default=utcnow)

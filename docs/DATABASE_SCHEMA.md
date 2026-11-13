@@ -795,6 +795,8 @@ Protected tables (database triggers, see `wms.db.engine`):
 | Column | Type | Null | Key / reference |
 |---|---|---|---|
 | unit_id | Integer | no | FK project_units.id |
+| stage | String(12) | no |  |
+| piece_no | Integer | yes |  |
 | quantity | Quantity | no |  |
 | completed_on | Date | no | indexed |
 | recorded_at | UTCDateTime | no |  |
@@ -806,8 +808,11 @@ Protected tables (database triggers, see `wms.db.engine`):
 | cancel_reason | Text | yes |  |
 | id | Integer | no | PK |
 
+* CHECK piece_no IS NULL OR piece_no >= 1
 * CHECK quantity > 0
+* CHECK stage IN ('DONE', 'DISPATCHED', 'ON_SITE')
 * INDEX ix_unit_completions_unit_time (unit_id, recorded_at)
+* UNIQUE INDEX ux_unit_completions_piece_stage (unit_id, piece_no, stage) WHERE cancelled_at IS NULL AND piece_no IS NOT NULL
 
 ## unit_material_norms
 
