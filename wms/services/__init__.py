@@ -99,6 +99,11 @@ class Services:
         return AllocationService(self.ctx)
 
     @cached_property
+    def unit_norms(self):
+        from wms.services.unit_norms import UnitNormService
+        return UnitNormService(self.ctx)
+
+    @cached_property
     def project_demand(self):
         from wms.services.project_demand import ProjectDemandService
         return ProjectDemandService(self.ctx)

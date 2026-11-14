@@ -13,6 +13,13 @@ The database is the source of truth; the Projects tree on screen only shows and 
   the quantity one unit needs. The product is never copied: the same product can sit in any number
   of units and projects.
 
+* ``UnitMaterialNorm`` (v1.23) - the history of a line's norm (quantity per unit): every value it
+  ever had, when it changed, who changed it and whether the change was meant for ALL units of the
+  unit type (units already made are recalculated) or only for the FUTURE ones (units already made
+  keep the norm they were made with).
+* ``UnitCompletion`` (v1.23) - "N units of this unit type were made / installed on <date>". Together
+  with the norm history this says which norm each finished unit used.
+
 Total required is never stored: it is always ``unit quantity x quantity per unit`` and is worked
 out by ``wms.services.project_demand``. Planning data only - nothing here changes stock or the
 movement ledger.
@@ -20,13 +27,15 @@ movement ledger.
 
 from __future__ import annotations
 
+from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import CheckConstraint, Index, Integer, String, Text, func
+from sqlalchemy import CheckConstraint, Date, Index, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from wms.core.numbers import utcnow
 from wms.db.base import ActiveMixin, Base, IdMixin, TimestampMixin, fk
-from wms.db.types import Quantity
+from wms.db.types import Quantity, UTCDateTime
 
 
 class Manager(IdMixin, TimestampMixin, ActiveMixin, Base):
@@ -109,3 +118,58 @@ class UnitMaterial(IdMixin, TimestampMixin, Base):
 
     product = relationship("Product", lazy="joined")
     unit = relationship("ProjectUnit", lazy="joined")
+
+
+#: what a norm change applies to
+NORM_ALL = "ALL"        # every unit, also those already made (they are recalculated)
+NORM_FUTURE = "FUTURE"  # only units not made yet; units already made keep their norm
+
+
+class UnitMaterialNorm(IdMixin, Base):
+    """One value of a material line's norm (quantity per unit) and when it was set. Append-only.
+
+    The line's current norm is always ``unit_materials.quantity_per_unit``; this table keeps how it
+    got there. The first row of a line is written when the line is added (``applies_to`` ALL).
+    """
+
+    __tablename__ = "unit_material_norms"
+    __table_args__ = (
+        CheckConstraint("quantity_per_unit >= 0", name="qty_not_negative"),
+        CheckConstraint("applies_to IN ('ALL', 'FUTURE')", name="applies_to_valid"),
+        Index("ix_unit_material_norms_line_time", "unit_material_id", "changed_at"),
+    )
+
+    unit_material_id: Mapped[int] = fk("unit_materials.id", nullable=False, ondelete="CASCADE", index=False)
+    quantity_per_unit: Mapped[Decimal] = mapped_column(Quantity, nullable=False)
+    #: the norm before this change (empty on the first row)
+    previous_qty: Mapped[Decimal | None] = mapped_column(Quantity)
+    applies_to: Mapped[str] = mapped_column(String(10), nullable=False, default=NORM_ALL)
+    changed_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False, default=utcnow)
+    reason: Mapped[str | None] = mapped_column(Text)
+    changed_by_id: Mapped[int | None] = fk("users.id", ondelete="SET NULL")
+    changed_by_name_snapshot: Mapped[str | None] = mapped_column(String(120))
+
+
+class UnitCompletion(IdMixin, Base):
+    """N units of a unit type made / installed. Never edited; a mistake is cancelled (kept, not counted).
+
+    ``recorded_at`` (when it was entered) decides which norm the units were made with: a norm change
+    entered later for FUTURE units does not touch them. ``completed_on`` is the date shown in reports.
+    """
+
+    __tablename__ = "unit_completions"
+    __table_args__ = (
+        CheckConstraint("quantity > 0", name="qty_positive"),
+        Index("ix_unit_completions_unit_time", "unit_id", "recorded_at"),
+    )
+
+    unit_id: Mapped[int] = fk("project_units.id", nullable=False, ondelete="CASCADE", index=False)
+    quantity: Mapped[Decimal] = mapped_column(Quantity, nullable=False)
+    completed_on: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    recorded_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False, default=utcnow)
+    notes: Mapped[str | None] = mapped_column(Text)
+    user_id: Mapped[int | None] = fk("users.id", ondelete="SET NULL")
+    user_name_snapshot: Mapped[str | None] = mapped_column(String(120))
+    cancelled_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    cancelled_by_id: Mapped[int | None] = fk("users.id", ondelete="SET NULL")
+    cancel_reason: Mapped[str | None] = mapped_column(Text)

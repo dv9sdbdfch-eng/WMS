@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
@@ -25,6 +26,35 @@ from wms.db.models import (
 from wms.services import audit, lifecycle
 from wms.services.base import BaseService, clean_code, clean_str, like_pattern
 from wms.services.lifecycle import RemovalPlan
+
+
+def project_name_key(name: str | None) -> str | None:
+    """The project name as compared for duplicates: case, spaces and punctuation are ignored, so
+    "Riverside Apartments", "riverside  apartments" and "Riverside-Apartments" are the same name."""
+    return re.sub(r"[\W_]+", " ", (name or "").casefold()).strip() or None
+
+
+def check_project_name(s, name: str, site_id: int | None = None) -> str | None:
+    """Refuse a project name another project already has (any status). Returns the name key.
+
+    A project that already shared its name with another one before v1.23 can still be saved as
+    long as its name is not changed."""
+    key = project_name_key(name)
+    if key is None:
+        return None
+    if site_id:
+        current = s.get(Site, site_id)
+        if current is not None and project_name_key(current.name) == key:
+            return key
+    dup = s.scalar(select(Site).where(Site.name_key == key, Site.id != (site_id or 0)).order_by(Site.id).limit(1))
+    if dup is not None:
+        if dup.status == SiteStatus.ARCHIVED.value:
+            raise DuplicateError(f"A project named '{dup.name}' already exists ({dup.project_number}, archived). "
+                                 f"Restore it instead of creating it again, or choose another name.")
+        raise DuplicateError(f"A project named '{dup.name}' already exists ({dup.project_number}). "
+                             f"Choose another name.")
+    return key
+
 
 SITE_FIELDS = ("project_number", "name", "customer", "address", "postcode", "project_manager", "contact_name",
                "contact_phone", "contact_email", "status", "start_date", "end_date", "notes")
@@ -89,6 +119,7 @@ class SiteService(BaseService):
                     raise DuplicateError(f"Project number '{number}' belongs to archived project {dup.name}. "
                                          f"Restore it instead of creating it again, or choose another number.")
                 raise DuplicateError(f"Project number '{number}' already exists.")
+            name_key = check_project_name(s, name, site_id)
             if site_id:
                 site = s.get(Site, site_id)
                 if site is None:
@@ -101,6 +132,7 @@ class SiteService(BaseService):
                 s.add(site)
                 old = {}
             site.project_number, site.name, site.status = number, name, status
+            site.name_key = name_key
             site.start_date, site.end_date = start, end
             for f in ("customer", "address", "postcode", "contact_name", "contact_phone",
                       "contact_email", "notes"):

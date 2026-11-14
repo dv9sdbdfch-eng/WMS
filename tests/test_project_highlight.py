@@ -156,7 +156,11 @@ def test_8_same_name_different_managers(ui, tribeca):  # noqa: F811
     app, win, _msgs, _ = ui
     t = app.services.project_tree
     anna = t.save_manager(None, {"name": "Anna Lee"})
-    twin = t.save_project(None, {"project_number": "TRI-2", "name": "Tribeca", "manager_id": anna.id})
+    twin = t.save_project(None, {"project_number": "TRI-2", "name": "Tribeca 2", "manager_id": anna.id})
+    # v1.23 refuses a second "Tribeca", but databases from before it can hold one: highlight by ID, not name
+    from sqlalchemy import text
+    with app.services.ctx.db.engine.begin() as c:
+        c.execute(text("UPDATE sites SET name = 'Tribeca' WHERE id = :i"), {"i": twin.id})
     page = _open_page(win)
     page.tree.header().sectionClicked.emit(C_PRJ)
     page.select(f"P:{twin.id}")

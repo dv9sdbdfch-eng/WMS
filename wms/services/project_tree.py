@@ -33,6 +33,7 @@ from wms.db.models import Manager, Product, ProjectBlock, ProjectLevel, ProjectU
 from wms.services import audit
 from wms.services.base import BaseService, clean_code, clean_str, like_pattern
 from wms.services.project_demand import line_total, sync_project_lists
+from wms.services.unit_norms import NORM_ALL, record_norm, units_done, units_with_completions
 
 #: manager filter value for "projects without a manager"
 UNASSIGNED = -1
@@ -659,7 +660,7 @@ class ProjectTreeService(BaseService):
     def duplicate_project(self, site_id: int, project_number: str, name: str) -> ProjectNode:
         """A new project with the same manager, details, units and unit materials. Its status starts
         as Planned. Reservations, issues, documents and the material list are not copied."""
-        from wms.services.sites import SITE_FIELDS
+        from wms.services.sites import SITE_FIELDS, check_project_name
         self.require(P.SITES_EDIT)
         number = clean_code(project_number, "project_number", "Project number", 50)
         name = clean_str(name, "name", required=True, max_len=200)
@@ -669,9 +670,11 @@ class ProjectTreeService(BaseService):
                 raise NotFoundError("Project not found.")
             if s.scalar(select(Site.id).where(func.upper(Site.project_number) == number)):
                 raise DuplicateError(f"Project number '{number}' already exists.")
+            name_key = check_project_name(s, name)
             new = Site(**{f: getattr(src, f) for f in SITE_FIELDS if f not in ("project_number", "name", "status",
                                                                                    "start_date", "end_date")})
             new.project_number, new.name, new.status = number, name, SiteStatus.PLANNED.value
+            new.name_key = name_key
             new.manager_id = src.manager_id
             s.add(new)
             s.flush()
@@ -715,15 +718,17 @@ class ProjectTreeService(BaseService):
 
     def _copy_lines(self, s: Session, from_unit: int, to_unit: int) -> int:
         user_id = self.ctx.user.id if self.ctx.user else None
-        n = 0
+        copies = []
         for line in s.scalars(select(UnitMaterial).where(UnitMaterial.unit_id == from_unit)
                               .order_by(UnitMaterial.sort_order, UnitMaterial.id)):
-            s.add(UnitMaterial(unit_id=to_unit, product_id=line.product_id, quantity_per_unit=line.quantity_per_unit,
-                               vpk_code=line.vpk_code, sort_order=line.sort_order, notes=line.notes,
-                               created_by_id=user_id))
-            n += 1
+            copies.append(UnitMaterial(unit_id=to_unit, product_id=line.product_id,
+                                       quantity_per_unit=line.quantity_per_unit, vpk_code=line.vpk_code,
+                                       sort_order=line.sort_order, notes=line.notes, created_by_id=user_id))
+        s.add_all(copies)
         s.flush()
-        return n
+        for c in copies:  # a copy starts its own norm history with today's norm
+            record_norm(s, self.ctx, c, None, NORM_ALL, "Copied")
+        return len(copies)
 
     def project_contents(self, site_id: int) -> tuple[int, int]:
         """(units, material lines) of a project - shown before it is deleted."""
@@ -777,6 +782,10 @@ class ProjectTreeService(BaseService):
                 u.unit_code = clean_str(data.get("unit_code"), "unit_code", max_len=50)
             if "quantity" in data:
                 u.quantity = _quantity(data.get("quantity"), "Unit quantity")
+                done = units_done(s, unit_id) if unit_id else ZERO
+                if u.quantity < done:
+                    raise ValidationError(f"{done.normalize():f} unit(s) of {u.name} are already done: the quantity "
+                                          f"cannot be less than that.", "quantity")
             if "notes" in data:
                 u.notes = clean_str(data.get("notes"))
             if not unit_id:
@@ -1056,6 +1065,7 @@ class ProjectTreeService(BaseService):
             if u is None:
                 raise NotFoundError("Unit not found.")
             site = self._editable_site(s, u.site_id)
+            _refuse_if_done(s, ProjectUnit.id == unit_id)
             n = s.execute(delete(UnitMaterial).where(UnitMaterial.unit_id == unit_id)).rowcount or 0
             audit.record(s, self.ctx, "UNIT_DELETED", EntityType.PROJECT_UNIT.value, u.id,
                          f"{site.project_number} / {u.name}", f"Unit deleted with {n} material line(s)",
@@ -1089,6 +1099,7 @@ class ProjectTreeService(BaseService):
                                     sort_order=order, created_by_id=self.ctx.user.id if self.ctx.user else None)
                 s.add(line)
                 s.flush()
+                record_norm(s, self.ctx, line, None, NORM_ALL, "Material added to the unit")
                 new.append(line.id)
                 audit.record(s, self.ctx, "UNIT_MATERIAL_ADDED", EntityType.PROJECT_UNIT.value, unit_id,
                              f"{site.project_number} / {u.name}",
@@ -1097,12 +1108,17 @@ class ProjectTreeService(BaseService):
             self._sync(s, site.id)
             return new
 
-    def update_material(self, line_id: int, data: dict) -> MaterialNode:
-        """Change quantity per unit, VPK code or notes (only the fields given)."""
+    def update_material(self, line_id: int, data: dict, applies_to: str = NORM_ALL,
+                        reason: str | None = None) -> MaterialNode:
+        """Change quantity per unit (the norm), VPK code or notes (only the fields given).
+
+        A new norm is kept in the norm history with the moment of the change. ``applies_to`` ALL
+        (the default, as before v1.23) recalculates units already done too; FUTURE keeps them."""
         self.require(P.SITES_EDIT)
         with self.db.session() as s:
             line, u, site = self._line(s, line_id)
             old = audit.snapshot(line, MATERIAL_FIELDS)
+            old_norm = line.quantity_per_unit
             if "quantity_per_unit" in data:
                 line.quantity_per_unit = _quantity(data.get("quantity_per_unit"), "Quantity per unit")
             if "vpk_code" in data:
@@ -1115,6 +1131,13 @@ class ProjectTreeService(BaseService):
                 audit.record(s, self.ctx, "UNIT_MATERIAL_UPDATED", EntityType.PROJECT_UNIT.value, u.id,
                              f"{site.project_number} / {u.name}", line.product.internal_code, old=o, new=n)
                 if "quantity_per_unit" in n:
+                    record_norm(s, self.ctx, line, old_norm, applies_to, reason)
+                    audit.record(s, self.ctx, "UNIT_NORM_CHANGED", EntityType.PROJECT_UNIT.value, u.id,
+                                 f"{site.project_number} / {u.name}",
+                                 f"{line.product.internal_code}: {old_norm} -> {line.quantity_per_unit} per unit "
+                                 f"({'all units' if applies_to == NORM_ALL else 'future units only'})",
+                                 old={"quantity_per_unit": str(old_norm)},
+                                 new={"quantity_per_unit": str(line.quantity_per_unit), "applies_to": applies_to})
                     self._sync(s, site.id)
         return self.material(line_id)
 
@@ -1224,7 +1247,16 @@ def _unit_counts(s: Session, *conds) -> tuple[int, int]:
     return units, lines
 
 
+def _refuse_if_done(s: Session, *conds) -> None:
+    """Units with completed units recorded are history: they are not deleted with the structure."""
+    n = units_with_completions(s, *conds)
+    if n:
+        raise ValidationError(f"{n} unit(s) here already have completed units recorded. Cancel those records "
+                              f"first, or keep the units (move them if needed).")
+
+
 def _delete_units(s: Session, *conds) -> tuple[int, int]:
+    _refuse_if_done(s, *conds)
     units, lines = _unit_counts(s, *conds)
     ids = select(ProjectUnit.id).where(*conds).scalar_subquery()
     s.execute(delete(UnitMaterial).where(UnitMaterial.unit_id.in_(ids)))

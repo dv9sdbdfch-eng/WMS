@@ -576,6 +576,7 @@ Protected tables (database triggers, see `wms.db.engine`):
 |---|---|---|---|
 | project_number | String(50) | no | UNIQUE |
 | name | String(200) | no | indexed |
+| name_key | String(200) | yes | indexed |
 | customer | String(200) | yes | indexed |
 | address | Text | yes |  |
 | postcode | String(12) | yes |  |
@@ -788,6 +789,43 @@ Protected tables (database triggers, see `wms.db.engine`):
 | created_at | UTCDateTime | no |  |
 | updated_at | UTCDateTime | no |  |
 | is_active | Boolean | no |  |
+
+## unit_completions
+
+| Column | Type | Null | Key / reference |
+|---|---|---|---|
+| unit_id | Integer | no | FK project_units.id |
+| quantity | Quantity | no |  |
+| completed_on | Date | no | indexed |
+| recorded_at | UTCDateTime | no |  |
+| notes | Text | yes |  |
+| user_id | Integer | yes | FK users.id, indexed |
+| user_name_snapshot | String(120) | yes |  |
+| cancelled_at | UTCDateTime | yes |  |
+| cancelled_by_id | Integer | yes | FK users.id, indexed |
+| cancel_reason | Text | yes |  |
+| id | Integer | no | PK |
+
+* CHECK quantity > 0
+* INDEX ix_unit_completions_unit_time (unit_id, recorded_at)
+
+## unit_material_norms
+
+| Column | Type | Null | Key / reference |
+|---|---|---|---|
+| unit_material_id | Integer | no | FK unit_materials.id |
+| quantity_per_unit | Quantity | no |  |
+| previous_qty | Quantity | yes |  |
+| applies_to | String(10) | no |  |
+| changed_at | UTCDateTime | no |  |
+| reason | Text | yes |  |
+| changed_by_id | Integer | yes | FK users.id, indexed |
+| changed_by_name_snapshot | String(120) | yes |  |
+| id | Integer | no | PK |
+
+* CHECK applies_to IN ('ALL', 'FUTURE')
+* CHECK quantity_per_unit >= 0
+* INDEX ix_unit_material_norms_line_time (unit_material_id, changed_at)
 
 ## unit_materials
 
