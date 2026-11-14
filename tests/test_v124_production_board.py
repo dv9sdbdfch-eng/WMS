@@ -277,20 +277,37 @@ def test_card_click_and_filters(ui, site):  # noqa: F811
     assert page.table.proxy.rowCount() == 2 and page.cards[site.may.id].active
     page.pick_project(site.may.id)               # the active card again: all projects
     assert page.table.proxy.rowCount() == 8
-    page.f_manager.setCurrentIndex(page.f_manager.findData("John Smith"))
+    assert not hasattr(page, "f_manager")         # no manager filter (Ihor 14/11/2026)
+    page.f_project.setCurrentIndex(page.f_project.findData(site.tri.id))
     assert page.table.proxy.rowCount() == 6
     page.f_block.setCurrentIndex(page.f_block.findData("Block A"))
     page.f_level.setCurrentIndex(page.f_level.findData("Level 1"))
     assert page.table.proxy.rowCount() == 4      # kitchen K01 + 3 wardrobes
     svc_of(win).unit_progress.mark(site.wardrobe.id, 2, STAGE_DONE)
     page.refresh()
-    page.f_status.setCurrentIndex(page.f_status.findData(STAGE_DONE))
+    page.f_stage[STAGE_DONE].setCurrentIndex(page.f_stage[STAGE_DONE].findData(True))
     assert page.table.proxy.rowCount() == 1
+    page.f_stage[STAGE_DONE].setCurrentIndex(page.f_stage[STAGE_DONE].findData(False))
+    assert page.table.proxy.rowCount() == 3
     page.clear_filters()
     page.search.setText("wardrobe")
     page.search.search.emit("wardrobe")
     assert page.table.proxy.rowCount() == 3
     assert not _errors(msgs)
+
+
+def test_filters_sit_in_the_table_header(ui, site):  # noqa: F811
+    from PySide6.QtWidgets import QApplication
+    _app, win, msgs, _ = ui
+    win.resize(1366, 768)
+    page = _page(win)
+    QApplication.processEvents()
+    hdr = page.table.filter_header
+    for col, w in hdr.editors.items():
+        assert w.parent() is hdr and w.isVisible()
+        assert abs(w.geometry().left() - hdr.sectionViewportPosition(col)) <= 4   # under its own column
+        assert w.geometry().top() >= hdr.title_height()                            # under the title
+    assert sorted(hdr.editors) == [0, 1, 2, 3, 5, 6, 7]
 
 
 def test_select_several_and_mark(ui, site):  # noqa: F811

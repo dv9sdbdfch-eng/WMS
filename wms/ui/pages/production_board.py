@@ -120,16 +120,17 @@ class BoardModel(QAbstractTableModel):
 
 
 class BoardFilter(QSortFilterProxyModel):
-    """Project / manager / block / level / status / text filters, kept in tree order (no sorting)."""
+    """The filters in the table header: project / block / level / unit text / each stage marked or
+    not. The rows stay in tree order (no sorting)."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.site_id = None
-        self.manager = None
         self.block = None
         self.level = None
-        self.status = None
         self.text = ""
+        #: {stage: True (marked) / False (not marked)}; a stage not in it is not filtered
+        self.stages: dict[str, bool] = {}
 
     def set(self, **kw) -> None:
         for k, v in kw.items():
@@ -147,22 +148,61 @@ class BoardFilter(QSortFilterProxyModel):
     def accepts(self, r: PieceRow, skip: str | None = None) -> bool:
         if self.site_id is not None and r.site_id != self.site_id and skip != "site":
             return False
-        if self.manager is not None and r.manager != self.manager and skip != "manager":
-            return False
         if self.block is not None and (r.block or "—") != self.block and skip != "block":
             return False
         if self.level is not None and (r.level or "—") != self.level and skip != "level":
             return False
-        if self.status is not None and r.status != self.status:
-            return False
+        for stage, marked in self.stages.items():
+            if (stage in r.marks) != marked:
+                return False
         if self.text:
-            hay = f"{r.project_number} {r.project} {r.manager} {r.block} {r.level} {r.unit}".casefold()
+            hay = f"{r.unit} {r.unit_code or ''}".casefold()
             if not all(w in hay for w in self.text.casefold().split()):
                 return False
         return True
 
     def filterAcceptsRow(self, source_row, source_parent):  # noqa: N802
         return self.accepts(self.sourceModel().rows[source_row])
+
+
+class FilterHeader(QHeaderView):
+    """Column titles with a filter under each one (Ihor 14/11/2026: filters in the table header)."""
+
+    ROW = 28
+
+    def __init__(self, parent=None):
+        super().__init__(Qt.Orientation.Horizontal, parent)
+        self.editors: dict[int, QWidget] = {}
+        self.sectionResized.connect(lambda *_: self.place())
+        self.sectionMoved.connect(lambda *_: self.place())
+
+    def set_editor(self, col: int, w: QWidget) -> None:
+        w.setParent(self)
+        self.editors[col] = w
+        w.show()
+        self.place()
+
+    def title_height(self) -> int:
+        return self.fontMetrics().height() + 12
+
+    def sizeHint(self):  # noqa: N802
+        hint = super().sizeHint()
+        hint.setHeight(self.title_height() + self.ROW + 4)
+        return hint
+
+    def resizeEvent(self, event):  # noqa: N802
+        super().resizeEvent(event)
+        self.place()
+
+    def updateGeometries(self):  # noqa: N802
+        self.setViewportMargins(0, 0, 0, self.ROW + 4)
+        super().updateGeometries()
+        self.place()
+
+    def place(self) -> None:
+        top = self.title_height() + 2
+        for col, w in self.editors.items():
+            w.setGeometry(self.sectionViewportPosition(col) + 2, top, max(self.sectionSize(col) - 4, 10), self.ROW)
 
 
 class BoardTable(QTableView):
@@ -175,6 +215,9 @@ class BoardTable(QTableView):
         self.proxy = BoardFilter(self)
         self.proxy.setSourceModel(self.model_)
         self.setModel(self.proxy)
+        self.filter_header = FilterHeader(self)
+        self.setHorizontalHeader(self.filter_header)
+        self.horizontalScrollBar().valueChanged.connect(lambda _: self.filter_header.place())
         self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -342,35 +385,11 @@ class ProductionBoardPage(Page):
         self.card_area.setWidget(holder)
         self.body.addWidget(self.card_area)
 
-        # filters
-        self.f_project = QComboBox()
-        self.f_manager = QComboBox()
-        self.f_block = QComboBox()
-        self.f_level = QComboBox()
-        self.f_status = QComboBox()
-        self.f_status.addItem("Status: All", None)
-        for s in STATUSES:
-            self.f_status.addItem(STATUS_LABELS[s], s)
-        self.search = SearchBox("Search unit, code, project, block, level...")
         self.closed = QCheckBox("Closed projects too")
         self.closed.setToolTip("Also show completed and cancelled projects (archived ones never show)")
-        frow = QHBoxLayout()
-        frow.setSpacing(6)
-        for w in (self.f_project, self.f_manager, self.f_block, self.f_level, self.f_status):
-            w.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
-            w.setMaximumWidth(220)
-            frow.addWidget(w)
-        frow.addWidget(self.search, 1)
-        frow.addWidget(self.closed)
-        frow.addWidget(button("Clear filters", self.clear_filters))
-        self.body.addLayout(frow)
-        self.f_project.currentIndexChanged.connect(lambda _: self._filter_changed("project"))
-        self.f_manager.currentIndexChanged.connect(lambda _: self._filter_changed("manager"))
-        self.f_block.currentIndexChanged.connect(lambda _: self._filter_changed("block"))
-        self.f_level.currentIndexChanged.connect(lambda _: self._filter_changed("level"))
-        self.f_status.currentIndexChanged.connect(lambda _: self._filter_changed("status"))
-        self.search.search.connect(lambda _: self._filter_changed("text"))
         self.closed.toggled.connect(lambda _: self.refresh())
+        self.add_action(self.closed)
+        self.add_action(button("Clear filters", self.clear_filters))
 
         self.table = BoardTable()
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -378,6 +397,32 @@ class ProductionBoardPage(Page):
         self.table.stage_clicked.connect(self._cell_clicked)
         self.table.stage_double_clicked.connect(self._cell_double_clicked)
         self.body.addWidget(self.table, 1)
+
+        # filters in the table header, under each column title
+        self.f_project = QComboBox()
+        self.f_block = QComboBox()
+        self.f_level = QComboBox()
+        self.search = SearchBox("Unit...")
+        self.f_stage: dict[str, QComboBox] = {}
+        hdr = self.table.filter_header
+        for col, combo in ((0, self.f_project), (1, self.f_block), (2, self.f_level)):
+            combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+            combo.setMinimumContentsLength(4)
+            hdr.set_editor(col, combo)
+        hdr.set_editor(3, self.search)
+        for stage in STAGES:
+            c = QComboBox()
+            c.addItem("All", None)
+            c.addItem("✔ Yes", True)
+            c.addItem("○ No", False)
+            c.setToolTip(f"Show units with / without a {STAGE_LABELS[stage]} date")
+            c.currentIndexChanged.connect(lambda _: self._filter_changed("stage"))
+            self.f_stage[stage] = c
+            hdr.set_editor(COL_OF[stage], c)
+        self.f_project.currentIndexChanged.connect(lambda _: self._filter_changed("project"))
+        self.f_block.currentIndexChanged.connect(lambda _: self._filter_changed("block"))
+        self.f_level.currentIndexChanged.connect(lambda _: self._filter_changed("level"))
+        self.search.search.connect(lambda _: self._filter_changed("text"))
 
         foot = QHBoxLayout()
         self.count = label("", "Muted")
@@ -472,12 +517,10 @@ class ProductionBoardPage(Page):
     def _fill_filters(self) -> None:
         self._filling = True
         try:
-            keep = {w: w.currentData() for w in (self.f_project, self.f_manager, self.f_block, self.f_level)}
+            keep = {w: w.currentData() for w in (self.f_project, self.f_block, self.f_level)}
             p = self.table.proxy
             self._set_options(self.f_project, "Project", [(f"{c.title}", c.site_id) for c in self.board.cards],
                               keep[self.f_project])
-            managers = sorted({r.manager for r in self.rows if r.manager})
-            self._set_options(self.f_manager, "Manager", [(m, m) for m in managers], keep[self.f_manager])
             # blocks / levels offered: those of the rows the other filters leave
             in_scope = [r for r in self.rows if p.accepts(r, skip="block")]
             blocks = list(dict.fromkeys((r.block or "—") for r in in_scope))
@@ -492,7 +535,7 @@ class ProductionBoardPage(Page):
     def _set_options(combo: QComboBox, name: str, options, keep) -> None:
         combo.blockSignals(True)
         combo.clear()
-        combo.addItem(f"{name}: All", ALL)
+        combo.addItem("All", ALL)
         for text, val in options:
             combo.addItem(text, val)
         i = combo.findData(keep) if keep is not None else -1
@@ -508,19 +551,21 @@ class ProductionBoardPage(Page):
         if self._filling:
             return
         self._apply()
-        if which in ("project", "manager", "block", "level"):
+        if which in ("project", "block", "level"):
             self._fill_filters()
             self._apply()
 
     def _apply(self) -> None:
-        self.table.proxy.set(site_id=self._val(self.f_project), manager=self._val(self.f_manager),
-                             block=self._val(self.f_block), level=self._val(self.f_level),
-                             status=self.f_status.currentData(), text=self.search.text().strip())
-        for combo in (self.f_project, self.f_manager, self.f_block, self.f_level):
-            combo.setStyleSheet("QComboBox { border: 1px solid #2F6FB2; background: #EFF8FF; color: #175CD3; "
-                                "font-weight: 600; }" if self._val(combo) is not None else "")
-        self.f_status.setStyleSheet("QComboBox { border: 1px solid #2F6FB2; background: #EFF8FF; color: #175CD3; "
-                                    "font-weight: 600; }" if self.f_status.currentData() else "")
+        stages = {st: c.currentData() for st, c in self.f_stage.items() if c.currentData() is not None}
+        self.table.proxy.set(site_id=self._val(self.f_project), block=self._val(self.f_block),
+                             level=self._val(self.f_level), stages=stages, text=self.search.text().strip())
+        on = ("QComboBox, QLineEdit { border: 1px solid #2F6FB2; background: #EFF8FF; color: #175CD3; "
+              "font-weight: 600; }")
+        for combo in (self.f_project, self.f_block, self.f_level):
+            combo.setStyleSheet(on if self._val(combo) is not None else "")
+        for combo in self.f_stage.values():
+            combo.setStyleSheet(on if combo.currentData() is not None else "")
+        self.search.setStyleSheet(on if self.search.text().strip() else "")
         shown = self.table.proxy.rowCount()
         self.count.setText(f"{shown} of {len(self.rows)} units shown")
         self._mark_active_card()
@@ -536,7 +581,7 @@ class ProductionBoardPage(Page):
 
     def clear_filters(self) -> None:
         self._filling = True
-        for combo in (self.f_project, self.f_manager, self.f_block, self.f_level, self.f_status):
+        for combo in (self.f_project, self.f_block, self.f_level, *self.f_stage.values()):
             combo.setCurrentIndex(0)
         self.search.clear()
         self._filling = False
