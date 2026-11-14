@@ -89,6 +89,11 @@ class Services:
         return ProjectTreeService(self.ctx)
 
     @cached_property
+    def structure_import(self):
+        from wms.services.structure_import import StructureImportService
+        return StructureImportService(self.ctx)
+
+    @cached_property
     def dispatch(self):
         from wms.services.dispatch import DispatchService
         return DispatchService(self.ctx)
