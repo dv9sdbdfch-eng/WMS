@@ -31,8 +31,9 @@ def book(path, units, materials=None, s_head=S_HEAD, m_head=M_HEAD):
     ws = wb.active
     ws.title = "Structure"
     ws.append(s_head)
-    for r in units:
-        ws.append(list(r))
+    for r in units:  # rows below are written (No, Name, Manager, ...); the sheet has Manager, Name, No
+        r = list(r)
+        ws.append(r[2:3] + r[1:2] + r[0:1] + r[3:] if s_head is S_HEAD else r)
     if materials is not None:
         wm = wb.create_sheet("Materials")
         wm.append(m_head)

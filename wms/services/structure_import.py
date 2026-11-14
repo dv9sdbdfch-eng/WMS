@@ -54,10 +54,10 @@ STRUCTURE_SHEET, MATERIALS_SHEET, HELP_SHEET, EXAMPLE_SHEET = "Structure", "Mate
 
 #: field -> (template header, other header words that mean the same)
 STRUCTURE_FIELDS: dict[str, tuple[str, tuple[str, ...]]] = {
+    "manager": ("Project Manager", ("project manager", "manager", "pm", "менеджер")),
+    "project_name": ("Project Name", ("project name", "name of project", "назва проекту")),
     "project_no": ("Project No *", ("project no", "project number", "project", "job no", "job number", "job",
                                     "номер проекту", "проект", "проєкт")),
-    "project_name": ("Project Name", ("project name", "name of project", "назва проекту")),
-    "manager": ("Project Manager", ("project manager", "manager", "pm", "менеджер")),
     "block": ("Block", ("block", "building", "блок", "корпус")),
     "level": ("Level", ("level", "floor", "storey", "поверх", "рівень")),
     "unit_code": ("Unit Code", ("unit code", "unit no", "unit number", "unit ref", "код юніта", "код")),
@@ -80,11 +80,11 @@ MATERIAL_FIELDS: dict[str, tuple[str, tuple[str, ...]]] = {
 }
 
 STRUCTURE_HELP = (
-    ("Project No *", "The project number, e.g. P-1042. A number already in the WMS adds to that project; a new "
-                     "number creates a new project (status Planned)."),
+    ("Project Manager", "Optional, for a new project. A new name creates the manager."),
     ("Project Name", "Needed only for a NEW project (on at least one of its rows). For a project already in the "
                      "WMS the name is not changed."),
-    ("Project Manager", "Optional, for a new project. A new name creates the manager."),
+    ("Project No *", "The project number, e.g. P-1042. A number already in the WMS adds to that project; a new "
+                     "number creates a new project (status Planned)."),
     ("Block", "Optional (e.g. Block A). Leave Block and Level empty for a unit that sits directly in the project."),
     ("Level", "Optional (e.g. Level 3). If Block is filled, Level must be filled too (units sit on a level)."),
     ("Unit Code", "Optional (e.g. U-01). When filled, the unit is matched by its code; otherwise by its name."),
@@ -108,11 +108,11 @@ RULES = (
     "The Materials sheet is optional. Stock is never changed by this import.",
 )
 EXAMPLE_STRUCTURE = (
-    ("P-1042", "Riverside Apartments", "John Smith", "Block A", "Level 1", "U-01", "Kitchen Type A", 12, ""),
-    ("P-1042", "", "", "Block A", "Level 1", "U-02", "Wardrobe 2-door", 24, ""),
-    ("P-1042", "", "", "Block A", "Level 2", "U-01", "Kitchen Type A", 10, ""),
-    ("P-1042", "", "", "Block B", "Level 1", "U-01", "Kitchen Type B", 8, "Show flat on Level 1"),
-    ("P-1050", "Mill Lane Houses", "Anna Brown", "", "", "", "Kitchen Standard", 30, "No blocks or levels"),
+    ("John Smith", "Riverside Apartments", "P-1042", "Block A", "Level 1", "U-01", "Kitchen Type A", 12, ""),
+    ("John Smith", "Riverside Apartments", "P-1042", "Block A", "Level 1", "U-02", "Wardrobe 2-door", 24, ""),
+    ("John Smith", "Riverside Apartments", "P-1042", "Block A", "Level 2", "U-01", "Kitchen Type A", 10, ""),
+    ("John Smith", "Riverside Apartments", "P-1042", "Block B", "Level 1", "U-01", "Kitchen Type B", 8, "Show flat on Level 1"),
+    ("Anna Brown", "Mill Lane Houses", "P-1050", "", "", "", "Kitchen Standard", 30, "No blocks or levels"),
 )
 EXAMPLE_MATERIALS = (
     ("P-1042", "Block A", "Level 1", "U-01", "Kitchen Type A", "MFC-W980-18", 2.5, "VPK-11", ""),

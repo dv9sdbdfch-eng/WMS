@@ -242,7 +242,7 @@ Remaining не змінюються. Розрахунок — `wms/services/unit
 
 | Аркуш | Що в ньому |
 |---|---|
-| **Structure** | Один рядок — один юніт: Project No *, Project Name, Project Manager, Block, Level, Unit Code, Unit Name *, Quantity *, Notes. |
+| **Structure** | Один рядок — один юніт: Project Manager, Project Name, Project No *, Block, Level, Unit Code, Unit Name *, Quantity *, Notes. |
 | **Materials** (необов'язковий) | Один рядок — один матеріал юніта: Project No *, Block, Level, Unit Code / Unit Name, Material Code *, Qty per Unit *, VPK Code, Notes. |
 | How to fill in | Пояснення кожної колонки і правила. |
 | Example | Заповнений приклад. Цей аркуш ніколи не імпортується. |
