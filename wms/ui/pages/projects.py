@@ -45,6 +45,7 @@ from wms.core.enums import CLOSED_SITE_STATUSES, OPEN_SITE_STATUSES, SiteStatus
 from wms.core.numbers import fmt_qty
 from wms.core.permissions import P
 from wms.services.project_tree import DIRECT, UNASSIGNED, TreeFilter, TreeMatches
+from wms.services.unit_norms import NORM_ALL
 from wms.ui.dialogs.project_tree import (
     DeleteManagerDialog,
     DemandDialog,
@@ -54,6 +55,7 @@ from wms.ui.dialogs.project_tree import (
     MaterialPickerDialog,
     ProjectDialog,
     UnitDialog,
+    ask_norm_change,
     ask_quantity,
     manager_combo,
     notes_edit,
@@ -568,7 +570,10 @@ class ProjectsPage(Page):
 
     def _add_material(self, parent, node) -> QTreeWidgetItem:
         item = self._new_item(parent, f"L:{node.id}", node, self._material_texts(node), False, True)
-        item.setToolTip(C_TOTAL, f"{fmt_qty(node.unit_quantity)} units × {fmt_qty(node.quantity_per_unit)} per unit")
+        item.setToolTip(C_TOTAL, f"{fmt_qty(node.used_by_done)} used by {fmt_qty(node.units_done)} unit(s) made "
+                                 f"(older norm) + {fmt_qty(node.unit_quantity - node.units_done)} × "
+                                 f"{fmt_qty(node.quantity_per_unit)} per unit" if node.keeps_old_norm else
+                        f"{fmt_qty(node.unit_quantity)} units × {fmt_qty(node.quantity_per_unit)} per unit")
         item.setToolTip(C_QTY, "Quantity one unit needs (double-click to change)")
         if not node.product_active:
             self._style(item, muted=True)
@@ -973,7 +978,7 @@ class ProjectsPage(Page):
             field = {C_UNIT: "name", C_CODE: "unit_code", C_QTY: "quantity"}[col]
             ok = run(self, self.svc.save_unit, oid, {field: text})
         else:
-            ok = run(self, self.svc.update_material, oid, {"quantity_per_unit": text})
+            ok = self.save_norm(oid, {"quantity_per_unit": text})
         if ok is None:
             self.reload_item(key, children=False)
             return False
@@ -1437,8 +1442,17 @@ class ProjectsPage(Page):
     def edit_material_quantity(self, node) -> None:
         text = ask_quantity(self, "Quantity per unit", f"How many {node.uom} of {node.code} {node.name} does one unit "
                                                        f"need?", node.quantity_per_unit)
-        if text is not None and run(self, self.svc.update_material, node.id, {"quantity_per_unit": text}):
+        if text is not None and self.save_norm(node.id, {"quantity_per_unit": text}):
             self._refresh_keys(f"L:{node.id}", select=f"L:{node.id}")
+
+    def save_norm(self, line_id: int, data: dict):
+        """Save a material line. A new norm on a unit type with units already made first asks whether
+        to recalculate them or apply it to future units only. Returns the line, or None."""
+        choice = ask_norm_change(self, self.app, line_id, data["quantity_per_unit"]) \
+            if "quantity_per_unit" in data else (NORM_ALL, None)
+        if choice is None:
+            return None
+        return run(self, self.svc.update_material, line_id, data, applies_to=choice[0], reason=choice[1])
 
     def replace_material(self, node) -> None:
         dlg = MaterialPickerDialog(self.app, f"Replace {node.code}", self, multi=False, ask_quantity=False,
@@ -1751,8 +1765,14 @@ class NodePanel(QStackedWidget):
         self.l_qty.set_value(n.quantity_per_unit)
         self.l_vpk.setText(n.vpk_code or "")
         self.l_notes.setPlainText(n.notes or "")
-        self.l_total.setText(f"Total required: {fmt_qty(n.unit_quantity)} units × {fmt_qty(n.quantity_per_unit)} "
-                             f"= <b>{fmt_qty(n.total)} {n.uom}</b>")
+        if n.keeps_old_norm:
+            left = n.unit_quantity - n.units_done
+            self.l_total.setText(f"Total required: {fmt_qty(n.used_by_done)} used by {fmt_qty(n.units_done)} unit(s) "
+                                 f"made (older norm) + {fmt_qty(left)} × {fmt_qty(n.quantity_per_unit)} "
+                                 f"= <b>{fmt_qty(n.total)} {n.uom}</b>")
+        else:
+            self.l_total.setText(f"Total required: {fmt_qty(n.unit_quantity)} units × "
+                                 f"{fmt_qty(n.quantity_per_unit)} = <b>{fmt_qty(n.total)} {n.uom}</b>")
         self._enable(self.l_qty, self.l_vpk, self.l_notes, self.l_save, self.l_replace, self.l_remove,
                      on=self.page.can_edit)
 
@@ -1804,9 +1824,8 @@ class NodePanel(QStackedWidget):
 
     def save_material(self) -> bool:
         n = self.node
-        if run(self, self.svc.update_material, n.id, {"quantity_per_unit": self.l_qty.text(),
-                                                      "vpk_code": self.l_vpk.text(),
-                                                      "notes": self.l_notes.toPlainText()}) is not None:
+        if self.page.save_norm(n.id, {"quantity_per_unit": self.l_qty.text(), "vpk_code": self.l_vpk.text(),
+                                      "notes": self.l_notes.toPlainText()}) is not None:
             self.mark_clean()
             self.page._refresh_keys(f"L:{n.id}", select=f"L:{n.id}")
             return True

@@ -283,6 +283,78 @@ def ask_quantity(parent, title: str, prompt: str, value: Decimal | None) -> str 
     return edit.text()
 
 
+class NormChangeDialog(QDialog):
+    """A norm (quantity per unit) changes on a unit type that already has units made: recalculate
+    them too, or keep them as they were made and use the new norm only for the units still to make."""
+
+    def __init__(self, node, new_qty: Decimal, parent=None):
+        super().__init__(parent)
+        from wms.core.numbers import fmt_qty
+        from wms.services.project_demand import line_total
+        self.setWindowTitle("Change norm")
+        self.setMinimumWidth(520)
+        self.node, self.new_qty = node, new_qty
+        done, units, uom = node.units_done, node.unit_quantity, node.uom
+        left = max(units - done, Decimal(0))
+        used = node.used_by_done if node.used_by_done is not None else line_total(done, node.quantity_per_unit)
+        self.total_all = line_total(units, new_qty)
+        self.total_future = used + line_total(left, new_qty)
+        lay = QVBoxLayout(self)
+        lay.addWidget(label(f"<b>{node.code}</b> {node.name}: {fmt_qty(node.quantity_per_unit)} → "
+                            f"<b>{fmt_qty(new_qty)}</b> {uom} per unit.<br>"
+                            f"<b>{fmt_qty(done)}</b> of {fmt_qty(units)} unit(s) are already made.", wrap=True))
+        lay.addWidget(label("<b>What should the new norm apply to?</b>"))
+        self.r_all = QRadioButton(f"All units - recalculate the {fmt_qty(done)} already made too "
+                                  f"(a correction of a wrong norm)")
+        self.r_future = QRadioButton(f"Future units only - the {fmt_qty(done)} made keep the norm they were "
+                                     f"made with")
+        self.group = QButtonGroup(self)
+        for r in (self.r_all, self.r_future):
+            self.group.addButton(r)
+            lay.addWidget(r)
+        self.r_future.setChecked(True)
+        self.effect = label("", wrap=True)
+        lay.addWidget(self.effect)
+        form = QFormLayout()
+        self.reason = QLineEdit()
+        self.reason.setPlaceholderText("e.g. new drawer fronts from Level 3")
+        form.addRow("Reason", self.reason)
+        lay.addLayout(form)
+        lay.addLayout(h(None, button("Cancel", self.reject), button("Change norm", self.accept, primary=True)))
+        self.group.buttonToggled.connect(lambda *_: self._show_effect())
+        self._show_effect()
+
+    @property
+    def applies_to(self) -> str:
+        from wms.services.unit_norms import NORM_ALL, NORM_FUTURE
+        return NORM_ALL if self.r_all.isChecked() else NORM_FUTURE
+
+    def _show_effect(self) -> None:
+        from wms.core.numbers import fmt_qty
+        total = self.total_all if self.r_all.isChecked() else self.total_future
+        self.effect.setText(f"Total required for this line becomes <b>{fmt_qty(total)} {self.node.uom}</b> "
+                            f"(now {fmt_qty(self.node.total)}). Required and the reports follow.")
+
+
+def ask_norm_change(parent, app, line_id: int, new_text) -> tuple[str, str | None] | None:
+    """Ask, when it matters, how a new norm applies. Returns (applies_to, reason), or None when the
+    user cancelled. With no units made (or the norm not changing) nothing is asked: ALL."""
+    from decimal import InvalidOperation
+
+    from wms.services.unit_norms import NORM_ALL
+    try:
+        new_qty = Decimal(str(new_text).strip().replace(",", ""))
+    except (InvalidOperation, ValueError):
+        return NORM_ALL, None  # the service explains what is wrong with the number
+    node = run(parent, app.services.project_tree.material, line_id)
+    if node is None or not node.units_done or new_qty == node.quantity_per_unit or new_qty <= 0:
+        return NORM_ALL, None
+    dlg = NormChangeDialog(node, new_qty, parent)
+    if dlg.exec() != QDialog.DialogCode.Accepted:
+        return None
+    return dlg.applies_to, dlg.reason.text().strip() or None
+
+
 class DeleteManagerDialog(QDialog):
     """Deleting a manager never deletes projects: leave them unassigned or hand them to someone."""
 

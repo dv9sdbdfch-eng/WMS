@@ -266,6 +266,8 @@ class UnitProgressService(BaseService):
                              new={"piece": piece_no, "stage": stage, "date": when.isoformat()})
                 out.append(row)
             _flush(s)
+            if stage == STAGE_DONE and out:  # units made may keep an older norm: Required follows
+                _sync_required(s, self.ctx, {r.unit_id for r in out})
             return [_mark(r) for r in out]
 
     def change_date(self, mark_id: int, on: date, note: str | None = None) -> Mark:
@@ -315,6 +317,9 @@ class UnitProgressService(BaseService):
                 raise ValidationError(f"{_piece(u, row.piece_no)} is already marked {STAGE_LABELS[nxt]}: "
                                       f"cancel that mark first.")
             self._cancel(s, row, reason)
+            if row.stage == STAGE_DONE:
+                s.flush()
+                _sync_required(s, self.ctx, {row.unit_id})
             audit.record(s, self.ctx, "UNIT_STAGE_CANCELLED", EntityType.PROJECT_UNIT.value, u.id,
                          f"{site.project_number} / {u.name}",
                          f"{_piece(u, row.piece_no)}: {STAGE_LABELS[row.stage]} of {row.completed_on:%d/%m/%Y} "
@@ -442,6 +447,11 @@ def _piece(u: ProjectUnit | None, piece_no: int) -> str:
 def _check_stage(stage: str) -> None:
     if stage not in STAGES:
         raise ValidationError("Choose Done, Dispatched or On site.", "stage")
+
+
+def _sync_required(s: Session, ctx, unit_ids: set[int]) -> None:
+    from wms.services.project_demand import sync_project_lists
+    sync_project_lists(s, ctx, set(s.scalars(select(ProjectUnit.site_id).where(ProjectUnit.id.in_(list(unit_ids))))))
 
 
 def _flush(s: Session) -> None:

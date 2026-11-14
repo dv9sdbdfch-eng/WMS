@@ -225,6 +225,7 @@ class UnitNormService(BaseService):
                                  user_name_snapshot=user.full_name if user else None)
             s.add(row)
             s.flush()
+            _sync(s, self.ctx, site.id)
             audit.record(s, self.ctx, "UNIT_COMPLETION_RECORDED", EntityType.PROJECT_UNIT.value, unit_id,
                          f"{site.project_number} / {u.name}", f"{_fmt(qty)} unit(s) done on {when:%d/%m/%Y}",
                          new={"quantity": str(qty), "completed_on": when.isoformat()})
@@ -244,6 +245,8 @@ class UnitNormService(BaseService):
             row.cancelled_at = utcnow()
             row.cancelled_by_id = self.ctx.user.id if self.ctx.user else None
             row.cancel_reason = reason
+            s.flush()
+            _sync(s, self.ctx, site.id)
             audit.record(s, self.ctx, "UNIT_COMPLETION_CANCELLED", EntityType.PROJECT_UNIT.value, u.id,
                          f"{site.project_number} / {u.name}",
                          f"{_fmt(row.quantity)} unit(s) of {row.completed_on:%d/%m/%Y} cancelled: {reason}",
@@ -317,6 +320,12 @@ class UnitNormService(BaseService):
         if u is None:
             raise NotFoundError("Unit not found.")
         return u, ProjectTreeService._editable_site(s, u.site_id)
+
+
+def _sync(s: Session, ctx, site_id: int) -> None:
+    """Units made change Required when they keep an older norm: let the project's list follow."""
+    from wms.services.project_demand import sync_project_lists
+    sync_project_lists(s, ctx, [site_id])
 
 
 def _completion_row(r: UnitCompletion) -> CompletionRow:
