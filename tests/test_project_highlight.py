@@ -91,12 +91,10 @@ def test_4_selecting_any_cell_highlights_the_project(ui, tribeca, tower):  # noq
     _surrey(app.services, tribeca)
     page = _open_page(win)
     tri = tribeca.project.id
-    _open(page, f"M:{tribeca.john.id}", f"P:{tri}", f"B:{tower.block.id}", f"V:{tower.level.id}", f"U:{tower.k10.id}")
+    _open(page, f"M:{tribeca.john.id}", f"P:{tri}", f"B:{tower.block.id}", f"V:{tower.level.id}")
     for key in (f"P:{tri}", f"B:{tower.block.id}", f"V:{tower.level.id}", f"U:{tower.k10.id}"):
         page.select(key)
         assert page.active_project == tri, key
-    page.tree.setCurrentItem(page.items[f"U:{tower.k10.id}"].child(0))  # a material
-    assert page.active_project == tri
     green = _green_keys(page)
     assert {f"P:{tri}", f"B:{tower.block.id}", f"V:{tower.level.id}", f"U:{tower.k10.id}",
             f"U:{tower.b10.id}", f"U:{tribeca.kitchen.id}", f"U:{tribeca.wardrobe.id}"} <= green
@@ -143,9 +141,9 @@ def test_7_expand_and_collapse_keep_it_right(ui, tribeca, tower):  # noqa: F811
     page.items[f"B:{tower.block.id}"].setExpanded(False)  # scenario A
     assert page.active_project == tri
     assert f"U:{tower.k10.id}" not in _green_keys(page) and f"B:{tower.block.id}" in _green_keys(page)
-    page.items[f"U:{tribeca.kitchen.id}"].setExpanded(True)  # scenario B: new rows are green too
-    assert any(k.startswith("L:") for k in _green_keys(page))
-    assert _pixel(page, page.items[f"U:{tribeca.kitchen.id}"].child(0)) == ACTIVE_PROJECT
+    page.items[f"B:{tower.block.id}"].setExpanded(True)  # scenario B: rows shown again are green too
+    assert {f"V:{tower.level.id}", f"U:{tower.k10.id}"} <= _green_keys(page)
+    assert _pixel(page, page.items[f"V:{tower.level.id}"]) == ACTIVE_PROJECT
     page.tree.header().sectionClicked.emit(C_MGR)  # scenario C
     assert page.active_project == tri and page.project_rows() == []
     page.tree.header().sectionClicked.emit(C_PRJ)

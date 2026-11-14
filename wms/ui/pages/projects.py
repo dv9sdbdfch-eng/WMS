@@ -63,12 +63,12 @@ from wms.ui.dialogs.project_tree import (
 from wms.ui.pages.base import Page
 from wms.ui.widgets.common import QTY, Col, DataTable, DecimalEdit, SearchBox, button, confirm, h, info, label, run
 
-#: one column per level of the hierarchy (v1.17), then the shared value columns
-C_MGR, C_PRJ, C_BLK, C_LVL, C_UNIT, C_MAT, C_CODE, C_QTY, C_TOTAL, C_INFO, C_MENU = range(11)
-COLUMNS = ["Project Manager", "Project", "Block", "Level", "Unit", "Material", "Code / Ref", "Qty",
-           "Total required", "Details", ""]
+#: one column per level of the hierarchy (v1.17), then Details. Since v1.29 the materials of a unit
+#: are not rows of the tree: double-clicking a unit opens its Finish Schedule window.
+C_MGR, C_PRJ, C_BLK, C_LVL, C_UNIT, C_INFO, C_MENU = range(7)
+COLUMNS = ["Project Manager", "Project", "Block", "Level", "Unit", "Details", ""]
 #: the column a row's name sits in, by row kind - a project is never shown in the manager column
-NAME_COL = {"M": C_MGR, "N": C_MGR, "P": C_PRJ, "B": C_BLK, "V": C_LVL, "U": C_UNIT, "L": C_MAT}
+NAME_COL = {"M": C_MGR, "N": C_MGR, "P": C_PRJ, "B": C_BLK, "V": C_LVL, "U": C_UNIT}
 ARROW = 12  # size of the expand / collapse arrow drawn in front of a name
 KEY, NODE, FULL, LOADED, PROJECT = (Qt.ItemDataRole.UserRole + i for i in range(5))
 #: background of every visible row of the project the selected row belongs to (v1.18)
@@ -85,8 +85,8 @@ _SETTINGS_KEY = "project_tree/expanded"
 #: the two clickable headers (v1.17): expansion levels, never sorting or filtering
 MODE_MANAGERS, MODE_PROJECTS = "managers", "projects"
 HEADER_MODES = {C_MGR: MODE_MANAGERS, C_PRJ: MODE_PROJECTS}
-#: rows that hold other rows: manager, unassigned, project, block, level (V), unit
-BRANCHES = ("M", "N", "P", "B", "V", "U")
+#: rows that hold other rows: manager, unassigned, project, block, level (V); a unit is the last row
+BRANCHES = ("M", "N", "P", "B", "V")
 
 
 def _n(count: int, word: str) -> str:
@@ -201,10 +201,10 @@ def id_of(key: str) -> int | None:
 
 class ProjectsPage(Page):
     title = "Projects"
-    subtitle = ("Manager → Project → Block → Level → Unit → Materials (Block and Level are optional). Click the "
-                "Project Manager or Project header to show just managers or all projects. Required "
-                "follows the units by itself; quantities typed by hand on top stay. Double-click a name or "
-                "quantity to change it; right-click or ⋯ for actions.")
+    subtitle = ("Manager → Project → Block → Level → Unit (Block and Level are optional). Click the Project "
+                "Manager or Project header to show just managers or all projects. Double-click a unit for its "
+                "Finish Schedule (the materials to make it); double-click another name to change it. Required "
+                "follows the units by itself. Right-click or ⋯ for actions.")
 
     def __init__(self, app, parent=None):
         super().__init__(app, parent)
@@ -285,8 +285,8 @@ class ProjectsPage(Page):
         hdr = self.tree.header()
         hdr.setStretchLastSection(False)
         hdr.setMinimumSectionSize(40)
-        for col, width in ((C_MGR, 150), (C_PRJ, 170), (C_BLK, 100), (C_LVL, 100), (C_UNIT, 140), (C_MAT, 210),
-                           (C_CODE, 95), (C_QTY, 76), (C_TOTAL, 110), (C_INFO, 180), (C_MENU, 30)):
+        for col, width in ((C_MGR, 125), (C_PRJ, 150), (C_BLK, 95), (C_LVL, 95), (C_UNIT, 130), (C_INFO, 230),
+                           (C_MENU, 30)):
             self.tree.setColumnWidth(col, width)
         hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)  # drag a header edge to resize
         hdr.setSectionResizeMode(C_MENU, QHeaderView.ResizeMode.Fixed)
@@ -297,9 +297,10 @@ class ProjectsPage(Page):
         head = self.tree.headerItem()
         head.setToolTip(C_MGR, "Click: show only the project managers (closes every row)")
         head.setToolTip(C_PRJ, "Click: open every manager to show all projects (blocks, levels, units and "
-                               "materials stay closed)")
-        for col in (C_BLK, C_LVL, C_UNIT, C_MAT):
+                               "units stay closed)")
+        for col in (C_BLK, C_LVL):
             head.setToolTip(col, f"{COLUMNS[col]} names. Open a row with the arrow in front of its name.")
+        head.setToolTip(C_UNIT, "Unit names. Double-click a unit for its Finish Schedule (materials, stock, shortage).")
         self.tree.viewport().installEventFilter(_ArrowClicks(self))
         self.tree.itemExpanded.connect(self._expanded)
         self.tree.itemCollapsed.connect(self._collapsed)
@@ -421,8 +422,6 @@ class ProjectsPage(Page):
         # the project this row belongs to (its own id for a project row; None for managers)
         k = kind_of(key)
         item.setData(0, PROJECT, id_of(key) if k == "P" else (None if k in ("M", "N") else parent.data(0, PROJECT)))
-        item.setTextAlignment(C_QTY, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        item.setTextAlignment(C_TOTAL, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         item.setTextAlignment(C_MENU, Qt.AlignmentFlag.AlignCenter)
         item.setToolTip(C_MENU, "Actions")
         item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
@@ -442,12 +441,12 @@ class ProjectsPage(Page):
         return item
 
     def _set_texts(self, item: QTreeWidgetItem, texts: list[str]) -> None:
-        """``texts`` = [name, code, qty, total, details]; the name goes into the row's own column."""
+        """``texts`` = [name, details]; the name goes into the row's own column."""
         nc = name_col(item.data(0, KEY))
         item.setText(nc, texts[0])
         item.setToolTip(nc, texts[0])  # long names stay readable
-        for col, t in zip((C_CODE, C_QTY, C_TOTAL, C_INFO), texts[1:], strict=False):
-            item.setText(col, t)
+        item.setText(C_INFO, texts[1])
+        item.setToolTip(C_INFO, texts[1])
 
     def has_arrow(self, item: QTreeWidgetItem) -> bool:
         return kind_of(item.data(0, KEY)) in BRANCHES and (
@@ -455,8 +454,8 @@ class ProjectsPage(Page):
             or item.childIndicatorPolicy() == QTreeWidgetItem.ChildIndicatorPolicy.ShowIndicator)
 
     def _update_arrow(self, item: QTreeWidgetItem) -> None:
-        if kind_of(item.data(0, KEY)) == "L":
-            return  # materials are the last level
+        if kind_of(item.data(0, KEY)) == "U":
+            return  # units are the last level: their materials are in the Finish Schedule
         state = item.isExpanded() if self.has_arrow(item) else None
         was = self._loading
         self._loading = True
@@ -473,7 +472,7 @@ class ProjectsPage(Page):
             return False
         k, i = kind_of(key), id_of(key)
         return ((k == "M" and i in m.managers) or (k == "P" and i in m.projects) or (k == "B" and i in m.blocks)
-                or (k == "V" and i in m.levels) or (k == "U" and i in m.units) or (k == "L" and i in m.materials))
+                or (k == "V" and i in m.levels) or (k == "U" and (i in m.units or i in m.unit_paths)))
 
     def _on_match_path(self, key: str) -> bool:
         m = self.matches
@@ -482,7 +481,7 @@ class ProjectsPage(Page):
         k, i = kind_of(key), id_of(key)
         return ((k == "M" and i in m.manager_paths) or (k == "N" and m.unassigned_path)
                 or (k == "P" and i in m.project_paths) or (k == "B" and i in m.block_paths)
-                or (k == "V" and i in m.level_paths) or (k == "U" and i in m.unit_paths))
+                or (k == "V" and i in m.level_paths))
 
     def _style(self, item: QTreeWidgetItem, bold: bool = False, muted: bool = False) -> None:
         nc = name_col(item.data(0, KEY))
@@ -494,7 +493,7 @@ class ProjectsPage(Page):
 
     def _manager_texts(self, node) -> list[str]:
         info_ = f"{node.projects} project{'' if node.projects == 1 else 's'}"
-        return [node.name, "", "", "", info_ + ("" if node.is_active else "  ·  inactive")]
+        return [node.name, info_ + ("" if node.is_active else "  ·  inactive")]
 
     def _add_manager(self, parent, node) -> QTreeWidgetItem:
         full = self.matches is None or node.id in self.matches.managers
@@ -506,7 +505,7 @@ class ProjectsPage(Page):
 
     def _add_unassigned(self, n: int) -> QTreeWidgetItem:
         item = self._new_item(self.tree.invisibleRootItem(), UNASSIGNED_KEY, n,
-                              ["Unassigned projects", "", "", "", f"{n} project{'' if n == 1 else 's'} without a manager"],
+                              ["Unassigned projects", f"{n} project{'' if n == 1 else 's'} without a manager"],
                               n > 0, self.matches is None)
         f = item.font(C_MGR)
         f.setItalic(True)
@@ -514,11 +513,11 @@ class ProjectsPage(Page):
         return item
 
     def _project_texts(self, node) -> list[str]:
-        parts = [node.status_label]
+        parts = [node.code, node.status_label]
         if node.blocks:
             parts.append(_n(node.blocks, "block"))
         parts.append(_n(node.units, "unit"))
-        return [node.name, node.code, "", "", "  ·  ".join(parts)]
+        return [node.name, "  ·  ".join(p for p in parts if p)]
 
     def _add_project(self, parent, node, full: bool) -> QTreeWidgetItem:
         item = self._new_item(parent, f"P:{node.id}", node, self._project_texts(node), node.has_children, full)
@@ -532,7 +531,7 @@ class ProjectsPage(Page):
         return item
 
     def _block_texts(self, node) -> list[str]:
-        return [node.name, node.code or "", "", "", f"{_n(node.levels, 'level')}  ·  {_n(node.units, 'unit')}"]
+        return [node.name, "  ·  ".join(p for p in (node.code, _n(node.levels, "level"), _n(node.units, "unit")) if p)]
 
     def _add_block(self, parent, node, full: bool) -> QTreeWidgetItem:
         item = self._new_item(parent, f"B:{node.id}", node, self._block_texts(node), node.levels > 0, full)
@@ -544,7 +543,7 @@ class ProjectsPage(Page):
         return item
 
     def _level_texts(self, node) -> list[str]:
-        return [node.name, node.code or "", "", "", _n(node.units, "unit")]
+        return [node.name, "  ·  ".join(p for p in (node.code, _n(node.units, "unit")) if p)]
 
     def _add_level(self, parent, node, full: bool) -> QTreeWidgetItem:
         item = self._new_item(parent, f"V:{node.id}", node, self._level_texts(node), node.units > 0, full)
@@ -554,36 +553,19 @@ class ProjectsPage(Page):
 
     def _unit_texts(self, node) -> list[str]:
         n = node.materials
-        return [node.name, node.code or "", fmt_qty(node.quantity), "", f"{n} material{'' if n == 1 else 's'}"]
+        return [node.name, "  ·  ".join(p for p in (node.code, f"× {fmt_qty(node.quantity)}",
+                                                     f"{n} material{'' if n == 1 else 's'}") if p)]
 
     def _add_unit(self, parent, node, full: bool) -> QTreeWidgetItem:
-        item = self._new_item(parent, f"U:{node.id}", node, self._unit_texts(node), node.materials > 0, full)
-        item.setToolTip(C_QTY, "How many of this unit the project needs (double-click to change)")
-        if node.notes:
-            item.setToolTip(C_UNIT, f"{node.name}\n{node.notes}")
-        return item
-
-    def _material_texts(self, node) -> list[str]:
-        details = [x for x in (node.brand, f"VPK {node.vpk_code}" if node.vpk_code else None, node.notes) if x]
-        return [node.name, node.code, f"{fmt_qty(node.quantity_per_unit)} / unit", f"{fmt_qty(node.total)} {node.uom}",
-                "  ·  ".join(details)]
-
-    def _add_material(self, parent, node) -> QTreeWidgetItem:
-        item = self._new_item(parent, f"L:{node.id}", node, self._material_texts(node), False, True)
-        item.setToolTip(C_TOTAL, f"{fmt_qty(node.used_by_done)} used by {fmt_qty(node.units_done)} unit(s) made "
-                                 f"(older norm) + {fmt_qty(node.unit_quantity - node.units_done)} × "
-                                 f"{fmt_qty(node.quantity_per_unit)} per unit" if node.keeps_old_norm else
-                        f"{fmt_qty(node.unit_quantity)} units × {fmt_qty(node.quantity_per_unit)} per unit")
-        item.setToolTip(C_QTY, "Quantity one unit needs (double-click to change)")
-        if not node.product_active:
-            self._style(item, muted=True)
-            item.setToolTip(C_MAT, "This material has been removed from active use")
+        item = self._new_item(parent, f"U:{node.id}", node, self._unit_texts(node), False, full)
+        item.setToolTip(C_UNIT, f"{node.name}\n{node.notes}\n\nDouble-click: Finish Schedule" if node.notes
+                        else f"{node.name}\nDouble-click: Finish Schedule")
         return item
 
     # lazy branches ------------------------------------------------------------------------------
     def _expanded(self, item: QTreeWidgetItem) -> None:
         key = item.data(0, KEY)
-        if key is None:
+        if key is None or kind_of(key) not in BRANCHES:
             return
         if key not in self.open_keys:
             self.open_keys.add(key)
@@ -620,10 +602,6 @@ class ProjectsPage(Page):
                 self._add_level(item, node, full or (self.matches is not None and node.id in self.matches.levels))
         elif k == "V":
             self._load_units(item, None, oid, m, full)
-        elif k == "U":
-            ids = None if m is None else m.materials
-            for node in run(self, self.svc.materials, oid, ids) or []:
-                self._add_material(item, node)
         if item.childCount() == 0:
             item.setChildIndicatorPolicy(QTreeWidgetItem.ChildIndicatorPolicy.DontShowIndicatorWhenChildless)
         self._update_arrow(item)
@@ -665,12 +643,9 @@ class ProjectsPage(Page):
         elif k == "V":
             node = self.svc.level(oid)
             texts, has = self._level_texts(node), node.units > 0
-        elif k == "U":
-            node = self.svc.unit(oid)
-            texts, has = self._unit_texts(node), node.materials > 0
         else:
-            node = self.svc.material(oid)
-            texts, has = self._material_texts(node), False
+            node = self.svc.unit(oid)
+            texts, has = self._unit_texts(node), False
         if node is None:
             return None
         self._loading = True
@@ -729,7 +704,7 @@ class ProjectsPage(Page):
         self._changed()
 
     def expand_all(self) -> None:
-        """Open every manager, project, block, level and unit (materials are the last level)."""
+        """Open every manager, project, block and level (units are the last level)."""
         def walk(item):
             if kind_of(item.data(0, KEY)) in BRANCHES:
                 item.setExpanded(True)
@@ -925,27 +900,18 @@ class ProjectsPage(Page):
     # ---- inline editing ------------------------------------------------------------------------
     def _editable(self, key: str, col: int) -> bool:
         k = kind_of(key)
-        return self.can_edit and ((k in ("M", "P", "B", "V", "U") and col == name_col(key))
-                                  or (k in ("B", "V", "U") and col == C_CODE) or (k == "U" and col == C_QTY)
-                                  or (k == "L" and col == C_QTY))
+        return self.can_edit and k in ("M", "P", "B", "V", "U") and col == name_col(key)
 
     def _double_clicked(self, item: QTreeWidgetItem, col: int) -> None:
         key = item.data(0, KEY)
         if key is None or col == C_MENU:
             return
-        if self._editable(key, col):
+        if kind_of(key) == "U":
+            self.open_schedule(item.data(0, NODE))  # the unit card: its materials (rename with F2)
+        elif self._editable(key, col):
             self.edit_inline(item, col)
-        elif kind_of(key) == "L":
-            self.app.open_entity("PRODUCT", item.data(0, NODE).product_id, self)
 
     def edit_inline(self, item: QTreeWidgetItem, col: int) -> None:
-        node = item.data(0, NODE)
-        self._loading = True
-        if kind_of(item.data(0, KEY)) == "L":
-            item.setText(col, format(node.quantity_per_unit.normalize(), "f"))
-        elif col == C_QTY:
-            item.setText(col, format(node.quantity.normalize(), "f"))
-        self._loading = False
         self._editing = (item, col)
         self.tree.editItem(item, col)
 
@@ -972,18 +938,13 @@ class ProjectsPage(Page):
         elif k == "P":
             ok = run(self, self.svc.save_project, oid, {"name": text})
         elif k in ("B", "V"):
-            field = "name" if col == name_col(key) else "code"
-            ok = run(self, self.svc.save_block if k == "B" else self.svc.save_level, oid, {field: text})
-        elif k == "U":
-            field = {C_UNIT: "name", C_CODE: "unit_code", C_QTY: "quantity"}[col]
-            ok = run(self, self.svc.save_unit, oid, {field: text})
+            ok = run(self, self.svc.save_block if k == "B" else self.svc.save_level, oid, {"name": text})
         else:
-            ok = self.save_norm(oid, {"quantity_per_unit": text})
+            ok = run(self, self.svc.save_unit, oid, {"name": text})
         if ok is None:
             self.reload_item(key, children=False)
             return False
-        # quantities change the totals of the materials below / the manager's text on projects
-        self.reload_item(key, children=k in ("U",))
+        self.reload_item(key, children=False)
         self._changed()
         return True
 
@@ -1067,6 +1028,7 @@ class ProjectsPage(Page):
                 m.addSeparator()
                 m.addAction("Delete...", lambda: self.delete_group(key, node))
         elif k == "U":
+            m.addAction("Finish Schedule...", lambda: self.open_schedule(node))
             if e:
                 m.addAction("Add Material...", lambda: self.add_material(node))
                 m.addAction("Edit...", lambda: self.edit_unit(node))
@@ -1078,16 +1040,6 @@ class ProjectsPage(Page):
                 m.addAction("Move to...", lambda: self.move_unit_to_project(node))
                 m.addSeparator()
                 m.addAction("Delete...", lambda: self.delete_unit(node))
-        elif k == "L":
-            if e:
-                m.addAction("Edit Quantity...", lambda: self.edit_material_quantity(node))
-                m.addAction("Replace...", lambda: self.replace_material(node))
-                m.addAction("Move Up", lambda: self.move(key, -1))
-                m.addAction("Move Down", lambda: self.move(key, 1))
-            m.addAction("Open Material", lambda: self.app.open_entity("PRODUCT", node.product_id, self))
-            if e:
-                m.addSeparator()
-                m.addAction("Remove", lambda: self.remove_material(node))
         if k in BRANCHES:
             m.addSeparator()
             # by key, not by the row object: the tree may have been rebuilt while the menu was open
@@ -1107,7 +1059,7 @@ class ProjectsPage(Page):
         item.setExpanded(True)
         for i in range(item.childCount()):
             child = item.child(i)
-            if kind_of(child.data(0, KEY)) in ("P", "B", "V", "U"):
+            if kind_of(child.data(0, KEY)) in ("P", "B", "V"):
                 self._expand_branch(child)
 
     def _collapse_branch(self, item: QTreeWidgetItem | None) -> None:
@@ -1120,7 +1072,7 @@ class ProjectsPage(Page):
     # ---- keyboard ------------------------------------------------------------------------------
     def move_selected(self, delta: int) -> None:
         key = self.current_key()
-        if key and self.can_edit and kind_of(key) in ("M", "B", "V", "U", "L"):
+        if key and self.can_edit and kind_of(key) in ("M", "B", "V", "U"):
             self.move(key, delta)
 
     def delete_selected(self) -> None:
@@ -1131,8 +1083,7 @@ class ProjectsPage(Page):
         if k in ("B", "V"):
             self.delete_group(key, node)
             return
-        {"M": self.delete_manager, "P": self.delete_project, "U": self.delete_unit,
-         "L": self.remove_material}.get(k, lambda _n: None)(node)
+        {"M": self.delete_manager, "P": self.delete_project, "U": self.delete_unit}.get(k, lambda _n: None)(node)
 
     def rename_selected(self) -> None:
         item = self.tree.currentItem()
@@ -1315,7 +1266,7 @@ class ProjectsPage(Page):
     def move(self, key: str, delta: int) -> None:
         k, oid = kind_of(key), id_of(key)
         fn = {"M": self.svc.move_manager, "B": self.svc.move_block, "V": self.svc.move_level,
-              "U": self.svc.move_unit, "L": self.svc.move_material}[k]
+              "U": self.svc.move_unit}[k]
         if run(self, fn, oid, delta) is None and k != "M":
             return
         if k == "M":
@@ -1425,51 +1376,77 @@ class ProjectsPage(Page):
         self._refresh_keys(parent, select=parent)
 
     # ---- actions: materials --------------------------------------------------------------------
-    def add_material(self, node) -> None:
-        dlg = MaterialPickerDialog(self.app, f"Add material to {node.label}", self,
+    # ---- Finish Schedule: a unit's materials (v1.29) --------------------------------------------
+    def open_schedule(self, node) -> None:
+        """The unit card: materials, norm, project stock, units covered, shortage."""
+        from wms.ui.dialogs.finish_schedule import FinishScheduleDialog
+        FinishScheduleDialog(self, node.id).exec()
+
+    def _unit_changed(self, unit_id: int) -> None:
+        """A unit's materials changed: its row (material count) and the panel follow."""
+        self._refresh_keys(f"U:{unit_id}")
+
+    def add_material(self, node, parent=None) -> list[int] | None:
+        """Add materials to a unit (``node`` is the unit). Returns the new line ids."""
+        dlg = MaterialPickerDialog(self.app, f"Add material to {node.label}", parent or self,
                                    unit_text=f"Pick one or more existing materials (Ctrl+click for several), then the "
                                              f"quantity one {node.label} needs. Total = {fmt_qty(node.quantity)} × "
                                              f"quantity per unit.")
         if dlg.exec() != QDialog.DialogCode.Accepted or not dlg.chosen:
-            return
-        ids = run(self, self.svc.add_materials, node.id, [(pid, dlg.qty.text()) for pid in dlg.chosen],
+            return None
+        ids = run(parent or self, self.svc.add_materials, node.id, [(pid, dlg.qty.text()) for pid in dlg.chosen],
                   dlg.vpk.text(), dlg.notes.text())
         if ids:
-            self.open_keys.add(f"U:{node.id}")
-            self._refresh_keys(f"U:{node.id}")
-            self._expand_to(f"U:{node.id}", f"L:{ids[-1]}")
+            self._unit_changed(node.id)
+        return ids
 
-    def edit_material_quantity(self, node) -> None:
-        text = ask_quantity(self, "Quantity per unit", f"How many {node.uom} of {node.code} {node.name} does one unit "
-                                                       f"need?", node.quantity_per_unit)
-        if text is not None and self.save_norm(node.id, {"quantity_per_unit": text}):
-            self._refresh_keys(f"L:{node.id}", select=f"L:{node.id}")
+    def edit_material_quantity(self, node, parent=None) -> bool:
+        """``node`` is a material line of a unit (MaterialNode)."""
+        parent = parent or self
+        text = ask_quantity(parent, "Quantity per unit", f"How many {node.uom} of {node.code} {node.name} does one "
+                                                         f"unit need?", node.quantity_per_unit)
+        if text is not None and self.save_norm(node.id, {"quantity_per_unit": text}, parent):
+            self._unit_changed(node.unit_id)
+            return True
+        return False
 
-    def save_norm(self, line_id: int, data: dict):
+    def save_norm(self, line_id: int, data: dict, parent=None):
         """Save a material line. A new norm on a unit type with units already made first asks whether
         to recalculate them or apply it to future units only. Returns the line, or None."""
-        choice = ask_norm_change(self, self.app, line_id, data["quantity_per_unit"]) \
+        parent = parent or self
+        choice = ask_norm_change(parent, self.app, line_id, data["quantity_per_unit"]) \
             if "quantity_per_unit" in data else (NORM_ALL, None)
         if choice is None:
             return None
-        return run(self, self.svc.update_material, line_id, data, applies_to=choice[0], reason=choice[1])
+        return run(parent, self.svc.update_material, line_id, data, applies_to=choice[0], reason=choice[1])
 
-    def replace_material(self, node) -> None:
-        dlg = MaterialPickerDialog(self.app, f"Replace {node.code}", self, multi=False, ask_quantity=False,
+    def replace_material(self, node, parent=None) -> bool:
+        parent = parent or self
+        dlg = MaterialPickerDialog(self.app, f"Replace {node.code}", parent, multi=False, ask_quantity=False,
                                    unit_text=f"Choose the material that replaces {node.code} {node.name}. The quantity "
                                              f"per unit ({fmt_qty(node.quantity_per_unit)}) and notes stay.")
         if dlg.exec() != QDialog.DialogCode.Accepted or not dlg.chosen:
-            return
-        if run(self, self.svc.replace_material, node.id, dlg.chosen[0]) is not None:
-            self._refresh_keys(f"L:{node.id}", select=f"L:{node.id}")
+            return False
+        if run(parent, self.svc.replace_material, node.id, dlg.chosen[0]) is not None:
+            self._unit_changed(node.unit_id)
+            return True
+        return False
 
-    def remove_material(self, node) -> None:
-        if not confirm(self, "Remove material", f"Remove {node.code} {node.name} from this unit?\n\nThe material "
-                                                f"itself and its stock are not changed.", yes="Remove", danger=True):
-            return
-        unit_key = self._parent_key(f"L:{node.id}") or f"U:{node.unit_id}"
-        if run(self, self.svc.remove_materials, [node.id]) is not None:
-            self._refresh_keys(unit_key, select=unit_key)
+    def remove_material(self, node, parent=None) -> bool:
+        parent = parent or self
+        if not confirm(parent, "Remove material", f"Remove {node.code} {node.name} from this unit?\n\nThe material "
+                                                  f"itself and its stock are not changed.", yes="Remove", danger=True):
+            return False
+        if run(parent, self.svc.remove_materials, [node.id]) is not None:
+            self._unit_changed(node.unit_id)
+            return True
+        return False
+
+    def move_material(self, node, delta: int, parent=None) -> bool:
+        if run(parent or self, lambda: self.svc.move_material(node.id, delta) or True):
+            self._unit_changed(node.unit_id)
+            return True
+        return False
 
     def show_demand(self) -> None:
         DemandDialog(self.app, self).exec()
@@ -1496,12 +1473,12 @@ class NodePanel(QStackedWidget):
         self.node = None
         self.shown_key: str | None = None
         self._snapshot: tuple | None = None  # field values as last shown / saved
-        self.empty = label("Select a manager, project, block, level, unit or material to see and change its details here.\n\n"
+        self.empty = label("Select a manager, project, block, level or unit to see and change its details here.\n\n"
                            "Right-click a row (or click ⋯) for its actions.", "Muted", wrap=True)
         self.empty.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.addWidget(self.empty)
         self.pages = {"M": self._manager_page(), "P": self._project_page(), "B": self._group_page("b", "Block"),
-                      "V": self._group_page("v", "Level"), "U": self._unit_page(), "L": self._material_page()}
+                      "V": self._group_page("v", "Level"), "U": self._unit_page()}
         for w in self.pages.values():
             self.addWidget(w)
 
@@ -1595,31 +1572,13 @@ class NodePanel(QStackedWidget):
                         ("Notes", self.u_notes)):
             form.addRow(text, e)
         self.u_save = button("Save", self.save_unit, primary=True)
-        lay.addLayout(h(None, self.u_save))
+        lay.addLayout(h(button("Finish Schedule...", lambda: self.page.open_schedule(self.node),
+                               tooltip="The materials to make this unit: norm, project stock, units covered, "
+                                       "shortage (also: double-click the unit)"), None, self.u_save))
         self.u_info = label("", "Muted", wrap=True)
         lay.addWidget(self.u_info)
         self.u_table = self._demand_table()
         lay.addWidget(self.u_table, 1)
-        return w
-
-    def _material_page(self) -> QWidget:
-        w, lay, form = self._box("Material in unit")
-        self.l_title = label("", wrap=True)
-        lay.insertWidget(1, self.l_title)
-        self.l_qty = DecimalEdit()
-        self.l_vpk = QLineEdit()
-        self.l_notes = notes_edit(height=48)
-        for text, e in (("Qty per unit *", self.l_qty), ("VPK code", self.l_vpk), ("Notes", self.l_notes)):
-            form.addRow(text, e)
-        self.l_total = label("", wrap=True)
-        lay.addWidget(self.l_total)
-        self.l_save = button("Save", self.save_material, primary=True)
-        self.l_replace = button("Replace...", lambda: self.page.replace_material(self.node))
-        self.l_remove = button("Remove", lambda: self.page.remove_material(self.node), danger=True)
-        lay.addLayout(h(button("Open Material", lambda: self.app.open_entity("PRODUCT", self.node.product_id, self)),
-                        None, self.l_save))
-        lay.addLayout(h(self.l_replace, None, self.l_remove))
-        lay.addStretch(1)
         return w
 
     def _demand_table(self) -> DataTable:
@@ -1648,8 +1607,7 @@ class NodePanel(QStackedWidget):
         return {"M": [self.m_name, self.m_email, self.m_phone, self.m_active, self.m_notes],
                 "P": [self.p_code, self.p_name, self.p_manager, self.p_status, self.p_notes],
                 "B": [self.b_name, self.b_code, self.b_notes], "V": [self.v_name, self.v_code, self.v_notes],
-                "U": [self.u_name, self.u_code, self.u_qty, self.u_notes],
-                "L": [self.l_qty, self.l_vpk, self.l_notes]}.get(k, [])
+                "U": [self.u_name, self.u_code, self.u_qty, self.u_notes]}.get(k, [])
 
     def _values(self) -> tuple:
         out = []
@@ -1685,7 +1643,7 @@ class NodePanel(QStackedWidget):
         """Save with the panel's own Save. False (and the typed values kept) when it fails."""
         k = kind_of(self.shown_key)
         fn = {"M": self.save_manager, "P": self.save_project, "B": lambda: self.save_group("b"),
-              "V": lambda: self.save_group("v"), "U": self.save_unit, "L": self.save_material}.get(k)
+              "V": lambda: self.save_group("v"), "U": self.save_unit}.get(k)
         return bool(fn and fn())
 
     def _enable(self, *widgets, on: bool) -> None:
@@ -1757,25 +1715,6 @@ class NodePanel(QStackedWidget):
         self.u_info.setText(f"Materials for {fmt_qty(n.quantity)} × {n.label} (quantity per unit × "
                             f"{fmt_qty(n.quantity)}):")
 
-    def _show_l(self, n) -> None:
-        bits = [f"<b>{n.code}</b> {n.name}"]
-        bits += [x for x in (f"Product No. {n.product_no}" if n.product_no else None, n.brand,
-                             (n.description or "").replace("\n", " ")[:160] or None) if x]
-        self.l_title.setText("<br>".join(bits))
-        self.l_qty.set_value(n.quantity_per_unit)
-        self.l_vpk.setText(n.vpk_code or "")
-        self.l_notes.setPlainText(n.notes or "")
-        if n.keeps_old_norm:
-            left = n.unit_quantity - n.units_done
-            self.l_total.setText(f"Total required: {fmt_qty(n.used_by_done)} used by {fmt_qty(n.units_done)} unit(s) "
-                                 f"made (older norm) + {fmt_qty(left)} × {fmt_qty(n.quantity_per_unit)} "
-                                 f"= <b>{fmt_qty(n.total)} {n.uom}</b>")
-        else:
-            self.l_total.setText(f"Total required: {fmt_qty(n.unit_quantity)} units × "
-                                 f"{fmt_qty(n.quantity_per_unit)} = <b>{fmt_qty(n.total)} {n.uom}</b>")
-        self._enable(self.l_qty, self.l_vpk, self.l_notes, self.l_save, self.l_replace, self.l_remove,
-                     on=self.page.can_edit)
-
     # ---- saving ---------------------------------------------------------------------------------
     def save_manager(self) -> bool:
         n = self.node
@@ -1819,14 +1758,5 @@ class NodePanel(QStackedWidget):
                                                 "notes": self.u_notes.toPlainText()}) is not None:
             self.mark_clean()
             self.page._refresh_keys(f"U:{n.id}", select=f"U:{n.id}")
-            return True
-        return False
-
-    def save_material(self) -> bool:
-        n = self.node
-        if self.page.save_norm(n.id, {"quantity_per_unit": self.l_qty.text(), "vpk_code": self.l_vpk.text(),
-                                      "notes": self.l_notes.toPlainText()}) is not None:
-            self.mark_clean()
-            self.page._refresh_keys(f"L:{n.id}", select=f"L:{n.id}")
             return True
         return False
