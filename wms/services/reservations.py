@@ -133,8 +133,9 @@ class Issuing:
     """Links Goods Out lines to the project's reservations (used inside GoodsOutService.post).
 
     A line goes to the oldest reservation of that product for the project that can take all of
-    it, else to the oldest one with anything left. Material issued beyond the reservation is
-    simply unreserved stock.
+    it; otherwise (v1.26) it is shared over the project's reservations, oldest first, so all the
+    project's stock is used before unreserved stock. Material issued beyond that is simply
+    unreserved stock.
     """
 
     def __init__(self, s: Session, site_id: int):
@@ -144,15 +145,30 @@ class Issuing:
         self.left = {r.id: r.quantity - issued.get(r.id, ZERO) for r in self.reservations}
         self.touched: list[int] = []
 
-    def reservation_for(self, product_id: int, qty: Decimal) -> int | None:
+    def split(self, product_id: int, qty: Decimal) -> list[tuple[int | None, Decimal]]:
+        """v1.26: share ``qty`` over the project's reservations of the product so that everything
+        set aside for the project (delivered for it or reserved) is used before unreserved stock:
+        [(reservation id or None, quantity)]. A quantity one reservation can take stays in one part."""
         mine = [r for r in self.reservations if r.product_id == product_id and self.left[r.id] > ZERO]
-        r = next((r for r in mine if self.left[r.id] >= qty), mine[0] if mine else None)
-        if r is None:
-            return None
-        self.left[r.id] -= qty
-        if r.id not in self.touched:
-            self.touched.append(r.id)
-        return r.id
+        fit = next((r for r in mine if self.left[r.id] >= qty), None)
+        chosen = [(fit, qty)] if fit else []
+        rest = ZERO if fit else qty
+        if not fit:
+            for r in mine:
+                if rest <= ZERO:
+                    break
+                take = min(rest, self.left[r.id])
+                chosen.append((r, take))
+                rest -= take
+        parts: list[tuple[int | None, Decimal]] = []
+        for r, take in chosen:
+            self.left[r.id] -= take
+            if r.id not in self.touched:
+                self.touched.append(r.id)
+            parts.append((r.id, take))
+        if rest > ZERO:
+            parts.append((None, rest))
+        return parts
 
 
 def release_for_closed_site(s: Session, ctx, site: Site) -> int:
@@ -165,6 +181,84 @@ def release_for_closed_site(s: Session, ctx, site: Site) -> int:
                      old={"status": "ACTIVE"}, new={"status": "RELEASED"})
         n += 1
     return n
+
+
+def reserve_delivery(s: Session, ctx, dn, site: Site, totals: dict[int, Decimal]) -> list[int]:
+    """v1.26 Goods In for a project: everything the delivery brought in is set aside for the
+    project (one reservation per product, linked to the delivery). No availability check - the
+    stock has just arrived for this project. Returns the reservation ids."""
+    ids = []
+    for pid, qty in totals.items():
+        if qty <= ZERO:
+            continue
+        product = s.get(Product, pid)
+        r = StockReservation(number=next_number(s, "RESERVATION"), product_id=pid, site_id=site.id,
+                             site_number_snapshot=site.project_number, site_name_snapshot=site.name,
+                             quantity=qty, notes=f"Delivered for the project: delivery note {dn.dn_number}",
+                             status=ReservationStatus.ACTIVE.value, created_by_id=ctx.user.id,
+                             delivery_note_id=dn.id)
+        s.add(r)
+        s.flush()
+        audit.record(s, ctx, "RESERVATION_CREATED", EntityType.RESERVATION.value, r.id, r.number,
+                     f"{fmt_qty(qty)} {product.unit.code} {product.internal_code} for {site.display} "
+                     f"(delivery note {dn.dn_number})",
+                     new={"product_id": pid, "site_id": site.id, "quantity": qty, "delivery_note_id": dn.id})
+        ids.append(r.id)
+    return ids
+
+
+def unreserve_delivery(s: Session, ctx, dn, why: str) -> None:
+    """A reversed delivery no longer belongs to the project: what is still set aside from it is
+    freed. Anything already issued to the project stays issued (the reservation is closed there)."""
+    rows = list(s.scalars(select(StockReservation).where(StockReservation.delivery_note_id == dn.id,
+                                                         StockReservation.status == ReservationStatus.ACTIVE.value)))
+    issued = issued_by_reservation(s, [r.id for r in rows])
+    for r in rows:
+        done = issued.get(r.id, ZERO)
+        old = {"status": r.status, "quantity": r.quantity}
+        if done > ZERO:
+            r.quantity, r.status = done, ReservationStatus.FULFILLED.value
+        else:
+            r.status, r.released_at, r.released_by_id, r.release_reason = (
+                ReservationStatus.RELEASED.value, utcnow(), ctx.user.id, why)
+        audit.record(s, ctx, "RESERVATION_RELEASED", EntityType.RESERVATION.value, r.id, r.number, why,
+                     old=old, new={"status": r.status, "quantity": r.quantity})
+
+
+@dataclass
+class ProjectStockLine:
+    """What a project holds of one material: set aside for it and not yet issued."""
+
+    product_id: int
+    code: str
+    name: str
+    unit: str
+    from_deliveries: Decimal   # delivered for the project (Goods In with the project)
+    reserved: Decimal          # set aside by hand from warehouse stock
+
+    @property
+    def total(self) -> Decimal:
+        return self.from_deliveries + self.reserved
+
+
+def project_stock(s: Session, site_id: int, product_ids: list[int] | None = None) -> dict[int, ProjectStockLine]:
+    """{product_id: ProjectStockLine} - the project's stock (active reservations less what was issued)."""
+    rows = [r for r in active_reservations(s, product_ids, site_id=site_id)]
+    issued = issued_by_reservation(s, [r.id for r in rows])
+    out: dict[int, ProjectStockLine] = {}
+    for r in rows:
+        left = max(r.quantity - issued.get(r.id, ZERO), ZERO)
+        if left <= ZERO:
+            continue
+        line = out.get(r.product_id)
+        if line is None:
+            p = r.product
+            line = out[r.product_id] = ProjectStockLine(p.id, p.internal_code, p.name, p.unit.code, ZERO, ZERO)
+        if r.delivery_note_id:
+            line.from_deliveries += left
+        else:
+            line.reserved += left
+    return out
 
 
 # --- service -----------------------------------------------------------------------------------
@@ -331,6 +425,14 @@ class ReservationService(BaseService):
                     out.append(f"{p.internal_code}: issuing {fmt_qty(qty)} uses {fmt_qty(min(qty - free, held))} "
                                f"{p.unit.code} reserved for {', '.join(sites)}.")
         return out
+
+    def project_stock(self, site_id: int) -> list[ProjectStockLine]:
+        """The project's stock per material, sorted by code: delivered for it + reserved for it,
+        less what has been issued to it."""
+        with self.db.read_session() as s:
+            if s.get(Site, site_id) is None:
+                raise NotFoundError("Project not found.")
+            return sorted(project_stock(s, site_id).values(), key=lambda x: x.code)
 
     def summary_by_product(self, product_ids: list[int]) -> dict[int, Decimal]:
         with self.db.read_session() as s:

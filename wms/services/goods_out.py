@@ -137,18 +137,20 @@ class GoodsOutService(BaseService):
                                                   f"take the missing quantity from - choose the bin on the line."
                                                   ) from None
                         picks = allocate(s, product, qty, shortfall_bin=fallback)
-                for b, take in picks:
-                    mv = engine.post(
-                        movement_type=MovementType.GOODS_OUT, product=product, quantity=take, from_bin=b,
-                        occurred_at=when, site_id=site.id, doc_type=EntityType.GOODS_ISSUE.value, doc_id=issue.id,
-                        doc_number=issue.issue_number, reference=issue.reference, notes=clean_str(ln.notes),
-                        override_reason=override_reason,
-                    )
-                    line_no += 1
-                    issue.lines.append(GoodsIssueLine(line_no=line_no, product_id=product.id, quantity=take,
-                                                      unit_cost=product.unit_cost, bin_id=b.id,
-                                                      notes=clean_str(ln.notes), movement_id=mv.id,
-                                                      reservation_id=issuing.reservation_for(product.id, take)))
+                for b, pick in picks:
+                    # one line per reservation it delivers (project stock is used before free stock)
+                    for reservation_id, take in issuing.split(product.id, pick):
+                        mv = engine.post(
+                            movement_type=MovementType.GOODS_OUT, product=product, quantity=take, from_bin=b,
+                            occurred_at=when, site_id=site.id, doc_type=EntityType.GOODS_ISSUE.value,
+                            doc_id=issue.id, doc_number=issue.issue_number, reference=issue.reference,
+                            notes=clean_str(ln.notes), override_reason=override_reason,
+                        )
+                        line_no += 1
+                        issue.lines.append(GoodsIssueLine(line_no=line_no, product_id=product.id, quantity=take,
+                                                          unit_cost=product.unit_cost, bin_id=b.id,
+                                                          notes=clean_str(ln.notes), movement_id=mv.id,
+                                                          reservation_id=reservation_id))
             s.flush()
             refresh_statuses(s, self.ctx, issuing.touched, f"Issued on {issue.issue_number}.")
             audit.record(s, self.ctx, "GOODS_OUT_POSTED", EntityType.GOODS_ISSUE.value, issue.id,

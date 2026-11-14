@@ -39,6 +39,9 @@ class StockReservation(IdMixin, _SiteSnapshot, _ClientToken, Base):
     released_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     released_by_id: Mapped[int | None] = fk("users.id")
     release_reason: Mapped[str | None] = mapped_column(Text)
+    # v1.26: made by a delivery note received for the project (Goods In with a project): the
+    # project's own stock. Empty: reserved by hand from warehouse stock.
+    delivery_note_id: Mapped[int | None] = fk("delivery_notes.id")
 
     product = relationship("Product", lazy="joined")
     site = relationship("Site", lazy="joined")

@@ -74,7 +74,7 @@ class _PostedDocument(_ClientToken):
 
 # --- Goods In ------------------------------------------------------------------
 
-class DeliveryNote(IdMixin, _PostedDocument, Base):
+class DeliveryNote(IdMixin, _SiteSnapshot, _PostedDocument, Base):
     __tablename__ = "delivery_notes"
     __table_args__ = (
         # One live delivery note per supplier + number. Reversed ones can be re-entered.
@@ -97,8 +97,12 @@ class DeliveryNote(IdMixin, _PostedDocument, Base):
     reversed_by_id: Mapped[int | None] = fk("users.id")
     supplier_name_snapshot: Mapped[str | None] = mapped_column(String(200))
     purchase_order_id: Mapped[int | None] = fk("purchase_orders.id")  # delivery against an order (1.6)
+    # v1.26: the project the delivery is for. Its lines are set aside for that project (a reservation
+    # per product made by the delivery) - the project's stock. Empty: ordinary warehouse stock.
+    site_id: Mapped[int | None] = fk("sites.id")
 
     supplier = relationship("Supplier", lazy="joined")
+    site = relationship("Site", lazy="joined")
     purchase_order = relationship("PurchaseOrder", lazy="joined")
     received_by = relationship("User", foreign_keys=[received_by_id], lazy="joined")
     reversed_by = relationship("User", foreign_keys=[reversed_by_id], lazy="joined")
