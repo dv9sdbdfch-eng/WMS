@@ -251,6 +251,10 @@ class ProjectsPage(Page):
         bar = h(self.search, self.status_filter)
         bar.setStretch(0, 3)
         bar.addStretch(1)
+        if self.can_edit:  # in the search row, not the title row: the title row is full at 1366 px (v1.25)
+            bar.addWidget(button("Import from Excel...", self.import_structure,
+                                 tooltip="Add projects, blocks, levels, units and unit materials from an Excel "
+                                         "workbook (preview first; nothing is deleted)"))
         self.body.addLayout(bar)
         self.body.layout().setStretch(0, 0)
 
@@ -1450,6 +1454,14 @@ class ProjectsPage(Page):
 
     def show_demand(self) -> None:
         DemandDialog(self.app, self).exec()
+
+    def import_structure(self) -> None:
+        """Projects, blocks, levels, units and unit materials from an Excel workbook (v1.25)."""
+        from wms.ui.dialogs.structure_import import StructureImportDialog
+        dlg = StructureImportDialog(self.app, self)
+        dlg.exec()
+        if dlg.result is not None:
+            self.refresh()
 
 
 class NodePanel(QStackedWidget):
