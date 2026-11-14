@@ -4,6 +4,15 @@ For every material::
 
     Required = sum over units of (unit quantity x quantity per unit)
 
+Since v1.28 units already made keep the norm they were made with when a norm was changed for
+"future units only" (see ``wms.services.unit_norms``)::
+
+    Required of a line = material used by the units made (their own norms)
+                       + (units - units made) x current norm
+
+Lines without such a change (almost all of them) are still added up in one SQL query; only the
+few lines with units made *and* a future-only norm change get the correction, worked out in Python.
+
 Nothing here is stored: the figures are worked out from the structure every time, so they can
 never disagree with it. The same functions work for one unit, one level, one block, one project, one manager, any set
 of projects, or every open project, and know nothing about screens - the Projects tree, the
@@ -27,7 +36,18 @@ from wms.core.enums import OPEN_SITE_STATUSES
 from wms.core.exceptions import NotFoundError
 from wms.core.numbers import ZERO
 from wms.core.permissions import P
-from wms.db.models import Product, ProjectLevel, ProjectMaterial, ProjectUnit, Site, Unit, UnitMaterial
+from wms.db.models import (
+    Product,
+    ProjectLevel,
+    ProjectMaterial,
+    ProjectUnit,
+    Site,
+    Unit,
+    UnitCompletion,
+    UnitMaterial,
+    UnitMaterialNorm,
+)
+from wms.db.models.hierarchy import NORM_FUTURE, STAGE_DONE
 from wms.services.base import BaseService
 
 _PLACES = Decimal("0.001")
@@ -101,6 +121,40 @@ def _raw_product():
     return type_coerce(ProjectUnit.quantity, Integer) * type_coerce(UnitMaterial.quantity_per_unit, Integer)
 
 
+def norm_corrections(s: Session, scope: DemandScope) -> dict[tuple[int, int], Decimal]:
+    """{(site_id, product_id): correction} to add to ``units x current norm`` for the lines in the
+    scope whose units made used another norm (a "future units only" change after they were made).
+
+    Only lines with live Done units and at least one FUTURE norm row can differ, so only they are
+    looked at - the usual case costs one small query that finds nothing."""
+    from wms.services.unit_norms import UnitNormService
+
+    has_done = (select(UnitCompletion.id)
+                .where(UnitCompletion.unit_id == ProjectUnit.id, UnitCompletion.cancelled_at.is_(None),
+                       UnitCompletion.stage == STAGE_DONE).exists())
+    has_future = (select(UnitMaterialNorm.id)
+                  .where(UnitMaterialNorm.unit_material_id == UnitMaterial.id,
+                         UnitMaterialNorm.applies_to == NORM_FUTURE).exists())
+    q = (select(UnitMaterial.id, ProjectUnit.id, ProjectUnit.site_id)
+         .join(ProjectUnit, ProjectUnit.id == UnitMaterial.unit_id)
+         .join(Site, Site.id == ProjectUnit.site_id)
+         .where(*_conditions(scope), has_done, has_future))
+    lines = {lid: (uid, sid) for lid, uid, sid in s.execute(q)}
+    if not lines:
+        return {}
+    out: dict[tuple[int, int], Decimal] = {}
+    needs = UnitNormService._needs(s, sorted({uid for uid, _sid in lines.values()}))
+    for rows in needs.values():
+        for n in rows:
+            if n.line_id not in lines:
+                continue
+            diff = n.total - line_total(n.units, n.norm)
+            if diff:
+                key = (lines[n.line_id][1], n.product_id)
+                out[key] = out.get(key, ZERO) + diff
+    return out
+
+
 def demand(s: Session, scope: DemandScope) -> list[DemandLine]:
     """Required quantity per material for the scope, sorted by material code."""
     q = (select(UnitMaterial.product_id, func.sum(_raw_product()), func.count(UnitMaterial.id),
@@ -109,9 +163,12 @@ def demand(s: Session, scope: DemandScope) -> list[DemandLine]:
          .join(Site, Site.id == ProjectUnit.site_id)
          .where(*_conditions(scope))
          .group_by(UnitMaterial.product_id))
-    totals = {pid: (raw, n, p) for pid, raw, n, p in s.execute(q)}
+    totals = {pid: (_from_raw(raw), n, p) for pid, raw, n, p in s.execute(q)}
     if not totals:
         return []
+    for (_sid, pid), diff in norm_corrections(s, scope).items():
+        req, n, p = totals[pid]
+        totals[pid] = (req + diff, n, p)
     out = []
     ids = list(totals)
     for i in range(0, len(ids), 900):  # SQLite parameter limit
@@ -119,8 +176,8 @@ def demand(s: Session, scope: DemandScope) -> list[DemandLine]:
         for pid, code, name, pno, brand, uom in s.execute(
                 select(Product.id, Product.internal_code, Product.name, Product.supplier_code, Product.brand,
                        Unit.code).join(Unit, Unit.id == Product.unit_id).where(Product.id.in_(chunk))):
-            raw, n, p = totals[pid]
-            out.append(DemandLine(pid, code, name, pno, brand, uom, _from_raw(raw), n, p))
+            req, n, p = totals[pid]
+            out.append(DemandLine(pid, code, name, pno, brand, uom, req, n, p))
     return sorted(out, key=lambda d: d.code)
 
 
@@ -131,7 +188,10 @@ def demand_by_project(s: Session, scope: DemandScope) -> dict[tuple[int, int], D
          .join(Site, Site.id == ProjectUnit.site_id)
          .where(*_conditions(scope))
          .group_by(ProjectUnit.site_id, UnitMaterial.product_id))
-    return {(sid, pid): _from_raw(raw) for sid, pid, raw in s.execute(q)}
+    out = {(sid, pid): _from_raw(raw) for sid, pid, raw in s.execute(q)}
+    for key, diff in norm_corrections(s, scope).items():
+        out[key] = out.get(key, ZERO) + diff
+    return out
 
 
 def sync_project_lists(s: Session, ctx, site_ids: Iterable[int | None]) -> int:
@@ -274,4 +334,4 @@ class ProjectDemandService(BaseService):
 
 
 __all__ = ["DemandLine", "DemandScope", "ListComparison", "ProjectDemandService", "demand", "demand_by_project",
-           "line_total", "sync_project_lists"]
+           "line_total", "norm_corrections", "sync_project_lists"]

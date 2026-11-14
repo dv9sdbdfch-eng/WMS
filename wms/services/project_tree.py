@@ -33,7 +33,14 @@ from wms.db.models import Manager, Product, ProjectBlock, ProjectLevel, ProjectU
 from wms.services import audit
 from wms.services.base import BaseService, clean_code, clean_str, like_pattern
 from wms.services.project_demand import line_total, sync_project_lists
-from wms.services.unit_norms import NORM_ALL, highest_marked_piece, record_norm, units_done, units_with_completions
+from wms.services.unit_norms import (
+    NORM_ALL,
+    UnitNormService,
+    highest_marked_piece,
+    record_norm,
+    units_done,
+    units_with_completions,
+)
 
 #: manager filter value for "projects without a manager"
 UNASSIGNED = -1
@@ -159,11 +166,23 @@ class MaterialNode:
     notes: str | None
     sort_order: int
     product_active: bool = True
+    units_done: Decimal = Decimal(0)        # units of this type already made (Done)
+    used_by_done: Decimal | None = None     # material those units used, with their own norms
 
     @property
     def total(self) -> Decimal:
-        """Total required = unit quantity x quantity per unit (calculated, never stored)."""
-        return line_total(self.unit_quantity, self.quantity_per_unit)
+        """Total required (calculated, never stored): unit quantity x quantity per unit, or - when
+        units are already made - what they used plus the units left x quantity per unit."""
+        if self.used_by_done is None:
+            return line_total(self.unit_quantity, self.quantity_per_unit)
+        return self.used_by_done + line_total(max(self.unit_quantity - self.units_done, Decimal(0)),
+                                              self.quantity_per_unit)
+
+    @property
+    def keeps_old_norm(self) -> bool:
+        """Units made used another norm than the current one (a "future units only" change)."""
+        return self.used_by_done is not None and self.total != line_total(self.unit_quantity,
+                                                                          self.quantity_per_unit)
 
 
 @dataclass
@@ -429,7 +448,14 @@ class ProjectTreeService(BaseService):
         if ids is not None:
             q = q.where(UnitMaterial.id.in_(list(ids)))
         with self.db.read_session() as s:
-            return [MaterialNode(*row) for row in s.execute(q)]
+            nodes = [MaterialNode(*row) for row in s.execute(q)]
+            if nodes and units_done(s, unit_id):
+                needs = {n.line_id: n for n in UnitNormService._needs(s, [unit_id])[unit_id]}
+                for node in nodes:
+                    n = needs.get(node.id)
+                    if n is not None:
+                        node.units_done, node.used_by_done = n.units_done, n.used_by_done
+            return nodes
 
     def material(self, line_id: int) -> MaterialNode:
         with self.db.read_session() as s:
