@@ -11,9 +11,10 @@ On Windows the default data folder is %LOCALAPPDATA%\\StoreWMS; backups go to
 Documents\\StoreWMS Backups. ``WMS_DATA_DIR`` overrides the data folder (used
 by tests and for portable installs).
 
-To move to a shared PostgreSQL server later, set ``database_url`` in
-config.json (e.g. postgresql+psycopg://wms@server/wms) and point
-``attachments_dir`` at a network share. No code changes are needed.
+Shared server (10-30 PCs): ``server_host`` (+ port, database, user) in config.json points the
+program at a PostgreSQL server; the database password is kept in Windows Credential Manager,
+never in the file. Set them with the Connection window on the sign-in screen. ``database_url``
+still overrides everything (tests, special set-ups).
 """
 
 from __future__ import annotations
@@ -44,6 +45,55 @@ def default_backup_dir() -> Path:
     return Path.home() / "Documents" / "StoreWMS Backups"
 
 
+KEYRING_SERVICE = f"{APP_ID} database"
+
+
+def server_url(host: str, port: int, database: str, user: str, password: str | None) -> str:
+    from sqlalchemy.engine import URL
+    return URL.create("postgresql+psycopg", username=user or None, password=password or None, host=host,
+                      port=int(port or 5432), database=database).render_as_string(hide_password=False)
+
+
+def _keyring():
+    try:
+        import keyring
+        return keyring
+    except Exception:  # noqa: BLE001 - no credential store on this system
+        return None
+
+
+def server_password(host: str, user: str) -> str | None:
+    """The database password from Windows Credential Manager (or WMS_DB_PASSWORD)."""
+    env = os.environ.get("WMS_DB_PASSWORD")
+    if env:
+        return env
+    kr = _keyring()
+    if kr is None:
+        return None
+    try:
+        return kr.get_password(KEYRING_SERVICE, f"{user}@{host}")
+    except Exception:  # noqa: BLE001 - locked or missing store: connect without, the server says why
+        return None
+
+
+def save_server_password(host: str, user: str, password: str) -> bool:
+    """Keep the password in the system's credential store. False if this PC has none."""
+    kr = _keyring()
+    if kr is None:
+        return False
+    try:
+        if password:
+            kr.set_password(KEYRING_SERVICE, f"{user}@{host}", password)
+        else:
+            try:
+                kr.delete_password(KEYRING_SERVICE, f"{user}@{host}")
+            except Exception:  # noqa: BLE001 - nothing stored
+                pass
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
 @dataclass
 class AppConfig:
     data_dir: Path
@@ -56,6 +106,11 @@ class AppConfig:
     backups_to_keep: int = 30
     # Optional second folder (USB stick, network drive, OneDrive) that gets a copy of every backup.
     backup_copy_dir: str = ""
+    # Shared PostgreSQL server; empty server_host = the local SQLite file on this PC.
+    server_host: str = ""
+    server_port: int = 5432
+    server_database: str = "storewms"
+    server_user: str = "storewms"
     company_name: str = "My Company Ltd"
     max_attachment_mb: int = 25
     extra: dict = field(default_factory=dict)
@@ -67,11 +122,25 @@ class AppConfig:
 
     @property
     def resolved_database_url(self) -> str:
-        return self.database_url or f"sqlite:///{self.db_path.as_posix()}"
+        if self.database_url:
+            return self.database_url
+        if self.server_host:
+            return server_url(self.server_host, self.server_port, self.server_database, self.server_user,
+                              server_password(self.server_host, self.server_user))
+        return f"sqlite:///{self.db_path.as_posix()}"
+
+    @property
+    def server_label(self) -> str:
+        """Where the data is, for the sign-in screen and Settings."""
+        if self.server_host:
+            return f"Server {self.server_host}" + (f":{self.server_port}" if self.server_port != 5432 else "")
+        return "This PC only" if self.is_sqlite else "Server (custom connection)"
 
     @property
     def is_sqlite(self) -> bool:
-        return self.resolved_database_url.startswith("sqlite")
+        if self.database_url:
+            return self.database_url.startswith("sqlite")
+        return not self.server_host
 
     @property
     def attachments_path(self) -> Path:

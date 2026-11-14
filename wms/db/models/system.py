@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, Index, Integer, LargeBinary, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from wms.core.numbers import utcnow
@@ -48,6 +48,35 @@ class Attachment(IdMixin, Base):
     @property
     def is_pdf(self) -> bool:
         return self.mime_type == "application/pdf"
+
+
+class AttachmentFile(Base):
+    """The content of an attached file, kept in the database on the shared server so every PC in
+    every building sees the same photos and scans without a network share. One row per distinct
+    content (sha256): the same photo attached twice is stored once. Each PC keeps a local copy
+    as a cache in its attachments folder. Not used with the local SQLite file."""
+
+    __tablename__ = "attachment_files"
+
+    sha256: Mapped[str] = mapped_column(String(64), primary_key=True)
+    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    data: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    thumb: Mapped[bytes | None] = mapped_column(LargeBinary)  # small JPEG for lists (photos only)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, nullable=False)
+
+
+class ServerBackup(IdMixin, Base):
+    """One backup made on the shared server by its scheduled script (server/backup.ps1), so every
+    PC can show when the last good copy was made. Written by the script, read by the program."""
+
+    __tablename__ = "server_backups"
+
+    finished_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, nullable=False, index=True)
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)  # HOURLY, NIGHTLY, WEEKLY, TEST
+    ok: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    file_name: Mapped[str | None] = mapped_column(String(300))
+    size_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    message: Mapped[str | None] = mapped_column(Text)
 
 
 class AuditLog(IdMixin, Base):

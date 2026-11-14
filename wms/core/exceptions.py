@@ -50,6 +50,19 @@ class ConcurrencyError(WMSError):
     """The record was changed by someone else since it was loaded."""
 
 
+class DatabaseBusyError(ConcurrencyError):
+    """Another PC was changing the same stock at the same moment (shared PostgreSQL server).
+    Nothing was saved; saving again is safe (the form's token stops a double posting)."""
+
+
+class DatabaseUnavailableError(WMSError):
+    """The database server cannot be reached (network, VPN or server PC down)."""
+
+
+class SchemaTooNewError(WMSError):
+    """This copy of the program is older than the database it was pointed at."""
+
+
 class AuthenticationError(WMSError):
     pass
 

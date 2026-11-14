@@ -174,31 +174,34 @@ def test_required_scenario(svc, tmp_path, monkeypatch):
     assert len(data_rows) == len(history) == 8
     assert {r[1] for r in data_rows} >= {"Goods In", "Goods Out", "Bin Transfer", "Reversal of Bin Transfer"}
 
-    # 22. Backup database.
-    before = snapshot(svc)
-    backup = svc.backup.create(note="Spec 40 step 22")
-    assert backup.is_file()
-    reconciled(svc)
+    # 22-24 (backup file and restore test) are for the PC's own data file; the shared server is
+    # backed up by its own scheduled script (tests/test_pg_server_backup.py).
+    if svc.ctx.config.is_sqlite:
+        # 22. Backup database.
+        before = snapshot(svc)
+        backup = svc.backup.create(note="Spec 40 step 22")
+        assert backup.is_file()
+        reconciled(svc)
 
-    # 23. Restore backup into a test environment (its own data folder, nothing shared).
-    with monkeypatch.context() as m:
-        m.setenv("WMS_DATA_DIR", str(tmp_path / "test-environment"))
-        cfg2 = AppConfig.load()
-    cfg2.ensure_dirs()
-    assert cfg2.db_path != svc.ctx.config.db_path
-    swap_in(cfg2, backup)
-    db2 = Database(cfg2.resolved_database_url)
-    db2.migrate()
-    try:
-        restored = Services(AppContext(db=db2, config=cfg2))
-        restored.auth.login("admin", "admin")
-        # 24. Verify stock and transaction history remain identical.
-        reconciled(restored)
-        after = snapshot(restored)
-        assert after[0] == before[0]
-        assert after[1] == before[1]
-        assert restored.products.row(h3311.id).on_hand == D("83")
-    finally:
-        db2.dispose()
-    assert snapshot(svc) == before  # the live data was not touched by the restore test
+        # 23. Restore backup into a test environment (its own data folder, nothing shared).
+        with monkeypatch.context() as m:
+            m.setenv("WMS_DATA_DIR", str(tmp_path / "test-environment"))
+            cfg2 = AppConfig.load()
+        cfg2.ensure_dirs()
+        assert cfg2.db_path != svc.ctx.config.db_path
+        swap_in(cfg2, backup)
+        db2 = Database(cfg2.resolved_database_url)
+        db2.migrate()
+        try:
+            restored = Services(AppContext(db=db2, config=cfg2))
+            restored.auth.login("admin", "admin")
+            # 24. Verify stock and transaction history remain identical.
+            reconciled(restored)
+            after = snapshot(restored)
+            assert after[0] == before[0]
+            assert after[1] == before[1]
+            assert restored.products.row(h3311.id).on_hand == D("83")
+        finally:
+            db2.dispose()
+        assert snapshot(svc) == before  # the live data was not touched by the restore test
     assert dn.id  # the delivery note from step 4 is still the first document

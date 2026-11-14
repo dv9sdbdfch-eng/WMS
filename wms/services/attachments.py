@@ -4,6 +4,12 @@ Files are copied into the attachment store (``<data>/attachments/YYYY/MM/``)
 under a random name, so the original can be moved or deleted from the
 Desktop without breaking the link. The SHA-256 hash detects the same scan
 being attached twice.
+
+On the shared server (PostgreSQL) the content is also stored in the database
+(``attachment_files``, once per distinct file), so PCs in other buildings see
+the same photos and scans without a network share. The attachments folder of
+each PC then works as a cache: ``path_of`` downloads a file the first time it
+is opened on that PC.
 """
 
 from __future__ import annotations
@@ -22,7 +28,7 @@ from wms.core.enums import AttachmentKind
 from wms.core.exceptions import NotFoundError, ValidationError
 from wms.core.numbers import utcnow
 from wms.core.permissions import P
-from wms.db.models import Attachment
+from wms.db.models import Attachment, AttachmentFile
 from wms.services import audit
 from wms.services.base import BaseService
 
@@ -73,6 +79,33 @@ class StagedFile:
     sha256: str
 
 
+THUMB_PX = 256
+
+
+def make_thumbnail(path: Path) -> bytes | None:
+    """A small JPEG of a photo for lists, or None (not an image / cannot be read)."""
+    try:
+        from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QSize, Qt
+        from PySide6.QtGui import QImageReader
+    except ImportError:  # pragma: no cover
+        return None
+    reader = QImageReader(str(path))
+    if not reader.canRead():
+        return None
+    size = reader.size()
+    if size.isValid() and size.width() > 0 and size.height() > 0:
+        reader.setScaledSize(size.scaled(QSize(THUMB_PX, THUMB_PX), Qt.AspectRatioMode.KeepAspectRatio))
+    img = reader.read()
+    if img.isNull():
+        return None
+    ba = QByteArray()
+    buf = QBuffer(ba)
+    buf.open(QIODevice.OpenModeFlag.WriteOnly)
+    if not img.save(buf, "JPEG", 82):
+        return None
+    return bytes(ba.data())
+
+
 def sha256_of(path: Path) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as f:
@@ -86,8 +119,52 @@ class AttachmentService(BaseService):
     def store(self) -> Path:
         return self.ctx.config.attachments_path
 
+    @property
+    def shared(self) -> bool:
+        """Content kept in the database too (shared server), not only in this PC's folder."""
+        return self.db.dialect == "postgresql"
+
     def path_of(self, att: Attachment) -> Path:
-        return self.store / att.stored_name
+        """The file on this PC; on the shared server it is downloaded first if this PC has no copy."""
+        path = self.store / att.stored_name
+        if not path.is_file() and self.shared:
+            self._download(att.sha256, path)
+        return path
+
+    def _download(self, sha256: str, path: Path) -> bool:
+        with self.db.read_session() as s:
+            data = s.scalar(select(AttachmentFile.data).where(AttachmentFile.sha256 == sha256))
+        if data is None or hashlib.sha256(data).hexdigest() != sha256:
+            return False
+        _write_atomic(path, data)
+        return True
+
+    def thumbnail_path(self, stored_name: str) -> Path | None:
+        """A file the lists can show as a small picture: the photo itself when this PC has it,
+        else (shared server) a small copy fetched once and kept in the ``.thumbs`` folder."""
+        path = self.store / stored_name
+        if path.is_file() or not self.shared:
+            return path
+        thumb = self.store / ".thumbs" / f"{stored_name}.jpg"
+        if thumb.is_file():
+            return thumb
+        with self.db.read_session() as s:
+            data = s.scalar(select(AttachmentFile.thumb).join(Attachment, Attachment.sha256 == AttachmentFile.sha256)
+                            .where(Attachment.stored_name == stored_name).limit(1))
+        if not data:
+            return None
+        _write_atomic(thumb, data)
+        return thumb
+
+    def _upload(self, s: Session, f: StagedFile) -> None:
+        """Put the content in the database once (another PC may be adding the same file now)."""
+        if not self.shared:
+            return
+        from sqlalchemy.dialects.postgresql import insert
+        thumb = make_thumbnail(f.dest) if f.kind == AttachmentKind.PHOTO.value else None
+        s.execute(insert(AttachmentFile).values(sha256=f.sha256, size_bytes=f.size, data=f.dest.read_bytes(),
+                                                thumb=thumb, created_at=utcnow())
+                  .on_conflict_do_nothing(index_elements=["sha256"]))
 
     def list_for(self, entity_type: str, entity_id: int, kind: str | None = None) -> list[Attachment]:
         with self.db.read_session() as s:
@@ -171,6 +248,7 @@ class AttachmentService(BaseService):
         if is_primary:
             for e in existing:
                 e.is_primary = False
+        self._upload(s, f)
         att = Attachment(entity_type=entity_type, entity_id=entity_id, kind=f.kind,
                          original_name=f.source.name[:260], stored_name=f.rel, mime_type=f.mime, size_bytes=f.size,
                          sha256=f.sha256, is_primary=is_primary, caption=caption, uploaded_by_id=self.user.id)
@@ -241,5 +319,16 @@ class AttachmentService(BaseService):
 
     def missing_files(self) -> list[Attachment]:
         with self.db.read_session() as s:
+            if self.shared:  # the server's copy is what counts; this PC's folder is only a cache
+                stored = select(AttachmentFile.sha256)
+                return list(s.scalars(select(Attachment).where(Attachment.is_deleted.is_(False),
+                                                               Attachment.sha256.not_in(stored))))
             return [a for a in s.scalars(select(Attachment).where(Attachment.is_deleted.is_(False)))
                     if not self.path_of(a).is_file()]
+
+
+def _write_atomic(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex[:8]}.part")
+    tmp.write_bytes(data)
+    tmp.replace(path)

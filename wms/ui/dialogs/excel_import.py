@@ -836,7 +836,8 @@ class ExcelImportDialog(QDialog):
             show_error(self, exc)
             return False
         self.result = result
-        lines = [f"Pre-import backup successfully created: {result.backup.name}", "",
+        lines = [(f"Pre-import backup successfully created: {result.backup.name}" if result.backup else
+                 "Shared server: the server's own backups cover this import"), "",
                  f"Total rows: {result.total_rows}",
                  f"New materials: {result.created}",
                  f"Updated: {result.updated}",

@@ -102,16 +102,29 @@ class SettingsPage(Page):
         form.addRow("Second copy of every backup", h(self.copy_dir, button("Browse...", self._browse_copy)))
         form.addRow("Largest attachment (MB)", self.max_mb)
         form.addRow("Data folder", label(str(cfg.data_dir), "Muted"))
-        form.addRow("Database", label(cfg.resolved_database_url if not cfg.is_sqlite else str(cfg.db_path), "Muted"))
+        form.addRow("Database", label(str(cfg.db_path) if cfg.is_sqlite else cfg.server_label, "Muted"))
         form.addRow("Attachments folder", label(str(cfg.attachments_path), "Muted"))
         lay.addLayout(form)
-        lay.addLayout(h(button("Open data folder", lambda: _open_folder(cfg.data_dir)), None,
+        more = []
+        if cfg.is_sqlite and self.app.can(P.BACKUP_RESTORE):
+            more.append(button("Move data to the shared server...", self._move_to_server,
+                               tooltip="One-off: copy this PC's data to a new PostgreSQL server for many PCs"))
+        lay.addLayout(h(button("Open data folder", lambda: _open_folder(cfg.data_dir)), *more, None,
                         button("Save settings", self._save_general, primary=True)))
         lay.addWidget(label("Tip: keep the backup folder on a different drive, a USB stick or a synced cloud "
                             "folder (OneDrive), so a failed PC does not take the backups with it.", "InfoBanner",
                             wrap=True))
         lay.addStretch(1)
         return w
+
+    def _move_to_server(self):
+        from wms.ui.dialogs.connection import MoveToServerDialog
+        dlg = MoveToServerDialog(self.app.ctx.config, self)
+        dlg.exec()
+        if dlg.saved:
+            self.app.restart_required = True
+            from PySide6.QtWidgets import QApplication
+            QApplication.instance().quit()
 
     def _browse_backup(self):
         d = QFileDialog.getExistingDirectory(self, "Backup folder", self.backup_dir.text())
@@ -275,11 +288,11 @@ class SettingsPage(Page):
     def _load_backups(self):
         svc = self.app.services.backup
         self.bk_table.set_items(svc.list_backups())
-        if self.app.ctx.config.is_sqlite:
-            health = svc.health()
-            self.bk_health.setText(health.message if not health.ok
-                                   else f"Last successful backup: {health.last_success_text}  ({health.last_file})")
-            self.bk_health.setStyleSheet("" if health.ok else "color: #B3261E; font-weight: bold;")
+        health = svc.health()  # this PC's own backups, or (shared server) the ones the server made
+        self.bk_health.setText(health.message if not health.ok else
+                               f"Last successful {'server ' if health.server else ''}backup: "
+                               f"{health.last_success_text}  ({health.last_file})")
+        self.bk_health.setStyleSheet("" if health.ok else "color: #B3261E; font-weight: bold;")
 
     def _test_restore(self):
         b = self.bk_table.current()

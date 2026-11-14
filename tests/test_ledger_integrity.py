@@ -122,6 +122,7 @@ def test_reversal_needs_a_valid_reason_code(svc, sample):
     assert_reconciled(svc)
 
 
+@pytest.mark.sqlite_only
 def test_database_itself_refuses_bad_reversals(svc, sample):
     """Guards hold even for code (or tools) that bypass the services."""
     sample.receive(sample.mdf, 10, sample.bin1)
@@ -238,6 +239,7 @@ def test_integrity_check_reports_a_tampered_balance_as_critical(svc, sample):
     assert_reconciled(svc)
 
 
+@pytest.mark.sqlite_only
 def test_integrity_check_finds_broken_reversal_and_document_links(svc, sample):
     sample.receive(sample.mdf, 10, sample.bin1)
     tr = svc.stock.transfer(sample.mdf.id, sample.bin1.id, sample.bin2.id, "4")
@@ -345,6 +347,7 @@ def test_repeated_submission_never_creates_a_second_movement(svc, sample):
 
 # --- upgrade --------------------------------------------------------------------------------
 
+@pytest.mark.sqlite_only
 def test_upgrade_records_reversals_made_before_this_version(svc, sample):
     from alembic import command
     from alembic.config import Config

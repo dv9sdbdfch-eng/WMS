@@ -83,7 +83,7 @@ def test_new_project_with_blocks_levels_units_and_materials(tmp_path, svc, sampl
     res = svc.structure_import.run(plan)
     assert (res.projects_created, res.blocks_created, res.levels_created) == (1, 2, 3)
     assert (res.units_created, res.lines_created) == (5, 3)
-    assert res.backup is not None and res.backup.exists()
+    assert (res.backup is not None and res.backup.exists()) if svc.ctx.config.is_sqlite else res.backup is None
 
     t = svc.project_tree
     site = next(s for s in svc.sites.list() if s.project_number == "P-2001")
