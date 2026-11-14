@@ -133,7 +133,7 @@ class Issuing:
     """Links Goods Out lines to the project's reservations (used inside GoodsOutService.post).
 
     A line goes to the oldest reservation of that product for the project that can take all of
-    it; otherwise (v1.25) it is shared over the project's reservations, oldest first, so all the
+    it; otherwise (v1.26) it is shared over the project's reservations, oldest first, so all the
     project's stock is used before unreserved stock. Material issued beyond that is simply
     unreserved stock.
     """
@@ -146,7 +146,7 @@ class Issuing:
         self.touched: list[int] = []
 
     def split(self, product_id: int, qty: Decimal) -> list[tuple[int | None, Decimal]]:
-        """v1.25: share ``qty`` over the project's reservations of the product so that everything
+        """v1.26: share ``qty`` over the project's reservations of the product so that everything
         set aside for the project (delivered for it or reserved) is used before unreserved stock:
         [(reservation id or None, quantity)]. A quantity one reservation can take stays in one part."""
         mine = [r for r in self.reservations if r.product_id == product_id and self.left[r.id] > ZERO]
@@ -184,7 +184,7 @@ def release_for_closed_site(s: Session, ctx, site: Site) -> int:
 
 
 def reserve_delivery(s: Session, ctx, dn, site: Site, totals: dict[int, Decimal]) -> list[int]:
-    """v1.25 Goods In for a project: everything the delivery brought in is set aside for the
+    """v1.26 Goods In for a project: everything the delivery brought in is set aside for the
     project (one reservation per product, linked to the delivery). No availability check - the
     stock has just arrived for this project. Returns the reservation ids."""
     ids = []

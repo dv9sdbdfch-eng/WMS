@@ -1,4 +1,4 @@
-"""v1.25 stage 2: a delivery note received for a project becomes that project's stock."""
+"""v1.26 stage 2: a delivery note received for a project becomes that project's stock."""
 
 from __future__ import annotations
 

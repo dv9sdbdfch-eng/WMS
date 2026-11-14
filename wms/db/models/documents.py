@@ -97,7 +97,7 @@ class DeliveryNote(IdMixin, _SiteSnapshot, _PostedDocument, Base):
     reversed_by_id: Mapped[int | None] = fk("users.id")
     supplier_name_snapshot: Mapped[str | None] = mapped_column(String(200))
     purchase_order_id: Mapped[int | None] = fk("purchase_orders.id")  # delivery against an order (1.6)
-    # v1.25: the project the delivery is for. Its lines are set aside for that project (a reservation
+    # v1.26: the project the delivery is for. Its lines are set aside for that project (a reservation
     # per product made by the delivery) - the project's stock. Empty: ordinary warehouse stock.
     site_id: Mapped[int | None] = fk("sites.id")
 
