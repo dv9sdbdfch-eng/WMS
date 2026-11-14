@@ -76,6 +76,8 @@ ACTIVE_PROJECT = QColor("#E8F5E9")
 #: frame around the exact cell that was clicked, so it stands out inside the green project
 CURRENT_CELL = QColor("#2F6FB2")
 _PANEL_KEY = "project_tree/details_hidden"
+#: v1.30 coverage of what is still to make by the project's stock, shown on the Details cell
+COVER_COLOURS = {"GREEN": QColor("#BFE3C3"), "YELLOW": QColor("#FFE2A6"), "RED": QColor("#F6C1C1")}
 UNASSIGNED_KEY = "N:"
 #: open the branches leading to search matches automatically up to this many matches
 AUTO_EXPAND_MATCHES = 400
@@ -211,6 +213,7 @@ class ProjectsPage(Page):
         self.can_edit = app.can(P.SITES_EDIT)
         self.svc = app.services.project_tree
         self.items: dict[str, QTreeWidgetItem] = {}
+        self._coverage: dict[int, object] = {}  # site id -> ProjectCoverage, read once per refresh
         self.open_keys: set[str] = self._saved_open_keys()
         self.matches: TreeMatches | None = None
         self._normal_keys: set[str] | None = None
@@ -354,6 +357,7 @@ class ProjectsPage(Page):
     def refresh(self) -> None:
         if self._skip_refresh:
             return
+        self._coverage.clear()
         selected = self.current_key()
         text = self.search.text().strip()
         flt = self.filter()
@@ -438,7 +442,52 @@ class ProjectsPage(Page):
         if key in self.open_keys or (self.auto_expand and self._on_match_path(key)):
             item.setExpanded(True)
         self._update_arrow(item)
+        self._show_coverage(item)
         return item
+
+    # coverage colours (v1.30) -------------------------------------------------------------------
+    def coverage(self, site_id: int | None):
+        """The project's coverage (green / yellow / red per unit, level, block), read once."""
+        if not site_id:
+            return None
+        if site_id not in self._coverage:
+            self._coverage[site_id] = run(self, self.app.services.unit_norms.project_coverage, site_id)
+        return self._coverage[site_id]
+
+    def coverage_of(self, key: str):
+        """The Coverage of one row (project, block, level or unit), or None (managers)."""
+        k = kind_of(key)
+        if k not in ("P", "B", "V", "U"):
+            return None
+        item = self.items.get(key)
+        cov = self.coverage(item.data(0, PROJECT) if item is not None else None)
+        if cov is None:
+            return None
+        from wms.services.unit_norms import Coverage
+        i = id_of(key)
+        return {"P": lambda: cov.project, "B": lambda: cov.blocks.get(i), "V": lambda: cov.levels.get(i),
+                "U": lambda: cov.units.get(i)}[k]() or Coverage()
+
+    def _show_coverage(self, item: QTreeWidgetItem) -> None:
+        key = item.data(0, KEY)
+        if kind_of(key) not in ("P", "B", "V", "U"):
+            return
+        node = item.data(0, NODE)
+        if kind_of(key) == "P" and getattr(node, "status", None) in CLOSED_SITE_STATUSES:
+            return  # closed projects: no colours
+        cov = self.coverage_of(key)
+        colour = COVER_COLOURS.get(cov.status) if cov is not None else None
+        was = self._loading
+        self._loading = True
+        item.setBackground(C_INFO, QBrush(colour) if colour else QBrush())
+        item.setToolTip(C_INFO, f"{item.text(C_INFO)}\n\n{cov.text}" if cov is not None else item.text(C_INFO))
+        self._loading = was
+
+    def recolour(self) -> None:
+        """Read the coverage again and repaint every row shown (after a change)."""
+        self._coverage.clear()
+        for item in self.items.values():
+            self._show_coverage(item)
 
     def _set_texts(self, item: QTreeWidgetItem, texts: list[str]) -> None:
         """``texts`` = [name, details]; the name goes into the row's own column."""
@@ -651,6 +700,7 @@ class ProjectsPage(Page):
         self._loading = True
         item.setData(0, NODE, node)
         self._set_texts(item, texts)
+        self._show_coverage(item)
         item.setChildIndicatorPolicy(QTreeWidgetItem.ChildIndicatorPolicy.ShowIndicator if has
                                      else QTreeWidgetItem.ChildIndicatorPolicy.DontShowIndicatorWhenChildless)
         self._loading = False
@@ -696,6 +746,7 @@ class ProjectsPage(Page):
         for key in keys:
             if key:
                 self.reload_item(key)
+        self.recolour()
         if select:
             parent = self._parent_key(select) if select in self.items else None
             if parent and not self.items[parent].isExpanded():
@@ -1391,7 +1442,9 @@ class ProjectsPage(Page):
         dlg = MaterialPickerDialog(self.app, f"Add material to {node.label}", parent or self,
                                    unit_text=f"Pick one or more existing materials (Ctrl+click for several), then the "
                                              f"quantity one {node.label} needs. Total = {fmt_qty(node.quantity)} × "
-                                             f"quantity per unit.")
+                                             f"quantity per unit. Materials in this project's stock are "
+                                             f"listed first: the unit draws on its own project's stock.",
+                                   site_id=node.site_id)
         if dlg.exec() != QDialog.DialogCode.Accepted or not dlg.chosen:
             return None
         ids = run(parent or self, self.svc.add_materials, node.id, [(pid, dlg.qty.text()) for pid in dlg.chosen],
@@ -1424,7 +1477,8 @@ class ProjectsPage(Page):
         parent = parent or self
         dlg = MaterialPickerDialog(self.app, f"Replace {node.code}", parent, multi=False, ask_quantity=False,
                                    unit_text=f"Choose the material that replaces {node.code} {node.name}. The quantity "
-                                             f"per unit ({fmt_qty(node.quantity_per_unit)}) and notes stay.")
+                                             f"per unit ({fmt_qty(node.quantity_per_unit)}) and notes stay.",
+                                   site_id=getattr(run(parent, self.svc.unit, node.unit_id), "site_id", None))
         if dlg.exec() != QDialog.DialogCode.Accepted or not dlg.chosen:
             return False
         if run(parent, self.svc.replace_material, node.id, dlg.chosen[0]) is not None:

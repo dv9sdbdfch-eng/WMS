@@ -466,15 +466,35 @@ class ProjectTreeService(BaseService):
         found = self.materials(unit_id, ids=[line_id])
         return found[0]
 
-    def find_products(self, text: str, limit: int = 200) -> list[Product]:
+    def find_products(self, text: str, limit: int = 200, site_id: int | None = None,
+                      project_stock_only: bool = False) -> list[Product]:
         """Existing materials for the 'Add material' picker: code, product number, barcode, name,
-        description, brand or supplier. Active materials only."""
+        description, brand or supplier. Active materials only.
+
+        With ``site_id`` (v1.30) the materials that project holds in its own stock come first, and
+        ``project_stock_only`` shows only those."""
         from wms.services.materials import material_text_filter
         self.require(P.SITES_VIEW)
-        q = (select(Product).where(Product.is_active.is_(True), material_text_filter(text or ""))
-             .order_by(Product.internal_code).limit(limit))
+        held = self.project_stock_map(site_id) if site_id else {}
+        q = select(Product).where(Product.is_active.is_(True), material_text_filter(text or ""))
+        if project_stock_only:
+            q = q.where(Product.id.in_(list(held) or [0]))
         with self.db.read_session() as s:
-            return list(s.scalars(q).unique())
+            if held and not project_stock_only:  # the project's own materials first, then the rest
+                first = list(s.scalars(q.where(Product.id.in_(list(held))).order_by(Product.internal_code)
+                                       .limit(limit)).unique())
+                rest = list(s.scalars(q.where(Product.id.not_in(list(held))).order_by(Product.internal_code)
+                                      .limit(max(limit - len(first), 0))).unique())
+                return first + rest
+            return list(s.scalars(q.order_by(Product.internal_code).limit(limit)).unique())
+
+    def project_stock_map(self, site_id: int) -> dict[int, Decimal]:
+        """{product_id: quantity} the project holds in its own stock (delivered for it or reserved,
+        less issued) - what a unit of that project draws on (v1.30)."""
+        from wms.services.reservations import project_stock
+        self.require(P.SITES_VIEW)
+        with self.db.read_session() as s:
+            return {pid: line.total for pid, line in project_stock(s, site_id).items()}
 
     def last_vpk_code(self, product_id: int) -> str | None:
         """The VPK code used for this material on another line, to offer it again."""
