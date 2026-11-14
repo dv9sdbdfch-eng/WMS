@@ -225,6 +225,9 @@ class ProjectsPage(Page):
         if app.can(P.STOCK_VIEW):
             self.add_link("Reservations", "reservations", tooltip="Stock set aside for projects, not yet issued")
         if self.can_edit:
+            self.add_action(button("Import from Excel...", self.import_structure,
+                                   tooltip="Add projects, blocks, levels, units and unit materials from an Excel "
+                                           "workbook (preview first; nothing is deleted)"))
             self.add_action(button("+  Project", lambda: self.add_project(None)))
             self.add_action(button("+  Manager", self.add_manager, primary=True, shortcut="Ctrl+N"))
 
@@ -1450,6 +1453,14 @@ class ProjectsPage(Page):
 
     def show_demand(self) -> None:
         DemandDialog(self.app, self).exec()
+
+    def import_structure(self) -> None:
+        """Projects, blocks, levels, units and unit materials from an Excel workbook (v1.25)."""
+        from wms.ui.dialogs.structure_import import StructureImportDialog
+        dlg = StructureImportDialog(self.app, self)
+        dlg.exec()
+        if dlg.result is not None:
+            self.refresh()
 
 
 class NodePanel(QStackedWidget):
