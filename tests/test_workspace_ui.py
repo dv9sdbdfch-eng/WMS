@@ -126,7 +126,12 @@ def test_states_columns_and_sort_survive_a_restart_but_filters_do_not(ui, sample
 
 def test_action_required_folds_itself_when_empty(ui):  # noqa: F811
     app, win, msgs, _ = ui
-    app.services.backup.create(note="healthy")  # no backup = a Critical entry
+    if app.ctx.config.is_sqlite:
+        app.services.backup.create(note="healthy")  # no backup = a Critical entry
+    else:  # shared server: the server's scheduled backup records itself
+        from wms.db.models import ServerBackup
+        with app.ctx.db.session() as s:
+            s.add(ServerBackup(kind="HOURLY", ok=True, file_name="x.backup"))
     dash = _home(win)
     items = dash.data.attention()
     if items:  # an empty test database may still list data-quality entries

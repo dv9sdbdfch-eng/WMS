@@ -10,6 +10,16 @@ Protected tables (database triggers, see `wms.db.engine`):
 * Append-only (no UPDATE, no DELETE): `stock_movements`, `audit_log`, `movement_reversals`
 * Never deleted; a posted line never changes: `delivery_notes`, `goods_issues`, `stock_returns`, `production_orders`, `stock_adjustments`, `stock_transfers`, `stock_counts`, `delivery_note_lines`, `goods_issue_lines`, `return_lines`, `production_lines`, `stock_count_lines`
 
+## attachment_files
+
+| Column | Type | Null | Key / reference |
+|---|---|---|---|
+| sha256 | String(64) | no | PK |
+| size_bytes | BigInteger | no |  |
+| data | LargeBinary | no |  |
+| thumb | LargeBinary | yes |  |
+| created_at | UTCDateTime | no |  |
+
 ## attachments
 
 | Column | Type | Null | Key / reference |
@@ -583,6 +593,18 @@ Protected tables (database triggers, see `wms.db.engine`):
 | id | Integer | no | PK |
 
 * UNIQUE (user_id, name)
+
+## server_backups
+
+| Column | Type | Null | Key / reference |
+|---|---|---|---|
+| finished_at | UTCDateTime | no | indexed |
+| kind | String(20) | no |  |
+| ok | Boolean | no |  |
+| file_name | String(300) | yes |  |
+| size_bytes | BigInteger | yes |  |
+| message | Text | yes |  |
+| id | Integer | no | PK |
 
 ## settings
 

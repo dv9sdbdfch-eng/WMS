@@ -15,6 +15,7 @@ from pathlib import Path
 from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.dialects.sqlite.base import SQLiteCompiler
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session, sessionmaker
 
 from wms.db import models  # noqa: F401  (registers tables)
@@ -93,15 +94,36 @@ def _sqlite_document_triggers(documents=DOCUMENT_TABLES, lines=LINE_TABLES, reve
     return stmts
 
 
-def _postgres_document_triggers(tables=(*DOCUMENT_TABLES, *LINE_TABLES, "stock_count_lines")) -> list[str]:
-    stmts = [
-        "CREATE OR REPLACE FUNCTION wms_no_delete() RETURNS trigger AS $$ "
-        "BEGIN RAISE EXCEPTION '%: stock records cannot be deleted', TG_TABLE_NAME; END; $$ LANGUAGE plpgsql;"
-    ]
-    for t in tables:
-        stmts.append(f"DROP TRIGGER IF EXISTS trg_{t}_no_delete ON {t};")
-        stmts.append(f"CREATE TRIGGER trg_{t}_no_delete BEFORE DELETE ON {t} "
-                     f"FOR EACH ROW EXECUTE FUNCTION wms_no_delete();")
+def _postgres_document_triggers(documents=DOCUMENT_TABLES, lines=LINE_TABLES, reversible=REVERSIBLE_TABLES,
+                                extra: bool = True) -> list[str]:
+    """The same rules as ``_sqlite_document_triggers``, written for PostgreSQL: one shared function
+    raises the message given to each trigger, and each trigger's WHEN clause is the SQLite one."""
+    stmts = ["CREATE OR REPLACE FUNCTION wms_abort() RETURNS trigger AS $$ "
+             "BEGIN RAISE EXCEPTION '%', TG_ARGV[0] USING ERRCODE = 'integrity_constraint_violation'; END; "
+             "$$ LANGUAGE plpgsql;"]
+
+    def abort(name: str, when: str, table: str, event: str, msg: str) -> None:
+        stmts.append(f"DROP TRIGGER IF EXISTS trg_{table}_{name} ON {table};")
+        stmts.append(f"CREATE TRIGGER trg_{table}_{name} BEFORE {event} ON {table} FOR EACH ROW "
+                     f"{('WHEN (' + when + ') ') if when else ''}EXECUTE FUNCTION wms_abort('{msg}');")
+
+    for t in (*documents, *lines, *(("stock_count_lines",) if extra else ())):
+        abort("no_delete", "", t, "DELETE", f"{t}: stock records cannot be deleted - reverse instead")
+    for t in lines:
+        abort("posted_fixed", "OLD.movement_id IS NOT NULL", t, "UPDATE OF product_id, quantity, bin_id, movement_id",
+              f"{t}: a posted line cannot be changed - reverse the document instead")
+        abort("qty_positive", "NEW.quantity <= 0", t, "INSERT", f"{t}: quantity must be above zero")
+    for t in reversible:
+        abort("reversed_final", "OLD.status = 'REVERSED'", t, "UPDATE",
+              f"{t}: a reversed document cannot be changed or reopened")
+    if not extra:
+        return stmts
+    for t in ("stock_adjustments", "stock_transfers"):
+        abort("posted_fixed", "OLD.movement_id IS NOT NULL", t, "UPDATE", f"{t}: a posted record cannot be changed")
+    abort("closed_final", "OLD.status IN ('APPROVED', 'CANCELLED')", "stock_counts", "UPDATE",
+          "stock_counts: an approved or cancelled count cannot be changed")
+    abort("approved_fixed", "OLD.adjustment_id IS NOT NULL", "stock_count_lines", "UPDATE",
+          "stock_count_lines: an approved count line cannot be changed")
     return stmts
 
 
@@ -146,6 +168,22 @@ def ledger_trigger_sql(dialect_name: str) -> list[str]:
             stmts.append(f"DROP TRIGGER IF EXISTS trg_{table}_append_only ON {table};")
             stmts.append(f"CREATE TRIGGER trg_{table}_append_only BEFORE UPDATE OR DELETE ON {table} "
                          f"FOR EACH ROW EXECUTE FUNCTION wms_append_only();")
+        # the two reversal rules of the SQLite triggers (PostgreSQL WHEN cannot hold a subquery)
+        stmts.append(
+            "CREATE OR REPLACE FUNCTION wms_reversal_check() RETURNS trigger AS $$ BEGIN "
+            "IF EXISTS (SELECT 1 FROM stock_movements o WHERE o.id = NEW.reversal_of_id "
+            "AND o.reversal_of_id IS NOT NULL) THEN "
+            "RAISE EXCEPTION 'stock_movements: a reversal cannot itself be reversed' "
+            "USING ERRCODE = 'integrity_constraint_violation'; END IF; "
+            "IF NOT EXISTS (SELECT 1 FROM stock_movements o WHERE o.id = NEW.reversal_of_id "
+            "AND o.product_id = NEW.product_id AND o.quantity = NEW.quantity "
+            "AND o.from_bin_id IS NOT DISTINCT FROM NEW.to_bin_id AND o.to_bin_id IS NOT DISTINCT FROM NEW.from_bin_id) THEN "
+            "RAISE EXCEPTION 'stock_movements: a reversal must mirror the original movement' "
+            "USING ERRCODE = 'integrity_constraint_violation'; END IF; "
+            "RETURN NEW; END; $$ LANGUAGE plpgsql;")
+        stmts.append("DROP TRIGGER IF EXISTS trg_stock_movements_reversal_check ON stock_movements;")
+        stmts.append("CREATE TRIGGER trg_stock_movements_reversal_check BEFORE INSERT ON stock_movements "
+                     "FOR EACH ROW WHEN (NEW.reversal_of_id IS NOT NULL) EXECUTE FUNCTION wms_reversal_check();")
         return stmts
     return []
 
@@ -160,7 +198,7 @@ def dispatch_trigger_sql(dialect_name: str) -> list[str]:
     if dialect_name == "sqlite":
         return _sqlite_document_triggers(DISPATCH_TABLES, DISPATCH_LINE_TABLES, DISPATCH_TABLES, extra=False)
     if dialect_name == "postgresql":
-        return _postgres_document_triggers((*DISPATCH_TABLES, *DISPATCH_LINE_TABLES))
+        return _postgres_document_triggers(DISPATCH_TABLES, DISPATCH_LINE_TABLES, DISPATCH_TABLES, extra=False)
     return []
 
 
@@ -216,6 +254,77 @@ SQLiteCompiler.visit_ilike_op_binary = _sqlite_plain_like
 SQLiteCompiler.visit_not_ilike_op_binary = _sqlite_plain_not_like
 
 
+# Shared server settings, sent by every connection (no server configuration needed for them):
+#  - lock_timeout: a posting that waits more than 15 s for another PC gives up with a clear message
+#    instead of freezing the screen;
+#  - idle_in_transaction_session_timeout: a PC that crashes or loses the network in the middle of a
+#    save cannot hold stock rows locked for everybody else for longer than 2 minutes;
+#  - TCP keepalives notice a dead VPN / network link within about a minute.
+PG_CONNECT_ARGS = {
+    "connect_timeout": 10,
+    "options": "-c lock_timeout=15000 -c idle_in_transaction_session_timeout=120000 -c timezone=UTC",
+    "keepalives": 1, "keepalives_idle": 30, "keepalives_interval": 10, "keepalives_count": 3,
+}
+
+
+def postgres_engine_options() -> dict:
+    import platform
+    args = dict(PG_CONNECT_ARGS, application_name=f"StoreWMS {platform.node()}"[:63])
+    # A desktop program needs few connections: 30 PCs x 5 stays far below the server's 100.
+    return {"pool_pre_ping": True, "pool_size": 3, "max_overflow": 2, "pool_recycle": 1800,
+            "pool_timeout": 20, "connect_args": args}
+
+
+# PostgreSQL error codes (SQLSTATE) that mean "try again" or "server unreachable".
+_BUSY_STATES = {"40001", "40P01", "55P03"}  # serialization failure, deadlock, lock not available
+
+
+def translate_db_error(exc: BaseException):
+    """A user-facing error for a database failure that is not a bug, else None."""
+    from sqlalchemy.orm.exc import StaleDataError
+
+    from wms.core.exceptions import ConcurrencyError, DatabaseBusyError, DatabaseUnavailableError, WMSError
+
+    if isinstance(exc, StaleDataError):  # a record edited on another PC since this screen loaded it
+        return ConcurrencyError("Someone else changed this record on another PC while you had it open, "
+                                "so your changes were not saved.\n\nClose it, open it again and redo the change.")
+    if isinstance(exc, WMSError) or not isinstance(exc, DBAPIError):
+        return None
+    state = getattr(exc.orig, "sqlstate", None) or ""
+    if state in _BUSY_STATES:
+        return DatabaseBusyError("Another PC was saving the same stock at the same moment, so nothing was saved.\n\n"
+                                 "Press Save again - it is safe, the document cannot be posted twice.")
+    if exc.connection_invalidated or state.startswith("08") or state in ("57P01", "57P03"):
+        return DatabaseUnavailableError("The connection to the database server was lost, so nothing was saved.\n\n"
+                                        "Check the network (or VPN) and that the server PC is on, then try again.")
+    return None
+
+
+MIGRATION_LOCK_KEY = 0x57_4D_53_31  # any fixed number, the same in every copy of the program
+
+
+def check_schema_not_newer(conn, cfg) -> None:
+    """Refuse to open a database that a newer version of the program has already upgraded
+    (a PC that missed an update, on the shared server): its screens would not match the data."""
+    from alembic.runtime.migration import MigrationContext
+    from alembic.script import ScriptDirectory
+
+    from wms.core.exceptions import SchemaTooNewError
+
+    current = MigrationContext.configure(conn).get_current_revision()
+    if current is None:
+        return
+    script = ScriptDirectory.from_config(cfg)
+    try:
+        script.get_revision(current)
+    except Exception:  # noqa: BLE001 - alembic raises different errors for unknown revisions
+        from wms import __version__
+        raise SchemaTooNewError(
+            f"The database has been upgraded by a newer version of Store WMS (database version {current}).\n\n"
+            f"This PC has version {__version__}. Install the latest version on this PC, then start it again.\n"
+            f"Nothing has been changed.") from None
+
+
 class Database:
     def __init__(self, url: str, echo: bool = False):
         self.url = url
@@ -223,7 +332,7 @@ class Database:
         if url.startswith("sqlite"):
             kwargs["connect_args"] = {"check_same_thread": False, "timeout": 10}
         else:
-            kwargs["pool_pre_ping"] = True
+            kwargs.update(postgres_engine_options())
         self.engine: Engine = create_engine(url, **kwargs)
         if url.startswith("sqlite"):
             _configure_sqlite(self.engine)
@@ -243,8 +352,14 @@ class Database:
         try:
             yield s
             s.commit()
-        except BaseException:
-            s.rollback()
+        except BaseException as exc:
+            try:
+                s.rollback()
+            except DBAPIError:  # the connection itself is gone; nothing was committed
+                pass
+            friendly = translate_db_error(exc)
+            if friendly is not None:
+                raise friendly from exc
             raise
         finally:
             s.close()
@@ -255,6 +370,11 @@ class Database:
         s = self._read_factory()
         try:
             yield s
+        except DBAPIError as exc:
+            friendly = translate_db_error(exc)
+            if friendly is not None:
+                raise friendly from exc
+            raise
         finally:
             s.close()  # close (not rollback) keeps loaded objects usable after the session ends
 
@@ -269,6 +389,11 @@ class Database:
         cfg.set_main_option("sqlalchemy.url", self.url.replace("%", "%%"))
         with self.engine.begin() as conn:
             cfg.attributes["connection"] = conn
+            if self.dialect == "postgresql":
+                # Many PCs may start the new version at the same moment: one upgrades the shared
+                # database, the others wait here and then find nothing left to do.
+                conn.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": MIGRATION_LOCK_KEY})
+            check_schema_not_newer(conn, cfg)
             tables = set(inspect(conn).get_table_names())
             if not tables:
                 log.info("Creating new database schema")

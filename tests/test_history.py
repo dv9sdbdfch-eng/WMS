@@ -358,6 +358,7 @@ def test_permissions_are_required(svc, sample):
         svc.products.remove(sample.edge.id)
 
 
+@pytest.mark.sqlite_only
 def test_existing_database_is_upgraded_and_backfilled(svc, sample, cfg):
     """A v1.2 database (no snapshot columns) upgrades in place: old movements get the names that are
     current at upgrade time, every guard is put back, and new postings snapshot as normal."""

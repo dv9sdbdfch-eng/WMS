@@ -53,6 +53,7 @@ class BackupHealth:
     last_failure: datetime | None = None
     last_error: str = ""
     copy_problem: str = ""
+    server: bool = False  # made by the shared server's scheduled script, not by this program
 
     @property
     def ok(self) -> bool:
@@ -70,6 +71,17 @@ class BackupHealth:
 
     @property
     def message(self) -> str:
+        if self.server:
+            if self.state == "NEVER":
+                return ("The server has not recorded any backup yet. Check the scheduled backup on the server "
+                        "PC (server set-up guide, step Backups).")
+            if self.state == "FAILED":
+                return (f"The last server backup FAILED ({self.last_failure:%d/%m/%Y %H:%M}): {self.last_error}. "
+                        f"Last good backup: {self.last_success_text}.")
+            if self.state == "STALE":
+                return (f"No server backup since {self.last_success_text}. Check that the server PC is on and its "
+                        f"scheduled backup runs.")
+            return f"Last server backup: {self.last_success_text}"
         if self.state == "NEVER":
             return "No backup has been made yet. Go to Settings > Backup and restore > Back up now."
         if self.state == "FAILED":
@@ -228,6 +240,10 @@ def latest_backup(cfg) -> Path | None:
     return None
 
 
+# The server makes a copy every hour in working time and every night: a day without one is a problem.
+SERVER_STALE_AFTER = timedelta(hours=26)
+
+
 class BackupService(BaseService):
     @property
     def backup_dir(self) -> Path:
@@ -238,9 +254,14 @@ class BackupService(BaseService):
             raise ValidationError("Built-in backup works for the local SQLite database. "
                                   "Back up a central PostgreSQL server with pg_dump on the server.")
 
-    def create_safety(self, note: str) -> Path:
+    def create_safety(self, note: str) -> Path | None:
         """A backup the program takes itself before a bulk change (Excel import). Anyone allowed to
-        make that change gets one - it only protects their own work - and it is never pruned."""
+        make that change gets one - it only protects their own work - and it is never pruned.
+
+        None on the shared server: the PC cannot copy the server's database. There the import is one
+        transaction (all or nothing) and the server's own hourly/nightly copies cover the rest."""
+        if not self.ctx.config.is_sqlite:
+            return None
         return self.create(note, automatic=True, kind="safety")
 
     # -- backup status (Dashboard / Settings: "Last successful backup") ---------------------------
@@ -265,6 +286,8 @@ class BackupService(BaseService):
             log.exception("Could not write the backup status file")
 
     def health(self) -> BackupHealth:
+        if not self.ctx.config.is_sqlite:
+            return self._server_health()
         st = self._status()
 
         def when(key):
@@ -292,6 +315,32 @@ class BackupService(BaseService):
             h.state = "STALE"
         elif hours and age >= timedelta(hours=hours):
             h.state = "DUE"
+        return h
+
+    def _server_health(self) -> BackupHealth:
+        """Shared server: the backups its scheduled script made (server_backups), read by every PC."""
+        from sqlalchemy import select
+
+        from wms.db.models import ServerBackup
+
+        def local(d):
+            return d.astimezone().replace(tzinfo=None) if d else None
+
+        with self.db.read_session() as s:
+            good = s.scalars(select(ServerBackup).where(ServerBackup.ok.is_(True), ServerBackup.kind != "TEST")
+                             .order_by(ServerBackup.finished_at.desc()).limit(1)).first()
+            bad = s.scalars(select(ServerBackup).where(ServerBackup.ok.is_(False))
+                            .order_by(ServerBackup.finished_at.desc()).limit(1)).first()
+        last = local(good.finished_at) if good else None
+        failed = local(bad.finished_at) if bad else None
+        h = BackupHealth("OK", last, (good.file_name or "") if good else "", failed,
+                         (bad.message or "") if bad else "", server=True)
+        if failed is not None and (last is None or failed > last):
+            h.state = "FAILED"
+        elif last is None:
+            h.state = "NEVER"
+        elif datetime.now() - last > SERVER_STALE_AFTER:
+            h.state = "STALE"
         return h
 
     def is_due(self) -> bool:

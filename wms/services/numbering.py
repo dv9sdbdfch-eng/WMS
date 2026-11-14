@@ -9,7 +9,8 @@ from wms.db.models import NumberSequence
 
 
 def next_number(session: Session, name: str) -> str:
-    seq = session.scalar(select(NumberSequence).where(NumberSequence.name == name).with_for_update())
+    seq = session.scalar(select(NumberSequence).where(NumberSequence.name == name).with_for_update()
+                        .execution_options(populate_existing=True))
     if seq is None:
         raise RuntimeError(f"Number sequence {name!r} is not configured.")
     value = seq.next_value
