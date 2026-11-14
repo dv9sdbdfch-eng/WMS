@@ -151,7 +151,10 @@ Protected tables (database triggers, see `wms.db.engine`):
 | reversed_by_id | Integer | yes | FK users.id, indexed |
 | supplier_name_snapshot | String(200) | yes |  |
 | purchase_order_id | Integer | yes | FK purchase_orders.id, indexed |
+| site_id | Integer | yes | FK sites.id, indexed |
 | id | Integer | no | PK |
+| site_number_snapshot | String(50) | yes |  |
+| site_name_snapshot | String(200) | yes |  |
 | status | String(20) | no | indexed |
 | notes | Text | yes |  |
 | created_at | UTCDateTime | no |  |
@@ -719,6 +722,7 @@ Protected tables (database triggers, see `wms.db.engine`):
 | released_at | UTCDateTime | yes |  |
 | released_by_id | Integer | yes | FK users.id, indexed |
 | release_reason | Text | yes |  |
+| delivery_note_id | Integer | yes | FK delivery_notes.id, indexed |
 | id | Integer | no | PK |
 | site_number_snapshot | String(50) | yes |  |
 | site_name_snapshot | String(200) | yes |  |

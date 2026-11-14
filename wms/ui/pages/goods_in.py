@@ -58,6 +58,10 @@ class GoodsInPage(Page):
         form = QFormLayout()
         self.supplier = PickCombo("Choose supplier...")
         self.supplier.picked.connect(lambda _: self._supplier_picked())
+        self.project = PickCombo("No project - warehouse stock")
+        self.project.setToolTip("Choose a project when the delivery is for it: the materials become that "
+                                "project's stock (set aside for it) and cannot be used for other projects.")
+        self.project.picked.connect(lambda _: self._project_hint())
         self.order = PickCombo("No purchase order")
         self.order.picked.connect(self._order_picked)
         self.dn_number = QLineEdit()
@@ -69,11 +73,15 @@ class GoodsInPage(Page):
         self.notes = QLineEdit()
         form.addRow("Supplier *", self.supplier)
         form.addRow("Purchase order", self.order)
+        form.addRow("Project", self.project)
         form.addRow("Delivery note no. *", self.dn_number)
         form.addRow("Delivery date *", self.date)
         form.addRow("PO / reference", self.po)
         form.addRow("Notes", self.notes)
         ll.addLayout(form)
+        self.project_hint = label("", "InfoBanner", wrap=True)
+        self.project_hint.hide()
+        ll.addWidget(self.project_hint)
         self.dup_warning = label("", "Banner", wrap=True)
         self.dup_warning.hide()
         ll.addWidget(self.dup_warning)
@@ -109,6 +117,7 @@ class GoodsInPage(Page):
 
     def refresh(self):
         self.supplier.set_options(self.app.supplier_options())
+        self.project.set_options(self.app.site_options())
         self._order_options()
         self.lines.reload_options()
 
@@ -119,6 +128,13 @@ class GoodsInPage(Page):
                                  + (f" - {po.site_label}" if po.site_id else "")
                                  + (f" (expected {po.expected_date:%d/%m/%Y})" if po.expected_date else ""), po.id)
                                 for po in self.app.services.purchasing.open_orders(sup)])
+
+    def _project_hint(self):
+        sid = self.project.value()
+        if sid:
+            self.project_hint.setText(f"Project stock: everything on this delivery is set aside for "
+                                      f"{self.project.currentText()}.")
+        self.project_hint.setVisible(bool(sid))
 
     def _supplier_picked(self):
         self._order_options()  # keeps the chosen order if it is with this supplier
@@ -137,6 +153,9 @@ class GoodsInPage(Page):
         self.order.set_value(po_id)
         if not self.po.text().strip():
             self.po.setText(v.po.po_number)
+        if v.po.site_id and not self.project.value():  # an order for a project: the delivery is too
+            self.project.set_value(v.po.site_id)
+            self._project_hint()
         self.lines.clear()
         for lv in v.lines:
             if lv.outstanding > 0:
@@ -203,7 +222,7 @@ class GoodsInPage(Page):
         except Exception:  # noqa: BLE001 - half-typed date: keep today's
             d = date.today().isoformat()
         return {"supplier_id": self.supplier.value(), "purchase_order_id": self.order.value(),
-                "dn_number": self.dn_number.text(), "delivery_date": d, "po_reference": self.po.text(),
+                "site_id": self.project.value(), "dn_number": self.dn_number.text(), "delivery_date": d, "po_reference": self.po.text(),
                 "notes": self.notes.text(), "lines": lines, "files": list(self._paths)}
 
     def save_draft(self) -> bool:
@@ -255,6 +274,9 @@ class GoodsInPage(Page):
         if data.get("purchase_order_id"):
             self._loaded_po = data["purchase_order_id"]  # do not reload the order's lines over the draft
             self.order.set_value(data["purchase_order_id"])
+        if data.get("site_id"):
+            self.project.set_value(data["site_id"])
+            self._project_hint()
         self.dn_number.setText(data.get("dn_number") or "")
         try:
             self.date.set_value(date.fromisoformat(data.get("delivery_date") or ""))
@@ -296,6 +318,8 @@ class GoodsInPage(Page):
         self.draft_banner.hide()
         self._loaded_po = None
         self.order.set_value(None)
+        self.project.set_value(None)
+        self.project_hint.hide()
         self.dn_number.clear()
         self.po.clear()
         self.notes.clear()
@@ -349,7 +373,7 @@ class GoodsInPage(Page):
                                            "You can attach it later from Delivery Notes."):
             return
         header = {"supplier_id": self.supplier.value(), "purchase_order_id": self.order.value(),
-                  "dn_number": self.dn_number.text(), "delivery_date": d,
+                  "site_id": self.project.value(), "dn_number": self.dn_number.text(), "delivery_date": d,
                   "po_reference": self.po.text(), "notes": self.notes.text(), "client_token": self._token}
         lines = [ReceiptLine(v.product_id, v.quantity, v.bin_id, v.unit_cost, v.notes) for v in values]
         dn = run(self, self.app.services.goods_in.post, header, lines, list(self._paths))
@@ -361,6 +385,8 @@ class GoodsInPage(Page):
         if dn:
             self.app.changed()
             text = f"Delivery note {dn.dn_number} has been posted: {len(dn.lines)} line(s) added to stock."
+            if dn.site_id:
+                text += f"\n\nProject stock: set aside for {dn.site_label}."
             if dn.purchase_order_id:
                 v = self.app.services.purchasing.get(dn.purchase_order_id)
                 text += f"\n\nPurchase order {v.po.po_number} is now {v.po.status.replace('_', ' ').lower()}."

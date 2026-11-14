@@ -10,14 +10,15 @@ from pathlib import Path
 from sqlalchemy import exists, func, or_, select
 from sqlalchemy.orm import selectinload
 
-from wms.core.enums import DocumentStatus, EntityType, MovementType
+from wms.core.enums import OPEN_SITE_STATUSES, DocumentStatus, EntityType, MovementType
 from wms.core.exceptions import DuplicateError, NotFoundError, ValidationError
 from wms.core.numbers import ZERO, to_money, to_qty, utcnow
 from wms.core.permissions import P
-from wms.db.models import Attachment, Bin, DeliveryNote, DeliveryNoteLine, Product, StockMovement, Supplier
+from wms.db.models import Attachment, Bin, DeliveryNote, DeliveryNoteLine, Product, Site, StockMovement, Supplier
 from wms.services import audit
 from wms.services.attachments import AttachmentService
 from wms.services.base import BaseService, check_client_token, clean_str, like_pattern
+from wms.services.reservations import reserve_delivery, unreserve_delivery
 from wms.services.stock_engine import StockEngine
 
 
@@ -109,7 +110,18 @@ class GoodsInService(BaseService):
                     f"Delivery note '{dn_number}' from {supplier.name} has already been entered. "
                     f"Open it from Delivery Notes instead of entering it again."
                 )
+            site = None
+            if header.get("site_id"):
+                site = s.get(Site, header["site_id"])
+                if site is None:
+                    raise ValidationError("Project not found.", "site_id")
+                if site.status not in OPEN_SITE_STATUSES:
+                    raise ValidationError(f"Project {site.display} is closed - reopen it to receive materials for "
+                                          f"it.", "site_id")
             dn = DeliveryNote(
+                site_id=site.id if site else None,
+                site_number_snapshot=site.project_number if site else None,
+                site_name_snapshot=site.name if site else None,
                 dn_number=dn_number,
                 dn_number_norm=norm,
                 supplier_id=supplier.id,
@@ -155,12 +167,17 @@ class GoodsInService(BaseService):
                                  old={"unit_cost": product.unit_cost}, new={"unit_cost": cost})
                     product.unit_cost = cost
             s.flush()
+            if site is not None:
+                totals: dict[int, Decimal] = {}
+                for line in dn.lines:
+                    totals[line.product_id] = totals.get(line.product_id, ZERO) + line.quantity
+                reserve_delivery(s, self.ctx, dn, site, totals)
             if receiving:
                 receiving.finish(dn)
             audit.record(s, self.ctx, "GOODS_IN_POSTED", EntityType.DELIVERY_NOTE.value, dn.id,
                          f"{dn_number} ({supplier.name})", f"{len(lines)} line(s) received.",
                          new={"dn_number": dn_number, "supplier": supplier.name, "delivery_date": delivery_date,
-                              "purchase_order_id": dn.purchase_order_id,
+                              "purchase_order_id": dn.purchase_order_id, "site_id": dn.site_id,
                               "lines": [{"product_id": l.product_id, "qty": l.quantity, "bin_id": l.bin_id}
                                         for l in dn.lines]})
             for f in staged:
@@ -182,6 +199,8 @@ class GoodsInService(BaseService):
                 mv = s.get(StockMovement, line.movement_id)
                 engine.reverse(mv, f"Delivery note {dn.dn_number} reversed: {reason}", override_reason=override_reason,
                                reason_code=reason_code)
+            if dn.site_id:
+                unreserve_delivery(s, self.ctx, dn, f"Delivery note {dn.dn_number} reversed: {reason}")
             dn.status = DocumentStatus.REVERSED.value
             dn.reversed_at = utcnow()
             dn.reversed_by_id = self.user.id
@@ -227,7 +246,8 @@ class GoodsInService(BaseService):
 
     def search(self, text: str | None = None, supplier_id: int | None = None, date_from: date | None = None,
                date_to: date | None = None, status: str | None = None, product_id: int | None = None,
-               limit: int = 1000, scan: str | None = None) -> list[tuple[DeliveryNote, int, Decimal]]:
+               limit: int = 1000, scan: str | None = None,
+               site_id: int | None = None) -> list[tuple[DeliveryNote, int, Decimal]]:
         """Returns (delivery note, line count, total value). ``scan``: "MISSING" = no scan / photo
         attached, "PRESENT" = at least one (the Dashboard's "missing scan" counter opens this)."""
         q = (
@@ -241,6 +261,8 @@ class GoodsInService(BaseService):
         )
         if supplier_id:
             q = q.where(DeliveryNote.supplier_id == supplier_id)
+        if site_id:
+            q = q.where(DeliveryNote.site_id == site_id)
         if date_from:
             q = q.where(DeliveryNote.delivery_date >= date_from)
         if date_to:

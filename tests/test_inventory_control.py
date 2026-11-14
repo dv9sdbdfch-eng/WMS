@@ -81,7 +81,7 @@ def test_goods_out_fulfils_the_reservation(svc, sample):
     assert states(svc, sample.mdf)[:3] == (D("90"), D("20"), D("70"))  # available unchanged by issuing reserved stock
     gi2 = issue(svc, sample.site, sample.mdf, 25)  # 20 reserved + 5 unreserved
     v = svc.reservations.get(res.reservation.id)
-    assert (v.issued, v.remaining, v.reservation.status) == (D("35"), D("0"), "FULFILLED")
+    assert (v.issued, v.remaining, v.reservation.status) == (D("30"), D("0"), "FULFILLED")  # v1.25: only 20 of the 25 go to it
     assert states(svc, sample.mdf)[:3] == (D("65"), D("0"), D("65"))
     assert {l.reservation_id for l in gi1.lines} == {res.reservation.id}
     # reversing a Goods Out puts the quantity back on reserve

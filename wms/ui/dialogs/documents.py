@@ -118,6 +118,7 @@ class DeliveryNoteDialog(QDialog):
             (f"Supplier {dn.supplier_label}", lambda: app.open_entity("SUPPLIER", dn.supplier_id, self)),
             (f"Purchase Order {dn.purchase_order.po_number}" if dn.purchase_order else "",
              lambda: app.open_entity("PURCHASE_ORDER", dn.purchase_order_id, self)),
+            (f"Project {dn.site_label}" if dn.site_id else "", lambda: app.open_entity("SITE", dn.site_id, self)),
             (f"{len(dn.lines)} material(s)", lambda: self.related_tabs.setCurrentIndex(0)),
             ("Stock transactions", lambda: self.related_tabs.setCurrentIndex(1)),
             (f"{n_problems} delivery problem(s)" if n_problems else "", lambda: self.related_tabs.setCurrentIndex(2)),
@@ -131,6 +132,7 @@ class DeliveryNoteDialog(QDialog):
         ll.addLayout(_form([("Supplier", dn.supplier_label), ("Delivery date", fmt_date(dn.delivery_date)),
                             ("PO / reference", dn.po_reference or ""),
                             ("Purchase order", dn.purchase_order.po_number if dn.purchase_order else ""),
+                            ("Project (stock for)", dn.site_label or "Warehouse stock"),
                             ("Received by", dn.received_by.full_name),
                             ("Entered", fmt_datetime(dn.created_at)), ("Status", dn.status.title()),
                             ("Total value", fmt_money(total)), ("Notes", dn.notes or "")]))
