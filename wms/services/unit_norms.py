@@ -155,6 +155,112 @@ class ScheduleLine:
         return "YELLOW" if self.project_stock > ZERO else "RED"
 
 
+GREEN, YELLOW, RED, NO_NEED = "GREEN", "YELLOW", "RED", "NONE"
+
+
+@dataclass
+class Coverage:
+    """How far the project's stock covers what part of a project still needs (v1.31).
+
+    ``lines`` counts materials (per unit for a unit; per material for a level / block / project);
+    ``covered_lines`` those fully covered. Quantities of different materials are never added up."""
+
+    lines: int = 0
+    covered_lines: int = 0
+    any_stock: bool = False
+    short: dict[str, Decimal] | None = None  # material code -> shortage
+
+    @property
+    def status(self) -> str:
+        if self.lines == 0:
+            return NO_NEED
+        if self.covered_lines == self.lines:
+            return GREEN
+        return YELLOW if self.any_stock else RED
+
+    @property
+    def text(self) -> str:
+        if self.status == NO_NEED:
+            return "Nothing left to make"
+        head = {GREEN: "Covered", YELLOW: "Part covered", RED: "Not covered"}[self.status]
+        out = f"{head}: {self.covered_lines} of {self.lines} material(s) fully covered by the project's stock"
+        if self.short:
+            worst = sorted(self.short.items())[:6]
+            out += "\nShort: " + ", ".join(f"{c} {_fmt(q)}" for c, q in worst) + (" ..." if len(self.short) > 6 else "")
+        return out
+
+
+@dataclass
+class ProjectCoverage:
+    units: dict[int, Coverage]
+    levels: dict[int, Coverage]
+    blocks: dict[int, Coverage]
+    project: Coverage
+
+
+def _summarise(needs: dict[tuple[int, int], tuple[str, Decimal, Decimal]], keys: list[tuple[int, int]],
+               per_product: bool) -> Coverage:
+    """``needs`` = {(unit_id, product_id): (code, still needed, allocated)}."""
+    groups: dict = {}
+    for key in keys:
+        code, need, got = needs[key]
+        g = key[1] if per_product else key
+        c, n, a = groups.get(g, (code, ZERO, ZERO))
+        groups[g] = (c, n + need, a + got)
+    cov = Coverage(short={})
+    for code, need, got in groups.values():
+        if need <= ZERO:
+            continue
+        cov.lines += 1
+        cov.any_stock = cov.any_stock or got > ZERO
+        if got >= need:
+            cov.covered_lines += 1
+        else:
+            cov.short[code] = cov.short.get(code, ZERO) + need - got
+    return cov
+
+
+def project_coverage(s: Session, site_id: int) -> ProjectCoverage:
+    """Share the project's stock out over its units in the order of the tree (Block, Level, Unit
+    as sorted; units directly in the project last) and say per unit, level, block and the project
+    whether what they still need is covered: GREEN all, YELLOW part, RED none."""
+    from wms.db.models import ProjectBlock, ProjectLevel
+    from wms.services.reservations import project_stock
+    order = list(s.execute(
+        select(ProjectUnit.id, ProjectLevel.id, ProjectBlock.id)
+        .outerjoin(ProjectLevel, ProjectLevel.id == ProjectUnit.level_id)
+        .outerjoin(ProjectBlock, ProjectBlock.id == ProjectLevel.block_id)
+        .where(ProjectUnit.site_id == site_id)
+        .order_by(ProjectBlock.id.is_(None), ProjectBlock.sort_order, ProjectBlock.id, ProjectLevel.sort_order,
+                  ProjectLevel.id, ProjectUnit.sort_order, ProjectUnit.id)))
+    lines = UnitNormService._needs(s, [u for u, _l, _b in order])
+    stock = {pid: line.total for pid, line in project_stock(s, site_id).items()}
+    needs: dict[tuple[int, int], tuple[str, Decimal, Decimal]] = {}
+    for uid, _lid, _bid in order:
+        for n in lines[uid]:
+            key = (uid, n.product_id)
+            code, need, got = needs.get(key, (n.product_code, ZERO, ZERO))
+            free = stock.get(n.product_id, ZERO)
+            take = min(free, n.needed_by_rest)
+            stock[n.product_id] = free - take
+            needs[key] = (code, need + n.needed_by_rest, got + take)
+    by_unit: dict[int, list] = {}
+    by_level: dict[int, list] = {}
+    by_block: dict[int, list] = {}
+    for key in needs:
+        by_unit.setdefault(key[0], []).append(key)
+    for uid, lid, bid in order:
+        keys = by_unit.get(uid, [])
+        if lid:
+            by_level.setdefault(lid, []).extend(keys)
+            by_block.setdefault(bid, []).extend(keys)
+    return ProjectCoverage(
+        units={uid: _summarise(needs, by_unit.get(uid, []), False) for uid, _l, _b in order},
+        levels={lid: _summarise(needs, keys, True) for lid, keys in by_level.items()},
+        blocks={bid: _summarise(needs, keys, True) for bid, keys in by_block.items()},
+        project=_summarise(needs, list(needs), True))
+
+
 # ---- helpers used inside other services' transactions ------------------------------------------
 def record_norm(s: Session, ctx, line: UnitMaterial, previous: Decimal | None, applies_to: str = NORM_ALL,
                 reason: str | None = None) -> UnitMaterialNorm:
@@ -377,6 +483,12 @@ class UnitNormService(BaseService):
                 held = stock[n.product_id].total if n.product_id in stock else ZERO
                 out.append(ScheduleLine(n, brand, vpk, notes, uom, active, held))
             return out
+
+    def project_coverage(self, site_id: int) -> ProjectCoverage:
+        """Green / yellow / red coverage of every unit, level and block of a project (v1.31)."""
+        self.require(P.SITES_VIEW)
+        with self.db.read_session() as s:
+            return project_coverage(s, site_id)
 
     # ---- internals ------------------------------------------------------------------------------
     @staticmethod

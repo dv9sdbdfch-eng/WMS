@@ -11,7 +11,17 @@ from PySide6.QtWidgets import QApplication
 from test_project_tree import _open_page, tower, tribeca  # noqa: F401 - shared fixtures
 from test_ui_smoke import _errors, ui  # noqa: F401 - the shared screen fixture
 
-from wms.ui.pages.projects import ACTIVE_PROJECT, C_BLK, C_INFO, C_MGR, C_PRJ, KEY, PROJECT, ProjectsPage
+from wms.ui.pages.projects import (
+    ACTIVE_PROJECT,
+    C_BLK,
+    C_MGR,
+    C_PRJ,
+    C_UNIT,
+    KEY,
+    PROJECT,
+    ProjectsPage,
+    name_col,
+)
 
 
 def _surrey(svc, tribeca):  # noqa: F811
@@ -30,9 +40,12 @@ def _green_keys(page):
     return {it.data(0, KEY) for it in page.project_rows()}
 
 
-def _pixel(page, item, col=C_INFO):
-    """Colour drawn in an empty-ish part of a cell (the Details column by default: proves the
-    green runs across the full width, not only behind the name)."""
+def _pixel(page, item, col=None):
+    """Colour drawn in an empty part of a row: by default a level column the row has no name in
+    (proves the green runs across the full width, not only behind the name). Details is not used:
+    since v1.31 it carries the coverage colour."""
+    if col is None:
+        col = C_MGR if name_col(item.data(0, KEY)) != C_MGR else C_PRJ
     tree = page.tree
     index = tree.indexFromItem(item, col)
     tree.scrollTo(index)
@@ -187,7 +200,7 @@ def test_selected_cell_differs_from_the_green_row(ui, tribeca, tower):  # noqa: 
     block = page.items[f"B:{tower.block.id}"]
     page.tree.setCurrentItem(block, C_BLK)
     assert _pixel(page, block, C_BLK) != ACTIVE_PROJECT  # the clicked cell: selection colour + frame
-    assert _pixel(page, block, C_INFO) == ACTIVE_PROJECT  # the rest of its row stays green
+    assert _pixel(page, block, C_UNIT) == ACTIVE_PROJECT  # the rest of its row stays green
     assert [i.column() for i in page.tree.selectedIndexes()] == [C_BLK]
 
 

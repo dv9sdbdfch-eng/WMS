@@ -49,6 +49,8 @@ class FinishScheduleDialog(QDialog):
         lay.addWidget(self.table, 1)
         self.summary = label("", wrap=True)
         lay.addWidget(self.summary)
+        self.tree_cover = label("", "Muted", wrap=True)
+        lay.addWidget(self.tree_cover)
         lay.addWidget(label("Project stock = material delivered for the project or reserved for it, less what was "
                             "issued. It is shared by every unit of the project that uses the material.", "Muted",
                             wrap=True))
@@ -81,6 +83,11 @@ class FinishScheduleDialog(QDialog):
         for b in self.edit_buttons:
             b.setEnabled(editable)
         self.table.set_items(self.lines)
+        cov = run(self, self.app.services.unit_norms.project_coverage, unit.site_id)
+        mine = cov.units.get(self.unit_id) if cov else None
+        self.tree_cover.setText(
+            f"In the Projects tree (stock shared out over the units in tree order, Block → Level → Unit): "
+            f"{mine.text.splitlines()[0]}." if mine else "")
         short = [r for r in self.lines if r.coverage != "GREEN"]
         if not self.lines:
             self.summary.setText("No materials yet. Add the materials one unit is made of.")

@@ -197,23 +197,32 @@ class MaterialPickerDialog(QDialog):
     ``ask_quantity``: also ask the quantity per unit, VPK code and notes (Add material)."""
 
     def __init__(self, app, title: str, parent=None, multi: bool = True, ask_quantity: bool = True,
-                 unit_text: str | None = None):
+                 unit_text: str | None = None, site_id: int | None = None):
         super().__init__(parent)
         self.app = app
+        self.site_id = site_id
         self.setWindowTitle(title)
-        self.resize(820, 560)
+        self.resize(900, 560)
         lay = QVBoxLayout(self)
         if unit_text:
             lay.addWidget(label(unit_text, "Muted", wrap=True))
         self.search = SearchBox("Search code, product number, barcode, name, description, brand or supplier...")
         self.search.search.connect(self.refresh)
-        lay.addWidget(self.search)
-        self.table = DataTable([Col("Code", lambda p: p.internal_code, width=120),
-                                Col("Material", lambda p: p.name, width=260),
-                                Col("Product No.", lambda p: p.supplier_code or "", width=120),
-                                Col("Brand", lambda p: p.brand or "", width=100),
-                                Col("Unit", lambda p: p.unit.code, width=60),
-                                Col("Description", lambda p: (p.description or "").replace("\n", " "))])
+        # v1.31: a unit draws on its own project's stock - show it, its materials first
+        self.held = run(self, app.services.project_tree.project_stock_map, site_id) or {} if site_id else {}
+        self.only_held = QCheckBox("Only materials in this project's stock")
+        self.only_held.setVisible(bool(site_id))
+        self.only_held.toggled.connect(lambda _on: self.refresh())
+        lay.addLayout(h(self.search, self.only_held))
+        cols = [Col("Code", lambda p: p.internal_code, width=120),
+                Col("Material", lambda p: p.name, width=240),
+                Col("Product No.", lambda p: p.supplier_code or "", width=110),
+                Col("Brand", lambda p: p.brand or "", width=90),
+                Col("Unit", lambda p: p.unit.code, width=55)]
+        if site_id:
+            cols.append(Col("Project stock", lambda p: self.held.get(p.id), QTY, 95))
+        cols.append(Col("Description", lambda p: (p.description or "").replace("\n", " ")))
+        self.table = DataTable(cols)
         if multi:
             self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.table.activated_item.connect(lambda _p: self._ok())
@@ -237,11 +246,14 @@ class MaterialPickerDialog(QDialog):
         self.refresh("")
 
     def refresh(self, text: str | None = None) -> None:
-        rows = run(self, self.app.services.project_tree.find_products, self.search.text() if text is None else text)
+        rows = run(self, self.app.services.project_tree.find_products, self.search.text() if text is None else text,
+                   site_id=self.site_id, project_stock_only=self.only_held.isChecked())
         rows = rows or []
         self.table.set_items(rows)
-        self.count.setText(f"{len(rows)} material(s) shown" + (" - showing the first 200, type more to narrow it down"
-                                                               if len(rows) >= 200 else ""))
+        held = sum(1 for p in rows if p.id in self.held)
+        self.count.setText(f"{len(rows)} material(s) shown" + (f", {held} in this project's stock (listed first)"
+                                                               if self.site_id else "")
+                           + (" - showing the first 200, type more to narrow it down" if len(rows) >= 200 else ""))
 
     def _offer_vpk(self, product) -> None:
         if product is not None and not self.vpk.text().strip():
