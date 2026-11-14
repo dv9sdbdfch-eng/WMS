@@ -43,7 +43,7 @@ def _green_keys(page):
 def _pixel(page, item, col=None):
     """Colour drawn in an empty part of a row: by default a level column the row has no name in
     (proves the green runs across the full width, not only behind the name). Details is not used:
-    since v1.30 it carries the coverage colour."""
+    since v1.31 it carries the coverage colour."""
     if col is None:
         col = C_MGR if name_col(item.data(0, KEY)) != C_MGR else C_PRJ
     tree = page.tree

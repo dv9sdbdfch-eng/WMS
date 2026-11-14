@@ -208,7 +208,7 @@ class MaterialPickerDialog(QDialog):
             lay.addWidget(label(unit_text, "Muted", wrap=True))
         self.search = SearchBox("Search code, product number, barcode, name, description, brand or supplier...")
         self.search.search.connect(self.refresh)
-        # v1.30: a unit draws on its own project's stock - show it, its materials first
+        # v1.31: a unit draws on its own project's stock - show it, its materials first
         self.held = run(self, app.services.project_tree.project_stock_map, site_id) or {} if site_id else {}
         self.only_held = QCheckBox("Only materials in this project's stock")
         self.only_held.setVisible(bool(site_id))

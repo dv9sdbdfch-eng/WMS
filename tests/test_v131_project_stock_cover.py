@@ -1,4 +1,4 @@
-"""v1.30 stages 7 and 8: a unit draws on its own project's stock (material picker shows it first),
+"""v1.31 stages 7 and 8: a unit draws on its own project's stock (material picker shows it first),
 and blocks / levels / units are coloured green / yellow / red by how far that stock covers them."""
 
 from __future__ import annotations

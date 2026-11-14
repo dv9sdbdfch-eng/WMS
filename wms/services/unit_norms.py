@@ -160,7 +160,7 @@ GREEN, YELLOW, RED, NO_NEED = "GREEN", "YELLOW", "RED", "NONE"
 
 @dataclass
 class Coverage:
-    """How far the project's stock covers what part of a project still needs (v1.30).
+    """How far the project's stock covers what part of a project still needs (v1.31).
 
     ``lines`` counts materials (per unit for a unit; per material for a level / block / project);
     ``covered_lines`` those fully covered. Quantities of different materials are never added up."""
@@ -485,7 +485,7 @@ class UnitNormService(BaseService):
             return out
 
     def project_coverage(self, site_id: int) -> ProjectCoverage:
-        """Green / yellow / red coverage of every unit, level and block of a project (v1.30)."""
+        """Green / yellow / red coverage of every unit, level and block of a project (v1.31)."""
         self.require(P.SITES_VIEW)
         with self.db.read_session() as s:
             return project_coverage(s, site_id)

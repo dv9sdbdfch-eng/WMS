@@ -471,7 +471,7 @@ class ProjectTreeService(BaseService):
         """Existing materials for the 'Add material' picker: code, product number, barcode, name,
         description, brand or supplier. Active materials only.
 
-        With ``site_id`` (v1.30) the materials that project holds in its own stock come first, and
+        With ``site_id`` (v1.31) the materials that project holds in its own stock come first, and
         ``project_stock_only`` shows only those."""
         from wms.services.materials import material_text_filter
         self.require(P.SITES_VIEW)
@@ -490,7 +490,7 @@ class ProjectTreeService(BaseService):
 
     def project_stock_map(self, site_id: int) -> dict[int, Decimal]:
         """{product_id: quantity} the project holds in its own stock (delivered for it or reserved,
-        less issued) - what a unit of that project draws on (v1.30)."""
+        less issued) - what a unit of that project draws on (v1.31)."""
         from wms.services.reservations import project_stock
         self.require(P.SITES_VIEW)
         with self.db.read_session() as s:

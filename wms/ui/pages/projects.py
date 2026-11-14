@@ -76,7 +76,7 @@ ACTIVE_PROJECT = QColor("#E8F5E9")
 #: frame around the exact cell that was clicked, so it stands out inside the green project
 CURRENT_CELL = QColor("#2F6FB2")
 _PANEL_KEY = "project_tree/details_hidden"
-#: v1.30 coverage of what is still to make by the project's stock, shown on the Details cell
+#: v1.31 coverage of what is still to make by the project's stock, shown on the Details cell
 COVER_COLOURS = {"GREEN": QColor("#BFE3C3"), "YELLOW": QColor("#FFE2A6"), "RED": QColor("#F6C1C1")}
 UNASSIGNED_KEY = "N:"
 #: open the branches leading to search matches automatically up to this many matches
@@ -445,7 +445,7 @@ class ProjectsPage(Page):
         self._show_coverage(item)
         return item
 
-    # coverage colours (v1.30) -------------------------------------------------------------------
+    # coverage colours (v1.31) -------------------------------------------------------------------
     def coverage(self, site_id: int | None):
         """The project's coverage (green / yellow / red per unit, level, block), read once."""
         if not site_id:
