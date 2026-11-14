@@ -42,8 +42,6 @@ def _nav():
         delivery_notes,
         dispatch,
         finished,
-        goods_in,
-        goods_out,
         locations,
         materials,
         production_board,
@@ -59,10 +57,7 @@ def _nav():
         ("HOME", "dashboard", "Dashboard", None, dashboard.DashboardPage),
         ("WAREHOUSE", "products", "Materials", P.PRODUCTS_VIEW, materials.MaterialsPage),
         ("WAREHOUSE", "locations", "Locations & Bins", P.LOCATIONS_VIEW, locations.LocationsPage),
-        ("OPERATIONS", "goods_in", "Goods In", P.GOODS_IN_POST, goods_in.GoodsInPage),
-        ("OPERATIONS", "goods_out", "Goods Out", P.GOODS_OUT_VIEW, goods_out.GoodsOutPage),
         ("OPERATIONS", "dispatch", "Dispatch", P.GOODS_OUT_VIEW, dispatch.DispatchPage),
-        ("OPERATIONS", ACTION + "transfer", "Transfer", P.STOCK_TRANSFER, None),
         ("PROJECTS", "projects", "Projects", P.SITES_VIEW, projects.ProjectsPage),
         ("PROJECTS", "production_board", "Production Dashboard", P.SITES_VIEW, production_board.ProductionBoardPage),
         ("PURCHASING", "purchase_orders", "Purchase Orders", P.PURCHASING_VIEW, purchase_orders.PurchaseOrdersPage),
@@ -86,9 +81,13 @@ def _hidden():
     highlights ``parent`` so the person still knows where they are.
 
     (key, label, permission, page factory, parent sidebar key)"""
-    from wms.ui.pages import discrepancies, low_stock, movements, reservations, search, sites
+    from wms.ui.pages import discrepancies, goods_in, goods_out, low_stock, movements, reservations, search, sites
     return [
         ("search", "Search", None, search.SearchPage, None),
+        # Ihor 14/11/2026: Goods In / Goods Out / Transfer have no sidebar entry or top-bar button any
+        # more; the screens and their history stay, opened with F2 / F3 / F4 or from other screens
+        ("goods_in", "Goods In", P.GOODS_IN_POST, goods_in.GoodsInPage, None),
+        ("goods_out", "Goods Out", P.GOODS_OUT_VIEW, goods_out.GoodsOutPage, None),
         ("low_stock", "Reorder Required", P.PRODUCTS_VIEW, low_stock.LowStockPage, "products"),
         ("reservations", "Reservations", P.STOCK_VIEW, reservations.ReservationsPage, "projects"),
         # the projects as one flat table (search, sort, export); the tree is the Projects screen
@@ -208,19 +207,13 @@ class MainWindow(QMainWindow):
         self.search.returnPressed.connect(self.global_search)
         tl.addWidget(self.search, 1)
         tl.addSpacing(8)
-        # spec 7: the three everyday operations, same size and look, on every screen
+        # spec 7 had Goods In / Goods Out / Transfer buttons here; Ihor 14/11/2026: no buttons, the
+        # keys F2 / F3 / F4 stay (``quick_keys``)
         self.quick: dict[str, QPushButton] = {}
         can_run = {"goods_in": "goods_in" in self.factories,
                    "goods_out": "goods_out" in self.factories and app.can(P.GOODS_OUT_POST),
                    "transfer": app.can(P.STOCK_TRANSFER)}
-        for key, text, sc in QUICK_ACTIONS:
-            if not can_run[key]:
-                continue
-            b = button(text, lambda k=key: self.quick_action(k), tooltip=f"{text.split(maxsplit=1)[1]} ({sc})")
-            b.setObjectName("QuickAction")
-            self.quick[key] = b
-            tl.addWidget(b)
-        tl.addSpacing(8)
+        self.quick_keys = [key for key, _t, _sc in QUICK_ACTIONS if can_run[key]]
         # spec 5: account actions live in one drop-down, not as permanent buttons
         self.user_button = QToolButton()
         self.user_button.setObjectName("UserMenu")
@@ -261,7 +254,7 @@ class MainWindow(QMainWindow):
         # Warehouse keys (spec 7 / 48): the three everyday operations without the mouse.
         hints = []
         for key, text, sc in QUICK_ACTIONS:
-            if key in self.quick:
+            if key in self.quick_keys:
                 QShortcut(QKeySequence(sc), self, lambda k=key: self.quick_action(k))
                 hints.append(f"{sc} {text.split(maxsplit=1)[1]}")
         QShortcut(QKeySequence("Ctrl+D"), self, lambda: self.go("dashboard"))

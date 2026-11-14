@@ -399,7 +399,7 @@ def test_sidebar_is_grouped_and_less_used_groups_fold(ui, sample):  # noqa: F811
     assert texts == {
         "HOME": ["Dashboard"],
         "WAREHOUSE": ["Materials", "Locations & Bins"],
-        "OPERATIONS": ["Goods In", "Goods Out", "Dispatch", "Transfer"],
+        "OPERATIONS": ["Dispatch"],  # Goods In / Goods Out / Transfer: F2 / F3 / F4 only (Ihor 14/11/2026)
         "PROJECTS": ["Projects", "Production Dashboard"],
         "PURCHASING": ["Purchase Orders", "Deliveries"],
         "MORE": ["Stocktake", "Returns", "Finished Products", "Reports", "Import / Export", "Archived Records"],
@@ -421,10 +421,7 @@ def test_sidebar_is_grouped_and_less_used_groups_fold(ui, sample):  # noqa: F811
     # going to a screen in a folded group opens that group
     win.go("users")
     assert not win.is_folded("ADMIN") and win.stack.currentWidget() is win.page("users")
-    # entries that are actions run them and keep the current screen selected
-    transfer = next(i for i in win.section_items["OPERATIONS"] if i.text() == "Transfer")
-    win.nav.setCurrentItem(transfer)
-    assert "TransferDialog" in opened and win.nav.currentItem().data(Qt.ItemDataRole.UserRole) == "users"
+    # entries that are actions run them (Transfer has no sidebar entry since 14/11/2026: F4)
     backup = next(i for i in win.section_items["ADMIN"] if i.text() == "Backup & Restore")
     win.nav.setCurrentItem(backup)
     assert win.page("settings").tabs.tabText(win.page("settings").tabs.currentIndex()) == "Backup and restore"
@@ -467,17 +464,23 @@ def test_screens_without_a_sidebar_entry_open_in_context(ui, sample):  # noqa: F
 
 def test_top_bar_quick_actions_and_user_menu(ui, sample):  # noqa: F811
     app, win, msgs, opened = ui
-    assert [b.text() for b in win.quick.values()] == ["+  Goods In", "−  Goods Out", "⇄  Transfer"]
-    assert "(F2)" in win.quick["goods_in"].toolTip()
-    win.quick["goods_out"].click()
+    # Ihor 14/11/2026: no Goods In / Goods Out / Transfer buttons; the keys still open them
+    from PySide6.QtWidgets import QPushButton
+    texts = [b.text() for b in win.findChildren(QPushButton)]
+    assert not win.quick and not any(t.endswith(("Goods In", "Goods Out", "Transfer")) for t in texts)
+    assert win.quick_keys == ["goods_in", "goods_out", "transfer"]
+    assert win.nav_item("goods_in") is None and win.nav_item("action:transfer") is None
+    win.quick_action("goods_out")
     assert win.stack.currentWidget() is win.page("goods_out")
-    win.quick["transfer"].click()
+    win.quick_action("goods_in")
+    assert win.stack.currentWidget() is win.page("goods_in")
+    win.quick_action("transfer")
     assert "TransferDialog" in opened
+    assert "F2 Goods In" in win.keys_hint.text()
     actions = [a.text() for a in win.user_menu.actions() if a.text()]
     assert actions[-6:] == ["My Account", "Change Password...", "Settings", "Keyboard Shortcuts",
                             "View: hide / show panels", "Log Out"]
     # no permanent account buttons in the top bar any more
-    from PySide6.QtWidgets import QPushButton
     texts = [b.text() for b in win.findChildren(QPushButton)]
     assert "Change password" not in texts and "Log out" not in texts
     next(a for a in win.user_menu.actions() if a.text() == "Settings").trigger()
