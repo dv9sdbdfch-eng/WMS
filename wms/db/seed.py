@@ -56,6 +56,7 @@ SEQUENCES = [
     ("DISCREPANCY", "DSC-"),
     ("RESERVATION", "RES-"),
     ("DISPATCH", "DEL-"),
+    ("PROJECT_RELEASE", "PSR-"),
 ]
 
 

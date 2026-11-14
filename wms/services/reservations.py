@@ -24,7 +24,16 @@ from wms.core.enums import OPEN_SITE_STATUSES, DocumentStatus, EntityType, Reser
 from wms.core.exceptions import NotFoundError, ValidationError
 from wms.core.numbers import ZERO, fmt_qty, to_qty, utcnow
 from wms.core.permissions import P
-from wms.db.models import Bin, GoodsIssue, GoodsIssueLine, Product, Site, StockLevel, StockReservation
+from wms.db.models import (
+    Bin,
+    GoodsIssue,
+    GoodsIssueLine,
+    Product,
+    ProjectStockRelease,
+    Site,
+    StockLevel,
+    StockReservation,
+)
 from wms.services import audit
 from wms.services.base import BaseService, check_client_token, clean_str, like_pattern
 from wms.services.numbering import next_number
@@ -433,6 +442,80 @@ class ReservationService(BaseService):
             if s.get(Site, site_id) is None:
                 raise NotFoundError("Project not found.")
             return sorted(project_stock(s, site_id).values(), key=lambda x: x.code)
+
+    def return_to_main(self, site_id: int, items: list[tuple[int, object]], reason: str) -> str:
+        """v1.27: give material back from a project's stock to the main warehouse stock.
+
+        ``items`` = [(product_id, quantity)]. Each quantity can be at most what the project holds of
+        that material. What was set aside for the project is reduced by it - the newest reservations
+        first - so the material is free for any work again. Nothing moves and the ledger is not
+        touched. All lines or none; returns the document number (PSR-000001)."""
+        self.require(P.RESERVATIONS_EDIT)
+        reason = clean_str(reason, "reason", required=True)
+        wanted: dict[int, Decimal] = {}
+        for pid, raw in items:
+            if raw in (None, "") or not pid:
+                continue
+            qty = to_qty(raw, "quantity")
+            if qty < ZERO:
+                raise ValidationError("Quantity cannot be negative.", "quantity")
+            if qty > ZERO:
+                wanted[pid] = wanted.get(pid, ZERO) + qty
+        if not wanted:
+            raise ValidationError("Enter the quantity to return for at least one material.")
+        with self.db.session() as s:
+            site = s.get(Site, site_id)
+            if site is None:
+                raise NotFoundError("Project not found.")
+            held = project_stock(s, site_id, list(wanted))
+            for pid, qty in wanted.items():
+                have = held[pid].total if pid in held else ZERO
+                if qty > have:
+                    p = s.get(Product, pid)
+                    raise ValidationError(f"{p.internal_code}: the project holds {fmt_qty(have)} {p.unit.code}, "
+                                          f"so {fmt_qty(qty)} cannot be returned.", "quantity")
+            number = next_number(s, "PROJECT_RELEASE")
+            rows = sorted(active_reservations(s, list(wanted), site_id=site_id), key=lambda r: r.id, reverse=True)
+            issued = issued_by_reservation(s, [r.id for r in rows])
+            why = f"Returned to main stock ({number}): {reason}"
+            for pid, qty in wanted.items():
+                rest = qty
+                for r in (r for r in rows if r.product_id == pid):
+                    if rest <= ZERO:
+                        break
+                    done = issued.get(r.id, ZERO)
+                    left = r.quantity - done
+                    if left <= ZERO:
+                        continue
+                    take = min(rest, left)
+                    rest -= take
+                    old = {"quantity": r.quantity, "status": r.status}
+                    r.quantity -= take
+                    if r.quantity <= done:
+                        if done > ZERO:
+                            r.quantity, r.status = done, ReservationStatus.FULFILLED.value
+                        else:
+                            r.quantity = old["quantity"]  # quantity must stay > 0: keep it, mark released
+                            r.status, r.released_at, r.released_by_id, r.release_reason = (
+                                ReservationStatus.RELEASED.value, utcnow(), self.user.id, why)
+                    audit.record(s, self.ctx, "RESERVATION_CHANGED", EntityType.RESERVATION.value, r.id, r.number,
+                                 why, old=old, new={"quantity": r.quantity, "status": r.status})
+                p = s.get(Product, pid)
+                s.add(ProjectStockRelease(number=number, site_id=site.id, site_number_snapshot=site.project_number,
+                                          site_name_snapshot=site.name, product_id=pid, quantity=qty, reason=reason,
+                                          user_id=self.user.id, user_name_snapshot=self.user.full_name))
+                audit.record(s, self.ctx, "PROJECT_STOCK_RETURNED", EntityType.SITE.value, site.id, site.display,
+                             f"{number}: {fmt_qty(qty)} {p.unit.code} {p.internal_code} back to main stock - {reason}",
+                             new={"number": number, "product_id": pid, "quantity": qty})
+            return number
+
+    def project_releases(self, site_id: int) -> list[ProjectStockRelease]:
+        """Returns to main stock of a project, newest first."""
+        with self.db.read_session() as s:
+            rows = list(s.scalars(select(ProjectStockRelease).where(ProjectStockRelease.site_id == site_id)
+                                  .order_by(ProjectStockRelease.id.desc())))
+            _ = [r.product.unit for r in rows]
+            return rows
 
     def summary_by_product(self, product_ids: list[int]) -> dict[int, Decimal]:
         with self.db.read_session() as s:

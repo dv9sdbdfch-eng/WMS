@@ -436,6 +436,24 @@ Protected tables (database triggers, see `wms.db.engine`):
 * CHECK required_qty >= 0
 * UNIQUE (site_id, product_id)
 
+## project_stock_releases
+
+| Column | Type | Null | Key / reference |
+|---|---|---|---|
+| number | String(30) | no | indexed |
+| site_id | Integer | no | FK sites.id, indexed |
+| product_id | Integer | no | FK products.id, indexed |
+| quantity | Quantity | no |  |
+| reason | Text | no |  |
+| user_id | Integer | no | FK users.id, indexed |
+| user_name_snapshot | String(120) | yes |  |
+| released_at | UTCDateTime | no | indexed |
+| id | Integer | no | PK |
+| site_number_snapshot | String(50) | yes |  |
+| site_name_snapshot | String(200) | yes |  |
+
+* CHECK quantity > 0
+
 ## project_units
 
 | Column | Type | Null | Key / reference |

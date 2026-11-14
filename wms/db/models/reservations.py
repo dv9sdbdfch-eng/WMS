@@ -47,3 +47,28 @@ class StockReservation(IdMixin, _SiteSnapshot, _ClientToken, Base):
     site = relationship("Site", lazy="joined")
     created_by = relationship("User", foreign_keys=[created_by_id], lazy="joined")
     released_by = relationship("User", foreign_keys=[released_by_id], lazy="joined")
+
+
+class ProjectStockRelease(IdMixin, _SiteSnapshot, Base):
+    """v1.27: material given back from a project's stock to the main warehouse stock.
+
+    Nothing moves physically and the ledger is not touched: what was set aside for the project
+    (its reservations) is reduced by the quantity, so the material is free for any work again.
+    One row per material; rows that were released together share one number (PSR-000001).
+    Never edited or deleted.
+    """
+
+    __tablename__ = "project_stock_releases"
+    __table_args__ = (CheckConstraint("quantity > 0", name="qty_positive"),)
+
+    number: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    site_id: Mapped[int] = fk("sites.id", nullable=False)
+    product_id: Mapped[int] = fk("products.id", nullable=False)
+    quantity: Mapped[Decimal] = mapped_column(Quantity, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    user_id: Mapped[int] = fk("users.id", nullable=False)
+    user_name_snapshot: Mapped[str | None] = mapped_column(String(120))
+    released_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, nullable=False, index=True)
+
+    product = relationship("Product", lazy="joined")
+    site = relationship("Site", lazy="joined")
