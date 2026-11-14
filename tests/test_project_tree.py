@@ -320,7 +320,7 @@ def test_upgrade_turns_typed_manager_names_into_managers(svc, sample):
 # ---- the Project Tree screen ------------------------------------------------------------------------
 from test_ui_smoke import _errors, ui  # noqa: E402,F401 - the shared screen fixture
 
-from wms.ui.pages.projects import C_CODE, C_INFO, C_LVL, C_QTY, C_TOTAL, KEY, name_col  # noqa: E402
+from wms.ui.pages.projects import C_INFO, C_LVL, C_UNIT, KEY, MATCH, name_col  # noqa: E402
 
 
 def _open_page(win):
@@ -335,8 +335,11 @@ def _name(item):
     return item.text(name_col(item.data(0, KEY)))
 
 
-def _texts(item):
-    return [_name(item)] + [item.text(c) for c in (C_CODE, C_QTY, C_TOTAL, C_INFO)]
+def _schedule(page, unit_id):
+    """The unit's Finish Schedule window (not shown): {material code: schedule row}."""
+    from wms.ui.dialogs.finish_schedule import FinishScheduleDialog
+    dlg = FinishScheduleDialog(page, unit_id)
+    return dlg, {r.need.product_code: r for r in dlg.lines}
 
 
 def test_tree_screen_lazy_branches_and_totals(ui, tribeca):  # noqa: F811
@@ -349,16 +352,19 @@ def test_tree_screen_lazy_branches_and_totals(ui, tribeca):  # noqa: F811
     tri = page.items[f"P:{tribeca.project.id}"]
     tri.setExpanded(True)
     kitchen = page.items[f"U:{tribeca.kitchen.id}"]
-    assert _texts(kitchen)[:3] == ["Kitchen", "K01", "24"]
-    kitchen.setExpanded(True)
-    hinge = [kitchen.child(i) for i in range(kitchen.childCount()) if kitchen.child(i).text(C_CODE) == "HINGE-XYZ"][0]
-    assert hinge.text(C_QTY) == "8 / unit" and hinge.text(C_TOTAL) == "192 EA"
+    assert _name(kitchen) == "Kitchen" and kitchen.text(C_INFO) == "K01  ·  × 24  ·  3 materials"
+    assert kitchen.childCount() == 0 and not page.has_arrow(kitchen)  # materials are in the Finish Schedule
+    assert [page.tree.headerItem().text(c) for c in range(page.tree.columnCount() - 1)] == [
+        "Project Manager", "Project", "Block", "Level", "Unit", "Details"]
+    _dlg, rows = _schedule(page, tribeca.kitchen.id)
+    assert rows["HINGE-XYZ"].need.norm == D(8) and rows["HINGE-XYZ"].need.total == D(192)
     assert f"P:{tribeca.sample.site.id}" not in page.items  # unassigned group not opened
     assert _name(page.items["N:"]) == "Unassigned projects"
     # every row has its own menu
     for key in (f"M:{tribeca.john.id}", "N:", f"P:{tribeca.project.id}", f"U:{tribeca.kitchen.id}"):
         assert page.build_menu(page.items[key]).actions()
-    assert [a.text() for a in page.build_menu(hinge).actions() if a.text()][:2] == ["Edit Quantity...", "Replace..."]
+    assert [a.text() for a in page.build_menu(kitchen).actions() if a.text()][:2] == ["Finish Schedule...",
+                                                                                      "Add Material..."]
     assert not _errors(msgs), msgs
 
 
@@ -368,16 +374,20 @@ def test_tree_inline_edit_and_side_panel(ui, tribeca):  # noqa: F811
     page.items[f"M:{tribeca.john.id}"].setExpanded(True)
     page.items[f"P:{tribeca.project.id}"].setExpanded(True)
     kitchen = page.items[f"U:{tribeca.kitchen.id}"]
-    kitchen.setExpanded(True)
-    assert page.commit_edit(kitchen, C_QTY, "10")  # Kitchen x 10
+    assert page.commit_edit(kitchen, C_UNIT, "Kitchen Type A")  # rename inline (F2)
+    page.select(f"U:{tribeca.kitchen.id}")
+    page.panel.u_qty.setText("10")  # Kitchen x 10, in the details panel
+    assert page.panel.save_unit()
     assert app.services.project_tree.unit(tribeca.kitchen.id).quantity == Decimal("10")
-    kitchen = page.items[f"U:{tribeca.kitchen.id}"]
-    totals = {kitchen.child(i).text(C_CODE): kitchen.child(i).text(C_TOTAL) for i in range(kitchen.childCount())}
-    assert totals["HINGE-XYZ"] == "80 EA"  # the materials below follow
-    assert not page.commit_edit(kitchen, C_QTY, "-3")  # refused, old value back
+    assert "× 10" in page.items[f"U:{tribeca.kitchen.id}"].text(C_INFO)
+    _dlg, rows = _schedule(page, tribeca.kitchen.id)
+    assert rows["HINGE-XYZ"].need.total == D(80)  # the materials follow
+    page.panel.u_qty.setText("-3")
+    assert not page.panel.save_unit()  # refused, typed value kept
     assert [m for m in msgs if m[0] == "warning"]
     msgs.clear()
-    assert page.items[f"U:{tribeca.kitchen.id}"].text(C_QTY) == "10"
+    page.panel.discard()
+    assert "× 10" in page.items[f"U:{tribeca.kitchen.id}"].text(C_INFO)
     # side panel: select a project, change its name there
     page.select(f"P:{tribeca.project.id}")
     assert page.panel.currentWidget() is page.panel.pages["P"]
@@ -397,10 +407,9 @@ def test_tree_search_opens_the_matching_branch(ui, tribeca):  # noqa: F811
     page.refresh()
     assert page.items[f"M:{tribeca.john.id}"].isExpanded()
     assert page.items[f"P:{tribeca.project.id}"].isExpanded()
-    assert page.items[f"U:{tribeca.kitchen.id}"].isExpanded()
     assert f"U:{tribeca.wardrobe.id}" not in page.items  # no match below it: hidden while searching
-    kitchen = page.items[f"U:{tribeca.kitchen.id}"]
-    assert kitchen.childCount() == 1 and kitchen.child(0).text(C_CODE) == "HINGE-XYZ"
+    kitchen = page.items[f"U:{tribeca.kitchen.id}"]  # holds the matching material: highlighted
+    assert kitchen.background(C_UNIT).color() == MATCH
     assert "1 match" in page.status.text()
     page.search.setText("")
     page.refresh()
@@ -418,7 +427,6 @@ def test_tree_open_branches_survive_a_restart(ui, tribeca):  # noqa: F811
     again = ProjectsPage(app)
     again.refresh()
     assert again.items[f"P:{tribeca.project.id}"].isExpanded()
-    assert not again.items[f"U:{tribeca.kitchen.id}"].isExpanded()
     again.collapse_all()
     third = ProjectsPage(app)
     third.refresh()
@@ -544,9 +552,8 @@ def test_tree_screen_blocks_levels(ui, tribeca, tower, monkeypatch):  # noqa: F8
     assert _name(block) == "Block A" and "1 level" in block.text(C_INFO)
     level = page.items[f"V:{tower.level.id}"]
     assert level.isExpanded() and level.childCount() == 2
-    k10 = page.items[f"U:{tower.k10.id}"]
-    k10.setExpanded(True)
-    assert k10.child(0).text(C_TOTAL) == "8 SHEET"
+    _dlg, rows = _schedule(page, tower.k10.id)
+    assert rows["H3311"].need.total == D(8) and rows["H3311"].uom == "SHEET"
     for key in (f"B:{tower.block.id}", f"V:{tower.level.id}"):
         assert page.build_menu(page.items[key]).actions()
     # rename inline, side panel shows the level's demand
