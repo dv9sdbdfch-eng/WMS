@@ -39,7 +39,7 @@ from wms.core.exceptions import NotFoundError, ValidationError
 from wms.core.numbers import ZERO, to_qty, utcnow
 from wms.core.permissions import P
 from wms.db.models import Product, ProjectUnit, Site, UnitCompletion, UnitMaterial, UnitMaterialNorm
-from wms.db.models.hierarchy import NORM_ALL, NORM_FUTURE
+from wms.db.models.hierarchy import NORM_ALL, NORM_FUTURE, STAGE_DONE
 from wms.services import audit
 from wms.services.base import BaseService, clean_str
 
@@ -131,12 +131,20 @@ def record_norm(s: Session, ctx, line: UnitMaterial, previous: Decimal | None, a
 
 def units_done(s: Session, unit_id: int) -> Decimal:
     raw = s.scalar(select(func.sum(UnitCompletion.quantity))
-                   .where(UnitCompletion.unit_id == unit_id, UnitCompletion.cancelled_at.is_(None)))
+                   .where(UnitCompletion.unit_id == unit_id, UnitCompletion.cancelled_at.is_(None),
+                          UnitCompletion.stage == STAGE_DONE))
     return Decimal(raw or 0)
 
 
+def highest_marked_piece(s: Session, unit_id: int) -> int:
+    """The highest piece number of a unit type with a live Production dashboard mark (0: none)."""
+    return s.scalar(select(func.max(UnitCompletion.piece_no))
+                    .where(UnitCompletion.unit_id == unit_id, UnitCompletion.cancelled_at.is_(None))) or 0
+
+
 def units_with_completions(s: Session, *conds) -> int:
-    """How many units matching ``conds`` (on ProjectUnit) have completed units recorded."""
+    """How many units matching ``conds`` (on ProjectUnit) have completed units recorded (any stage:
+    Done, Dispatched or On site marks all protect a unit from being deleted)."""
     return s.scalar(select(func.count(func.distinct(UnitCompletion.unit_id)))
                     .join(ProjectUnit, ProjectUnit.id == UnitCompletion.unit_id)
                     .where(UnitCompletion.cancelled_at.is_(None), *conds)) or 0
@@ -244,7 +252,7 @@ class UnitNormService(BaseService):
     def completions(self, unit_id: int, include_cancelled: bool = True) -> list[CompletionRow]:
         self.require(P.SITES_VIEW)
         with self.db.read_session() as s:
-            q = select(UnitCompletion).where(UnitCompletion.unit_id == unit_id)
+            q = select(UnitCompletion).where(UnitCompletion.unit_id == unit_id, UnitCompletion.stage == STAGE_DONE)
             if not include_cancelled:
                 q = q.where(UnitCompletion.cancelled_at.is_(None))
             return [_completion_row(r) for r in s.scalars(q.order_by(UnitCompletion.recorded_at, UnitCompletion.id))]
@@ -288,7 +296,8 @@ class UnitNormService(BaseService):
                 .order_by(UnitMaterial.unit_id, UnitMaterial.sort_order, UnitMaterial.id)))
             for uid, qty, at in s.execute(
                     select(UnitCompletion.unit_id, UnitCompletion.quantity, UnitCompletion.recorded_at)
-                    .where(UnitCompletion.unit_id.in_(chunk), UnitCompletion.cancelled_at.is_(None))):
+                    .where(UnitCompletion.unit_id.in_(chunk), UnitCompletion.cancelled_at.is_(None),
+                           UnitCompletion.stage == STAGE_DONE)):
                 batches.setdefault(uid, []).append((qty, at))
             for r in s.execute(
                     select(UnitMaterialNorm.id, UnitMaterialNorm.unit_material_id, UnitMaterialNorm.quantity_per_unit,

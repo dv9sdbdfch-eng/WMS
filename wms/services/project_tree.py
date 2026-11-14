@@ -33,7 +33,7 @@ from wms.db.models import Manager, Product, ProjectBlock, ProjectLevel, ProjectU
 from wms.services import audit
 from wms.services.base import BaseService, clean_code, clean_str, like_pattern
 from wms.services.project_demand import line_total, sync_project_lists
-from wms.services.unit_norms import NORM_ALL, record_norm, units_done, units_with_completions
+from wms.services.unit_norms import NORM_ALL, highest_marked_piece, record_norm, units_done, units_with_completions
 
 #: manager filter value for "projects without a manager"
 UNASSIGNED = -1
@@ -786,6 +786,11 @@ class ProjectTreeService(BaseService):
                 if u.quantity < done:
                     raise ValidationError(f"{done.normalize():f} unit(s) of {u.name} are already done: the quantity "
                                           f"cannot be less than that.", "quantity")
+                top = highest_marked_piece(s, unit_id) if unit_id else 0
+                if u.quantity < top:
+                    raise ValidationError(f"Piece #{top} of {u.name} has Done / Dispatched / On site marks on the "
+                                          f"Production dashboard: the quantity cannot be less than {top}. Cancel "
+                                          f"those marks first.", "quantity")
             if "notes" in data:
                 u.notes = clean_str(data.get("notes"))
             if not unit_id:
@@ -1251,8 +1256,8 @@ def _refuse_if_done(s: Session, *conds) -> None:
     """Units with completed units recorded are history: they are not deleted with the structure."""
     n = units_with_completions(s, *conds)
     if n:
-        raise ValidationError(f"{n} unit(s) here already have completed units recorded. Cancel those records "
-                              f"first, or keep the units (move them if needed).")
+        raise ValidationError(f"{n} unit(s) here already have completed units or Done / Dispatched / On site marks "
+                              f"recorded. Cancel those records first, or keep the units (move them if needed).")
 
 
 def _delete_units(s: Session, *conds) -> tuple[int, int]:

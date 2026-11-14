@@ -27,7 +27,8 @@ def make_win(qtbot, svc, monkeypatch):
 
 def test_one_projects_entry_in_the_sidebar():
     labels = [text for section, _k, text, *_r in _nav() if section == "PROJECTS"]
-    assert labels == ["Projects"]
+    # one Projects screen (tree + list merged in v1.16); the Production Dashboard (v1.24) is a separate view
+    assert labels == ["Projects", "Production Dashboard"]
     hidden = {k: parent for k, _t, _p, _f, parent in _hidden()}
     assert hidden["sites"] == "projects" and hidden["reservations"] == "projects"
 

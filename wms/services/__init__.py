@@ -104,6 +104,11 @@ class Services:
         return UnitNormService(self.ctx)
 
     @cached_property
+    def unit_progress(self):
+        from wms.services.unit_progress import UnitProgressService
+        return UnitProgressService(self.ctx)
+
+    @cached_property
     def project_demand(self):
         from wms.services.project_demand import ProjectDemandService
         return ProjectDemandService(self.ctx)
