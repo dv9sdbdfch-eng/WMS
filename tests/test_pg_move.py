@@ -142,7 +142,8 @@ def test_move_window_moves_and_switches_this_pc(local_pc, empty_server, monkeypa
     # a second run refuses: the server now has data
     dlg2 = mod.MoveToServerDialog(cfg)
     qtbot.addWidget(dlg2)
-    for w, v in ((dlg2.host, u.host or "127.0.0.1"), (dlg2.database, u.database), (dlg2.user, u.username)):
+    for w, v in ((dlg2.host, u.host or "127.0.0.1"), (dlg2.database, u.database), (dlg2.user, u.username),
+                 (dlg2.password, u.password or "")):
         w.setText(v)
     dlg2.port.setValue(u.port or 5432)
     dlg2.save()
