@@ -171,3 +171,98 @@ class ReservationsPanel(QWidget):
         if reason and run(self, self.app.services.reservations.release, v.reservation.id, reason):
             self.app.changed()
             self.refresh()
+
+
+class ProjectStockDialog(QDialog):
+    """v1.27: a project's stock (delivered for it + reserved for it, less issued) and Return to Main
+    Stock - give some or all of it back to the warehouse so it is free for any work again."""
+
+    C_RETURN = 6
+
+    def __init__(self, app, site_id: int, parent=None):
+        super().__init__(parent)
+        from PySide6.QtWidgets import QTableWidget
+        self.app, self.site_id = app, site_id
+        site = app.services.sites.get(site_id)
+        self.setWindowTitle(f"Project Stock - {site.display}")
+        self.setMinimumSize(900, 520)
+        lay = QVBoxLayout(self)
+        lay.addWidget(label(f"Project stock: {site.display}", "PageTitle"))
+        lay.addWidget(label("Material set aside for this project (delivered for it with Goods In, or reserved for "
+                            "it) and not issued yet. Return to Main Stock gives it back to the warehouse: nothing "
+                            "moves on the shelves, the material just stops being kept for this project.",
+                            "Muted", wrap=True))
+        self.table = QTableWidget(0, 7)
+        self.table.setHorizontalHeaderLabels(["Code", "Material", "Unit", "Delivered for project",
+                                              "Reserved", "Project stock", "Return"])
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        for c, w in enumerate((110, 280, 55, 140, 90, 110)):
+            self.table.setColumnWidth(c, w)
+        lay.addWidget(self.table, 1)
+        self.reason = QLineEdit()
+        self.reason.setPlaceholderText("Why it goes back, e.g. 'Left over after Level 3', 'Project changed'")
+        form = QFormLayout()
+        form.addRow("Reason *", self.reason)
+        lay.addLayout(form)
+        self.history = DataTable([Col("No.", lambda r: r.number, width=95),
+                                  Col("Date", lambda r: r.released_at, DATETIME, 125),
+                                  Col("Code", lambda r: r.product.internal_code, width=110),
+                                  Col("Material", lambda r: r.product.name, width=220),
+                                  Col("Returned", lambda r: r.quantity, QTY, 85),
+                                  Col("Unit", lambda r: r.product.unit.code, width=55),
+                                  Col("By", lambda r: r.user_name_snapshot or "", width=120),
+                                  Col("Reason", lambda r: r.reason)])
+        lay.addWidget(label("Returned to main stock", "SectionTitle"))
+        self.history.setMaximumHeight(160)
+        lay.addWidget(self.history)
+        btns = [None, button("Close", self.reject)]
+        if app.can(P.RESERVATIONS_EDIT):
+            btns = [button("Return All", self.fill_all), None, button("Close", self.reject),
+                    button("Return to Main Stock", self.save, primary=True)]
+        lay.addLayout(h(*btns))
+        self.refresh()
+
+    def refresh(self):
+        from PySide6.QtCore import Qt
+        from PySide6.QtWidgets import QTableWidgetItem
+        self.lines = self.app.services.reservations.project_stock(self.site_id)
+        self.table.setRowCount(len(self.lines))
+        for r, ln in enumerate(self.lines):
+            vals = [ln.code, ln.name, ln.unit, fmt_qty(ln.from_deliveries), fmt_qty(ln.reserved), fmt_qty(ln.total)]
+            for c, v in enumerate(vals):
+                it = QTableWidgetItem(v)
+                it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                if c >= 3:
+                    it.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                self.table.setItem(r, c, it)
+            ret = QTableWidgetItem("")
+            ret.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            ret.setToolTip("Quantity to give back to main stock (empty = keep it all for the project)")
+            self.table.setItem(r, self.C_RETURN, ret)
+        self.history.set_items(self.app.services.reservations.project_releases(self.site_id))
+
+    def fill_all(self):
+        for r, ln in enumerate(self.lines):
+            self.table.item(r, self.C_RETURN).setText(fmt_qty(ln.total))
+
+    def items(self) -> list[tuple[int, str]]:
+        out = []
+        for r, ln in enumerate(self.lines):
+            text = (self.table.item(r, self.C_RETURN).text() or "").strip()
+            if text:
+                out.append((ln.product_id, text))
+        return out
+
+    def save(self):
+        items = self.items()
+        if not items:
+            show_error(self, ValidationError("Enter the quantity to return in the Return column."))
+            return
+        number = run(self, self.app.services.reservations.return_to_main, self.site_id, items, self.reason.text())
+        if number:
+            self.app.changed()
+            self.reason.clear()
+            self.refresh()
+            from wms.ui.widgets.common import info
+            info(self, "Returned to main stock", f"{number}: {len(items)} material(s) given back to main stock.")

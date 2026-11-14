@@ -996,6 +996,10 @@ class ProjectsPage(Page):
             self.tree.setCurrentItem(item)
             self.show_menu(item, self.tree.viewport().mapToGlobal(pos))
 
+    def project_stock(self, node) -> None:
+        from wms.ui.dialogs.reservations import ProjectStockDialog
+        ProjectStockDialog(self.app, node.id, self).exec()
+
     def _menu_for_current(self) -> None:
         item = self.tree.currentItem()
         if item is not None:
@@ -1038,6 +1042,7 @@ class ProjectsPage(Page):
                     node.manager_id is not None)
                 if not ro and node.status not in CLOSED_SITE_STATUSES:
                     m.addAction("Reset Required to Units...", lambda: self.apply_demand(node))
+            m.addAction("Project Stock / Return to Main Stock...", lambda: self.project_stock(node))
             m.addAction("Open Project Record", lambda: self.open_project(node))
             if e:
                 m.addSeparator()
