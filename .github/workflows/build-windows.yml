@@ -25,8 +25,8 @@ jobs:
       run:
         shell: pwsh
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
       - name: Install packages
@@ -66,7 +66,7 @@ jobs:
           $hash = (Get-FileHash $exe.FullName -Algorithm SHA256).Hash.ToLower()
           "$hash  $($exe.Name)" | Out-File -Encoding ascii -NoNewline "$($exe.FullName).sha256"
           "$hash  $($exe.Name)"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: StoreWMS-installer
           path: |
@@ -84,7 +84,7 @@ jobs:
           else { "Publishing release v$v"; "new=true" >> $env:GITHUB_OUTPUT; "version=$v" >> $env:GITHUB_OUTPUT }
       - name: Publish release (new version on main)
         if: steps.ver.outputs.new == 'true'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ steps.ver.outputs.version }}
           name: Store WMS ${{ steps.ver.outputs.version }}
@@ -96,7 +96,7 @@ jobs:
           make_latest: true
       - name: Publish release (tag pushed by hand)
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             dist/StoreWMS-Setup-*.exe

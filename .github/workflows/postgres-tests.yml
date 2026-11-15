@@ -26,8 +26,8 @@ jobs:
       WMS_TEST_PG: postgresql+psycopg://postgres:wms-ci@localhost:5432/postgres
       QT_QPA_PLATFORM: offscreen
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
       - name: Qt libraries for the screen tests
