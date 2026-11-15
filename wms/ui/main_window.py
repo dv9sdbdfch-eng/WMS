@@ -8,6 +8,7 @@ from datetime import datetime
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
+    QApplication,
     QHBoxLayout,
     QLineEdit,
     QListWidget,
@@ -632,13 +633,66 @@ class MainWindow(QMainWindow):
             self.app.changed()
         return path
 
+    # -- program updates -------------------------------------------------------
+    def start_update_check(self) -> None:
+        """Look for a newer version in the background a few seconds after sign-in, then twice a day.
+        Found at the start: the update window opens. Found later (the PC was left on): a button in
+        the status bar, so nobody is interrupted in the middle of a job."""
+        if not self.app.ctx.config.check_for_updates:
+            return
+        self._update_button = None
+        self._update_checks = 0
+        self._update_timer = QTimer(self)
+        self._update_timer.setInterval(12 * 60 * 60 * 1000)
+        self._update_timer.timeout.connect(self.check_for_update)
+        self._update_timer.start()
+        QTimer.singleShot(3000, self.check_for_update)
+
+    def check_for_update(self) -> None:
+        from wms.ui.dialogs.update import CheckThread
+        if getattr(self, "_update_thread", None) is not None and self._update_thread.isRunning():
+            return
+        self._update_checks = getattr(self, "_update_checks", 0) + 1
+        self._update_thread = CheckThread(self)
+        self._update_thread.found.connect(self._update_found)
+        self._update_thread.failed.connect(lambda e: log.info("Update check: %s", e))
+        self._update_thread.start()
+
+    def _update_found(self, info) -> None:
+        cfg = self.app.ctx.config
+        if info.version == (cfg.skipped_update_version or ""):
+            return
+        self._update_info = info
+        if getattr(self, "_update_button", None) is None:
+            self._update_button = QPushButton()
+            self._update_button.setObjectName("Primary")
+            self._update_button.clicked.connect(self._open_update)
+            self.statusBar().addPermanentWidget(self._update_button)
+        self._update_button.setText(f"New version {info.version} - Install...")
+        if getattr(self, "_update_checks", 1) == 1 and self.isVisible() and QApplication.activeModalWidget() is None:
+            self._open_update()
+
+    def _open_update(self) -> None:
+        from wms.ui.dialogs.update import UpdateDialog
+        UpdateDialog(self._update_info, self.app.ctx.config, self.app.services, self).exec()
+
+    def can_close_for_update(self) -> bool:
+        """Every screen with unsaved work asks Save / Discard / Cancel before the update closes it."""
+        return all(page.can_leave() for page in list(self.pages.values()) if hasattr(page, "can_leave"))
+
+    def close_for_update(self) -> None:
+        """The installer has started: close at once, without the exit backup (one was just made)."""
+        self.app.closing_for_update = True
+        self.close()
+
     def closeEvent(self, event):  # noqa: N802
         for page in list(self.pages.values()):
             if hasattr(page, "can_leave") and not page.can_leave():
                 event.ignore()  # unsaved changes kept: the program stays open
                 return
         cfg = self.app.ctx.config
-        if cfg.auto_backup_on_exit and cfg.is_sqlite and not self.app.restart_required:
+        if cfg.auto_backup_on_exit and cfg.is_sqlite and not self.app.restart_required \
+                and not self.app.closing_for_update:
             try:
                 path = self.app.services.backup.create(note="Automatic backup on exit", automatic=True)
                 log.info("Automatic backup written to %s", path)

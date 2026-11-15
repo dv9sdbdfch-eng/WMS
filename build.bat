@@ -2,7 +2,7 @@
 rem ---------------------------------------------------------------------------
 rem  Builds Store WMS for Windows:
 rem    dist\StoreWMS\StoreWMS.exe          (the program)
-rem    dist\StoreWMS-Setup-1.0.1.exe       (the installer, if Inno Setup 6 is installed)
+rem    dist\StoreWMS-Setup-<version>.exe   (the installer, if Inno Setup 6 is installed)
 rem  Needs: Python 3.12 or 3.13 (64-bit) from python.org, "Add to PATH" ticked.
 rem ---------------------------------------------------------------------------
 setlocal
@@ -32,7 +32,7 @@ if exist %ISCC% (
     echo Building installer...
     %ISCC% packaging\installer.iss || goto :error
     echo.
-    echo DONE. Installer: dist\StoreWMS-Setup-1.0.1.exe
+    echo DONE. Installer: dist\StoreWMS-Setup-*.exe
 ) else (
     echo.
     echo DONE. Program folder: dist\StoreWMS  ^(install Inno Setup 6 from jrsoftware.org to also get a Setup.exe^)

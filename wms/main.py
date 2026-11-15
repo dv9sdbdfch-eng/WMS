@@ -92,6 +92,16 @@ def _is_schema_too_new(exc: BaseException) -> bool:
     return isinstance(exc, SchemaTooNewError)
 
 
+def _offer_required_update(cfg: AppConfig) -> bool:
+    """Another PC already upgraded the shared database: offer this PC's update straight away."""
+    try:
+        from wms.ui.dialogs.update import offer_required_update
+        return offer_required_update(cfg)
+    except Exception:  # noqa: BLE001 - fall back to the plain message
+        log.exception("Could not offer the update")
+        return False
+
+
 def _server_unavailable(cfg: AppConfig, exc: BaseException) -> str:
     """The shared server cannot be used: say why in plain words and offer Retry / Connection.
     Returns "retry", "restart" (connection changed) or "close"."""
@@ -175,6 +185,8 @@ def run() -> int:
             break
         except Exception as exc:  # noqa: BLE001
             log.exception("Database start-up failed")
+            if _is_schema_too_new(exc) and _offer_required_update(cfg):
+                return 0  # the installer is running and will start the new version
             if cfg.is_sqlite and not _is_schema_too_new(exc):
                 db = _recover_database(cfg, exc)
                 if db is None:
@@ -221,6 +233,7 @@ def run() -> int:
         state.update(logout=False, window=window, app=app)
         window.showMaximized()
         window.start_backup_schedule()
+        window.start_update_check()
         qt_app.exec()
         if not getattr(app, "restart_required", False):  # after a restore the old session is gone
             try:

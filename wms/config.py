@@ -111,6 +111,10 @@ class AppConfig:
     server_port: int = 5432
     server_database: str = "storewms"
     server_user: str = "storewms"
+    # Look for a newer version on GitHub Releases when the program starts (wms.services.updater).
+    check_for_updates: bool = True
+    # "Skip this version": that version is not offered again at start-up (Settings > About still can).
+    skipped_update_version: str = ""
     company_name: str = "My Company Ltd"
     max_attachment_mb: int = 25
     extra: dict = field(default_factory=dict)
