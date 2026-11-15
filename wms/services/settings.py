@@ -7,7 +7,7 @@ from wms.services import audit
 from wms.services.base import BaseService
 
 EDITABLE = ("company_name", "auto_backup_on_exit", "auto_backup_hours", "backups_to_keep", "backup_dir",
-            "backup_copy_dir", "max_attachment_mb")
+            "backup_copy_dir", "max_attachment_mb", "check_for_updates")
 
 
 class SettingsService(BaseService):
@@ -26,6 +26,7 @@ class SettingsService(BaseService):
         cfg.auto_backup_hours = min(max(int(cfg.auto_backup_hours or 0), 0), 24 * 7)
         cfg.backup_dir = (cfg.backup_dir or "").strip()
         cfg.backup_copy_dir = (cfg.backup_copy_dir or "").strip()
+        cfg.check_for_updates = bool(cfg.check_for_updates)
         cfg.max_attachment_mb = min(max(int(cfg.max_attachment_mb or 25), 1), 200)
         new = {k: getattr(cfg, k) for k in EDITABLE}
         try:

@@ -90,6 +90,8 @@ class SettingsPage(Page):
         self.auto_hours.setMaximumWidth(120)
         self.copy_dir = QLineEdit(cfg.backup_copy_dir or "")
         self.copy_dir.setPlaceholderText("Optional: USB stick, network drive or OneDrive folder")
+        self.check_updates = QCheckBox("Check for a new version of Store WMS when the program starts")
+        self.check_updates.setChecked(bool(cfg.check_for_updates))
         self.max_mb = QSpinBox()
         self.max_mb.setRange(1, 200)
         self.max_mb.setValue(int(cfg.max_attachment_mb))
@@ -101,6 +103,7 @@ class SettingsPage(Page):
         form.addRow("Backup folder", h(self.backup_dir, button("Browse...", self._browse_backup)))
         form.addRow("Second copy of every backup", h(self.copy_dir, button("Browse...", self._browse_copy)))
         form.addRow("Largest attachment (MB)", self.max_mb)
+        form.addRow("Updates", self.check_updates)
         form.addRow("Data folder", label(str(cfg.data_dir), "Muted"))
         form.addRow("Database", label(str(cfg.db_path) if cfg.is_sqlite else cfg.server_label, "Muted"))
         form.addRow("Attachments folder", label(str(cfg.attachments_path), "Muted"))
@@ -140,7 +143,7 @@ class SettingsPage(Page):
         changes = {"company_name": self.company.text(), "auto_backup_on_exit": self.auto_backup.isChecked(),
                    "auto_backup_hours": self.auto_hours.value(), "backups_to_keep": self.keep.value(),
                    "backup_dir": self.backup_dir.text().strip(), "backup_copy_dir": self.copy_dir.text().strip(),
-                   "max_attachment_mb": self.max_mb.value()}
+                   "max_attachment_mb": self.max_mb.value(), "check_for_updates": self.check_updates.isChecked()}
         if run(self, self.app.services.settings.save_general, changes) is not None:
             info(self, "Settings", "Settings saved.")
 
@@ -405,6 +408,10 @@ class SettingsPage(Page):
             self._run_check()
 
     # -- about ------------------------------------------------------------------
+    def _check_updates(self):
+        from wms.ui.dialogs.update import check_now
+        check_now(self, self.app.ctx.config, self.app.services, self.app.main_window)
+
     def _about(self) -> QWidget:
         w = QWidget()
         lay = QVBoxLayout(w)
@@ -413,6 +420,12 @@ class SettingsPage(Page):
                             "site, finished products, full movement history and audit trail.", "Muted", wrap=True))
         lay.addWidget(label("Keyboard: Ctrl+K search everything · F5 refresh · Ctrl+N new · Ctrl+S post / save · Ctrl+Shift+S save Goods In draft",
                             "Muted", wrap=True))
+        lay.addSpacing(12)
+        lay.addWidget(label("Updates", "SectionTitle"))
+        lay.addWidget(label("New versions are published on GitHub. Updating replaces only the program files: the "
+                            "database, photos, scans and settings stay where they are, and a backup is made first.",
+                            "Muted", wrap=True))
+        lay.addLayout(h(button("Check for updates now", self._check_updates), None))
         lay.addStretch(1)
         return w
 

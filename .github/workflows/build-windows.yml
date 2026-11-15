@@ -1,7 +1,10 @@
 # Builds the Windows installer on GitHub's Windows machines.
 #  - every push to main: installer is attached to the run (Actions tab -> run -> Artifacts)
 #  - every pull request: tests and build run on Windows before merging
-#  - pushing a tag like v1.0.1: installer is also published on the Releases page
+#  - every push to main with a NEW version number (wms/__init__.py): the installer and its SHA-256
+#    fingerprint are published as release v<version>. Installed programs find it there and offer the
+#    update (wms/services/updater.py). Same version as an existing release = nothing is published.
+#  - pushing a tag like v1.0.1 by hand: installer is also published on the Releases page
 # (build.bat does the same steps on a local Windows PC.)
 name: Build Windows installer
 on:
@@ -57,13 +60,45 @@ jobs:
           choco install innosetup --no-progress -y
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" packaging\installer.iss
           if ($LASTEXITCODE -ne 0) { exit 1 }
+      - name: Installer fingerprint (SHA-256)
+        run: |
+          $exe = Get-ChildItem dist\StoreWMS-Setup-*.exe | Select-Object -First 1
+          $hash = (Get-FileHash $exe.FullName -Algorithm SHA256).Hash.ToLower()
+          "$hash  $($exe.Name)" | Out-File -Encoding ascii -NoNewline "$($exe.FullName).sha256"
+          "$hash  $($exe.Name)"
       - uses: actions/upload-artifact@v4
         with:
           name: StoreWMS-installer
-          path: dist/StoreWMS-Setup-*.exe
-      - name: Publish release
+          path: |
+            dist/StoreWMS-Setup-*.exe
+            dist/StoreWMS-Setup-*.exe.sha256
+      - name: Is this a new version?
+        id: ver
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          $v = python -c "import wms; print(wms.__version__)"
+          $exe = "dist\StoreWMS-Setup-$v.exe"
+          if (-not (Test-Path $exe)) { "::error::Installer $exe not found: version in installer.iss differs from wms/__init__.py"; exit 1 }
+          $tag = git ls-remote --tags origin "refs/tags/v$v"
+          if ($tag) { "Release v$v already exists: nothing to publish."; "new=false" >> $env:GITHUB_OUTPUT }
+          else { "Publishing release v$v"; "new=true" >> $env:GITHUB_OUTPUT; "version=$v" >> $env:GITHUB_OUTPUT }
+      - name: Publish release (new version on main)
+        if: steps.ver.outputs.new == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.ver.outputs.version }}
+          name: Store WMS ${{ steps.ver.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          files: |
+            dist/StoreWMS-Setup-*.exe
+            dist/StoreWMS-Setup-*.exe.sha256
+          generate_release_notes: true
+          make_latest: true
+      - name: Publish release (tag pushed by hand)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/StoreWMS-Setup-*.exe
+          files: |
+            dist/StoreWMS-Setup-*.exe
+            dist/StoreWMS-Setup-*.exe.sha256
           generate_release_notes: true

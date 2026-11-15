@@ -21,6 +21,8 @@ class App(QObject):
         self.services = Services(ctx)
         # Set after a backup restore: the window closes and the program starts again.
         self.restart_required = False
+        # Set when an update's installer has started: the window closes without the exit backup.
+        self.closing_for_update = False
         self.main_window = None  # set by MainWindow
 
     def start_posting(self, page_key: str, product_id: int, supplier_id: int | None = None,
