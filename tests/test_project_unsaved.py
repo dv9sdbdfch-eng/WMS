@@ -159,13 +159,11 @@ def test_every_kind_of_row_is_protected(ui, tribeca, tower, answers):  # noqa: F
     page = _page(win, tribeca)
     page.items[f"B:{tower.block.id}"].setExpanded(True)
     page.items[f"V:{tower.level.id}"].setExpanded(True)
-    page.items[f"U:{tower.k10.id}"].setExpanded(True)
     edits = {f"M:{tribeca.john.id}": lambda p: p.m_phone.setText("01234"),
              f"P:{tribeca.project.id}": lambda p: p.p_name.setText("X"),
              f"B:{tower.block.id}": lambda p: p.b_code.setText("Z"),
              f"V:{tower.level.id}": lambda p: p.v_notes.setPlainText("n"),
-             f"U:{tower.k10.id}": lambda p: p.u_code.setText("K99"),
-             page.items[f"U:{tower.k10.id}"].child(0).data(0, projects.KEY): lambda p: p.l_vpk.setText("V1")}
+             f"U:{tower.k10.id}": lambda p: p.u_code.setText("K99")}
     for key, edit in edits.items():
         page.select(key)
         edit(page.panel)

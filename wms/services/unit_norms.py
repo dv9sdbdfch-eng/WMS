@@ -29,7 +29,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date, datetime
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -38,7 +38,7 @@ from wms.core.enums import EntityType
 from wms.core.exceptions import NotFoundError, ValidationError
 from wms.core.numbers import ZERO, to_qty, utcnow
 from wms.core.permissions import P
-from wms.db.models import Product, ProjectUnit, Site, UnitCompletion, UnitMaterial, UnitMaterialNorm
+from wms.db.models import Product, ProjectUnit, Site, Unit, UnitCompletion, UnitMaterial, UnitMaterialNorm
 from wms.db.models.hierarchy import NORM_ALL, NORM_FUTURE, STAGE_DONE
 from wms.services import audit
 from wms.services.base import BaseService, clean_str
@@ -111,6 +111,48 @@ def line_need(line_id: int, product_id: int, code: str, name: str, norm: Decimal
         used += qty * (norm if n is None else n)
     rest = max(units - done, ZERO)
     return LineNeed(line_id, product_id, code, name, norm, units, done, _q(used), _q(rest * norm))
+
+
+@dataclass
+class ScheduleLine:
+    """One row of a unit's Finish Schedule (unit card): a material, its norm and its coverage.
+
+    The project stock is the project's whole stock of the material (delivered for it or reserved,
+    less issued) - shared by every unit type of the project that uses the material."""
+
+    need: LineNeed
+    brand: str | None
+    vpk_code: str | None
+    notes: str | None
+    uom: str
+    product_active: bool
+    project_stock: Decimal
+
+    @property
+    def id(self) -> int:
+        return self.need.line_id
+
+    @property
+    def still_needed(self) -> Decimal:
+        return self.need.needed_by_rest
+
+    @property
+    def units_covered(self) -> Decimal:
+        """Whole units still to make that the project stock is enough for (never more than are left)."""
+        if self.need.norm <= ZERO:
+            return self.need.units_left
+        return min(self.need.units_left, (self.project_stock / self.need.norm).to_integral_value(rounding=ROUND_DOWN))
+
+    @property
+    def shortage(self) -> Decimal:
+        return max(self.still_needed - self.project_stock, ZERO)
+
+    @property
+    def coverage(self) -> str:
+        """GREEN: enough for every unit left; YELLOW: part; RED: nothing (with units still to make)."""
+        if self.still_needed <= ZERO or self.shortage == ZERO:
+            return "GREEN"
+        return "YELLOW" if self.project_stock > ZERO else "RED"
 
 
 # ---- helpers used inside other services' transactions ------------------------------------------
@@ -311,6 +353,30 @@ class UnitNormService(BaseService):
         for lid, uid, pid, code, name, norm, units in lines:
             out[uid].append(line_need(lid, pid, code, name, norm, units, points.get(lid, []), batches.get(uid, [])))
         return out
+
+    # ---- Finish Schedule: the unit card ---------------------------------------------------------
+    def finish_schedule(self, unit_id: int) -> list[ScheduleLine]:
+        """The materials one unit type is made of, with the project's stock of each: per line the
+        norm, units, units made, still needed, project stock, units it covers and the shortage."""
+        from wms.services.reservations import project_stock
+        self.require(P.SITES_VIEW)
+        with self.db.read_session() as s:
+            u = s.get(ProjectUnit, unit_id)
+            if u is None:
+                raise NotFoundError("Unit not found.")
+            needs = self._needs(s, [u.id])[u.id]
+            extra = {lid: (vpk, notes, brand, uom, active) for lid, vpk, notes, brand, uom, active in s.execute(
+                select(UnitMaterial.id, UnitMaterial.vpk_code, UnitMaterial.notes, Product.brand, Unit.code,
+                       Product.is_active)
+                .join(Product, Product.id == UnitMaterial.product_id).join(Unit, Unit.id == Product.unit_id)
+                .where(UnitMaterial.unit_id == u.id))}
+            stock = project_stock(s, u.site_id, sorted({n.product_id for n in needs})) if needs else {}
+            out = []
+            for n in needs:
+                vpk, notes, brand, uom, active = extra[n.line_id]
+                held = stock[n.product_id].total if n.product_id in stock else ZERO
+                out.append(ScheduleLine(n, brand, vpk, notes, uom, active, held))
+            return out
 
     # ---- internals ------------------------------------------------------------------------------
     @staticmethod

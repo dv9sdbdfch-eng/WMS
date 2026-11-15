@@ -17,8 +17,8 @@ from wms.db.models import AuditLog, ProjectMaterial, StockLevel, StockMovement
 from wms.db.models.reservations import StockReservation
 from wms.ui.pages.projects import (
     C_BLK,
+    C_INFO,
     C_LVL,
-    C_MAT,
     C_MGR,
     C_PRJ,
     C_UNIT,
@@ -133,9 +133,8 @@ def test_3_each_level_in_its_own_column(ui, tribeca, tower):  # noqa: F811
     for key, (col, name) in expect.items():
         item = page.items[key]
         assert name_col(key) == col and item.text(col) == name, key
-        assert all(item.text(c) == "" for c in range(C_MAT + 1) if c != col), key  # nothing in other levels
-    mat = page.items[f"U:{tower.k10.id}"].child(0)
-    assert mat.text(C_MAT) and all(mat.text(c) == "" for c in range(C_MAT))
+        assert all(item.text(c) == "" for c in range(C_INFO) if c != col), key  # nothing in other levels
+    assert page.items[f"U:{tower.k10.id}"].childCount() == 0  # materials: in the unit's Finish Schedule
     assert not _errors(msgs), msgs
 
 
@@ -195,9 +194,8 @@ def test_headers_keep_search_and_status(ui, tribeca):  # noqa: F811
     assert page.search.text() == "hinge" and page.status_filter.currentIndex() == status
     page.items[f"M:{tribeca.john.id}"].setExpanded(True)
     page.items[f"P:{tribeca.project.id}"].setExpanded(True)
-    kitchen = page.items[f"U:{tribeca.kitchen.id}"]
-    kitchen.setExpanded(True)  # the match can be revealed again by opening its branch
-    assert kitchen.childCount() == 1
+    assert f"U:{tribeca.kitchen.id}" in page.items  # the match is revealed again by opening its branch
+    assert f"U:{tribeca.wardrobe.id}" not in page.items
 
 
 def test_selection_kept_when_its_branch_closes(ui, tribeca):  # noqa: F811
@@ -223,7 +221,7 @@ def test_5_editing_every_level(ui, tribeca, tower):  # noqa: F811
              (f"U:{tower.k10.id}", "Kitchen Type 10")]
     for key, text in edits:
         item = page.items[key]
-        assert page._editable(key, name_col(key)) and not page._editable(key, C_MAT)
+        assert page._editable(key, name_col(key)) and not page._editable(key, C_INFO)
         assert page.commit_edit(item, name_col(key), text), key
         assert page.items[key].text(name_col(key)) == text
     assert [m.name for m in t.managers() if m.id == tribeca.john.id] == ["John A. Smith"]
