@@ -49,7 +49,10 @@ class StockEngine:
     def level(self, product_id: int, bin_id: int, lock: bool = False) -> StockLevel | None:
         q = select(StockLevel).where(StockLevel.product_id == product_id, StockLevel.bin_id == bin_id)
         if lock:
-            q = q.with_for_update()
+            # Lock only the balance row (not the joined product/bin rows) and read its latest
+            # committed value, even if this session loaded it earlier: another PC may have just
+            # changed it. Two PCs taking the last sheets from a bin therefore queue here.
+            q = q.with_for_update(of=StockLevel).execution_options(populate_existing=True)
         return self.s.scalar(q)
 
     def qty_in_bin(self, product_id: int, bin_id: int) -> Decimal:
@@ -58,6 +61,14 @@ class StockEngine:
 
     def _adjust_level(self, product_id: int, bin_id: int, delta: Decimal) -> StockLevel:
         lvl = self.level(product_id, bin_id, lock=True)
+        if lvl is None and self.s.get_bind().dialect.name == "postgresql":
+            # Two PCs putting the first stock into the same empty bin at once: one creates the
+            # balance row, the other waits for it and then adds to it (instead of a duplicate error).
+            from sqlalchemy.dialects.postgresql import insert
+            self.s.execute(insert(StockLevel).values(product_id=product_id, bin_id=bin_id, quantity=ZERO, version=1,
+                                                     updated_at=utcnow())
+                           .on_conflict_do_nothing(index_elements=["product_id", "bin_id"]))
+            lvl = self.level(product_id, bin_id, lock=True)
         if lvl is None:
             lvl = StockLevel(product_id=product_id, bin_id=bin_id, quantity=ZERO)
             self.s.add(lvl)
@@ -116,7 +127,10 @@ class StockEngine:
 
         is_override = False
         if from_bin is not None:
-            available = self.qty_in_bin(product.id, from_bin.id)
+            # Lock first, then check: the check must see what is in the bin now, not what was
+            # there before another PC's posting finished.
+            lvl = self.level(product.id, from_bin.id, lock=True)
+            available = lvl.quantity if lvl else ZERO
             if available < qty:
                 if not override_reason:
                     raise InsufficientStockError(product.internal_code, from_bin.full_code, available, qty)

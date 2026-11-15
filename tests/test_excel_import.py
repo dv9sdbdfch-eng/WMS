@@ -168,7 +168,10 @@ def test_import_with_every_kind_of_photo(svc, sample, tmp_path):
     result = svc.excel_import.run(plan)
     assert (result.created, result.updated, result.failed_rows, result.photo_problems) == (6, 0, 0, [])
     assert result.suppliers_created == ["Kronospan"]
-    assert result.backup.exists() and result.backup.name.endswith("_safety.zip")
+    if svc.ctx.config.is_sqlite:
+        assert result.backup.exists() and result.backup.name.endswith("_safety.zip")
+    else:  # shared server: covered by the server's own backups
+        assert result.backup is None
     h = svc.search.exact_product("H3311")
     assert h.supplier.name == "Egger UK Ltd" and h.supplier_code == "H3311 ST10" and h.min_stock == D(5)
     assert svc.search.exact_product("W100").supplier.name == "Kronospan"

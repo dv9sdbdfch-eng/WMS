@@ -692,10 +692,10 @@ class MaterialsService(BaseService):
         for pid, oh, us in s.execute(product_totals_query().where(StockLevel.product_id.in_(ids))):
             rows[pid].on_hand, rows[pid].usable = Decimal(oh or 0), Decimal(us or 0)
         st = _Stock()
-        for pid, rs in s.execute(select(st.res.c.pid, st.res.c.reserved).where(st.res.c.pid.in_(ids))):
+        for pid, rs in s.execute(select(st.res.c.pid, _q(st.res.c.reserved)).where(st.res.c.pid.in_(ids))):
             rows[pid].reserved = _q_value(rs)
         inc = _incoming_sq()
-        for pid, left in s.execute(select(inc.c.pid, func.sum(inc.c.left)).where(inc.c.pid.in_(ids))
+        for pid, left in s.execute(select(inc.c.pid, _q(func.sum(inc.c.left))).where(inc.c.pid.in_(ids))
                                    .group_by(inc.c.pid)):
             rows[pid].incoming = _q_value(left)
         for pid, b, qty in s.execute(
@@ -713,11 +713,11 @@ class MaterialsService(BaseService):
                 rows[pid].photo_id, rows[pid].photo_name = att_id, stored
         if site_id:
             pj = _Project(site_id)
-            for pid, req in s.execute(select(pj.req.c.pid, pj.req.c.required).where(pj.req.c.pid.in_(ids))):
+            for pid, req in s.execute(select(pj.req.c.pid, _q(pj.req.c.required)).where(pj.req.c.pid.in_(ids))):
                 rows[pid].required, rows[pid].on_list = _q_value(req), True
-            for pid, rs in s.execute(select(pj.res.c.pid, pj.res.c.reserved).where(pj.res.c.pid.in_(ids))):
+            for pid, rs in s.execute(select(pj.res.c.pid, _q(pj.res.c.reserved)).where(pj.res.c.pid.in_(ids))):
                 rows[pid].proj_reserved = _q_value(rs)
-            for pid, iss, ret in s.execute(select(pj.mov.c.pid, pj.mov.c.issued, pj.mov.c.returned)
+            for pid, iss, ret in s.execute(select(pj.mov.c.pid, _q(pj.mov.c.issued), _q(pj.mov.c.returned))
                                            .where(pj.mov.c.pid.in_(ids))):
                 rows[pid].issued, rows[pid].returned = _q_value(iss), _q_value(ret)
         return [rows[i] for i in ids if i in rows]
@@ -747,8 +747,9 @@ class MaterialsService(BaseService):
 
     def brands(self) -> list[str]:
         with self.db.read_session() as s:
+            # GROUP BY rather than DISTINCT: PostgreSQL only sorts a DISTINCT list by a selected column
             return [b for b in s.scalars(select(Product.brand).where(Product.brand.is_not(None))
-                                         .distinct().order_by(func.lower(Product.brand))) if b.strip()]
+                                         .group_by(Product.brand).order_by(func.lower(Product.brand))) if b.strip()]
 
     def describe(self, f: MaterialFilter) -> list[tuple[str, str]]:
         """(field, chip text) for every active filter, in the order the chips are shown."""
@@ -913,12 +914,12 @@ class MaterialsService(BaseService):
 
 
 def _q_value(v) -> Decimal:
-    """A Quantity aggregate read through a subquery column (stored as thousandths)."""
+    """A Quantity aggregate, selected through ``_q()`` so every database returns it already
+    converted from thousandths (PostgreSQL returns SUM() as a Decimal, SQLite as an int, so the
+    type of the raw value cannot tell whether it was converted)."""
     if v is None:
         return ZERO
-    if isinstance(v, Decimal):
-        return v
-    return Quantity().process_result_value(v, None)
+    return v if isinstance(v, Decimal) else Decimal(v)
 
 
 def upsert_project_materials(s: Session, ctx, site_id: int, items: list[tuple[int, object]],

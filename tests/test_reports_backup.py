@@ -99,6 +99,7 @@ def test_delivery_note_with_scan(svc, sample, tmp_path):
     assert len(docs) == 1 and docs[0].is_pdf
 
 
+@pytest.mark.sqlite_only
 def test_backup_and_restore_roundtrip(svc, busy, cfg, tmp_path):
     photo = _png(tmp_path / "p.png")
     svc.attachments.add("PRODUCT", busy.mdf.id, photo)

@@ -25,9 +25,16 @@ a = Analysis(
         (str(ROOT / "wms" / "db" / "migrations"), "wms/db/migrations"),
         (str(ROOT / "wms" / "resources" / "icon.ico"), "wms/resources"),
         (str(ROOT / "wms" / "resources" / "icon.png"), "wms/resources"),
+        (str(ROOT / "server"), "server"),  # scripts for the shared database server
+        (str(ROOT / "docs" / "SERVER_SETUP_UA.md"), "server"),
     ],
     hiddenimports=[
         "sqlalchemy.dialects.sqlite",
+        "sqlalchemy.dialects.postgresql",
+        "sqlalchemy.dialects.postgresql.psycopg",
+        "psycopg",
+        "psycopg_binary",
+        "keyring.backends.Windows",
         "logging.config",
         "PySide6.QtPdf",
         "PySide6.QtPdfWidgets",

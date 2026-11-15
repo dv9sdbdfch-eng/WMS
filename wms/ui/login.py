@@ -23,7 +23,8 @@ class LoginDialog(QDialog):
         title = label(APP_NAME, "PageTitle")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lay.addWidget(title)
-        sub = label(f"Warehouse Management  -  v{__version__}", "Muted")
+        self.connection_changed = False
+        sub = label(f"Warehouse Management  -  v{__version__}  -  {services.ctx.config.server_label}", "Muted")
         sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lay.addWidget(sub)
         form = QFormLayout()
@@ -38,8 +39,16 @@ class LoginDialog(QDialog):
         lay.addWidget(self.message)
         self.btn = button("Sign in", self.try_login, primary=True)
         self.btn.setDefault(True)
-        lay.addLayout(h(None, button("Exit", self.reject), self.btn))
+        lay.addLayout(h(button("Connection...", self.edit_connection), None, button("Exit", self.reject), self.btn))
         self.username.setFocus()
+
+    def edit_connection(self) -> None:
+        from wms.ui.dialogs.connection import ConnectionDialog
+        dlg = ConnectionDialog(self.services.ctx.config, self)
+        dlg.exec()
+        if dlg.saved:
+            self.connection_changed = True
+            self.reject()
 
     def try_login(self):
         try:

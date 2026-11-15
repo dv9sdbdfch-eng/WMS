@@ -125,7 +125,7 @@ class DashboardService(BaseService):
                 # Newest recorded first: ids only grow, and the primary key needs no extra index.
                 d.recent_movements = list(s.scalars(select(StockMovement)
                                                     .order_by(StockMovement.id.desc()).limit(recent)))
-        if self.ctx.config.is_sqlite:
+        if self.ctx.config.is_sqlite or self.ctx.has(P.BACKUP_RUN):  # server backups: shown to admins
             from wms.services.backup import BackupService
             d.backup = BackupService(self.ctx).health()
             if not d.backup.ok:  # spec 31 / 14: a failed or overdue backup is promoted to ACTION REQUIRED

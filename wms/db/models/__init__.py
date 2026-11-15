@@ -34,12 +34,23 @@ from wms.db.models.reference import Category, ReasonCode, Supplier, Unit
 from wms.db.models.reservations import ProjectStockRelease, StockReservation
 from wms.db.models.sites import Site
 from wms.db.models.stock import MovementReversal, StockLevel, StockMovement
-from wms.db.models.system import Attachment, AuditLog, NumberSequence, RecentSearch, SavedSearch, Setting
+from wms.db.models.system import (
+    Attachment,
+    AttachmentFile,
+    AuditLog,
+    NumberSequence,
+    RecentSearch,
+    SavedSearch,
+    ServerBackup,
+    Setting,
+)
 from wms.db.models.users import Role, RolePermission, User
 
 __all__ = [
     "DocumentDraft",
     "Attachment",
+    "AttachmentFile",
+    "ServerBackup",
     "AuditLog",
     "Bin",
     "BomItem",

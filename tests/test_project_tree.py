@@ -291,6 +291,7 @@ def test_viewer_cannot_change_the_structure(svc, tribeca):
 
 
 # ---- acceptance 13: upgrade of an existing database ----------------------------------------------------
+@pytest.mark.sqlite_only
 def test_upgrade_turns_typed_manager_names_into_managers(svc, sample):
     from alembic import command
     from alembic.config import Config

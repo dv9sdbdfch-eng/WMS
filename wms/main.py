@@ -87,6 +87,39 @@ def _recover_database(cfg: AppConfig, exc: BaseException):
     return db
 
 
+def _is_schema_too_new(exc: BaseException) -> bool:
+    from wms.core.exceptions import SchemaTooNewError
+    return isinstance(exc, SchemaTooNewError)
+
+
+def _server_unavailable(cfg: AppConfig, exc: BaseException) -> str:
+    """The shared server cannot be used: say why in plain words and offer Retry / Connection.
+    Returns "retry", "restart" (connection changed) or "close"."""
+    from PySide6.QtWidgets import QMessageBox
+
+    from wms.core.exceptions import WMSError
+    from wms.db.engine import translate_db_error
+    friendly = exc if isinstance(exc, WMSError) else translate_db_error(exc)
+    if friendly is not None:
+        text = friendly.message
+    else:
+        text = (f"Store WMS cannot open the database on {cfg.server_label}.\n\n{exc}\n\nCheck that the server PC "
+                f"is on and the network (VPN between buildings) works.")
+    box = QMessageBox(QMessageBox.Icon.Critical, APP_NAME, text)
+    retry = box.addButton("Try again", QMessageBox.ButtonRole.AcceptRole)
+    conn = box.addButton("Connection...", QMessageBox.ButtonRole.ActionRole)
+    box.addButton("Close", QMessageBox.ButtonRole.RejectRole)
+    box.exec()
+    if box.clickedButton() is retry:
+        return "retry"
+    if box.clickedButton() is conn:
+        from wms.ui.dialogs.connection import ConnectionDialog
+        dlg = ConnectionDialog(cfg)
+        dlg.exec()
+        return "restart" if dlg.saved else "close"
+    return "close"
+
+
 def self_test(cfg: AppConfig) -> int:
     """``StoreWMS.exe --self-test``: open/upgrade the database and run the data check, without the window."""
     from wms.services import Services
@@ -94,6 +127,9 @@ def self_test(cfg: AppConfig) -> int:
 
     db = _start_database(cfg)
     rep = Services(AppContext(db=db, config=cfg)).backup.integrity_check()
+    import keyring  # noqa: F401 - proves the shared-server password store is bundled
+    import psycopg  # noqa: F401 - proves the PostgreSQL driver is bundled
+
     from wms.exporters.export import (
         export_pdf,  # noqa: F401 - proves the PDF/Excel libraries are bundled
         export_xlsx,  # noqa: F401
@@ -133,12 +169,22 @@ def run() -> int:
         qt_app.setWindowIcon(QIcon(str(icon_path())))
     _install_excepthook(qt_app)
 
-    try:
-        db = _start_database(cfg)
-    except Exception as exc:  # noqa: BLE001
-        log.exception("Database start-up failed")
-        db = _recover_database(cfg, exc)
-        if db is None:
+    while True:
+        try:
+            db = _start_database(cfg)
+            break
+        except Exception as exc:  # noqa: BLE001
+            log.exception("Database start-up failed")
+            if cfg.is_sqlite and not _is_schema_too_new(exc):
+                db = _recover_database(cfg, exc)
+                if db is None:
+                    return 1
+                break
+            choice = _server_unavailable(cfg, exc)
+            if choice == "retry":
+                continue
+            if choice == "restart":
+                _restart()
             return 1
 
     from wms.services import Services
@@ -162,7 +208,10 @@ def run() -> int:
     while True:
         ctx = AppContext(db=db, config=cfg)
         services = Services(ctx)
-        if LoginDialog(services).exec() != LoginDialog.DialogCode.Accepted:
+        login = LoginDialog(services)
+        if login.exec() != LoginDialog.DialogCode.Accepted:
+            if login.connection_changed:
+                _restart()
             break
         if ctx.user.must_change_password:
             if ChangePasswordDialog(services, forced=True).exec() != ChangePasswordDialog.DialogCode.Accepted:

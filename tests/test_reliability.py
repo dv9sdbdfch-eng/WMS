@@ -40,6 +40,7 @@ def actions(svc, action) -> list:
 
 # --- backup health and schedule ----------------------------------------------------------------
 
+@pytest.mark.sqlite_only
 def test_health_from_never_to_ok_and_the_schedule(svc, cfg):
     h = svc.backup.health()
     assert h.state == "NEVER" and not h.ok and "No backup" in h.message
@@ -64,6 +65,7 @@ def test_health_from_never_to_ok_and_the_schedule(svc, cfg):
     assert svc.backup.health().state == "STALE"
 
 
+@pytest.mark.sqlite_only
 def test_status_file_lost_falls_back_to_the_backup_folder(svc):
     path = svc.backup.create(note="manual")
     svc.backup.status_path.unlink()
@@ -71,6 +73,7 @@ def test_status_file_lost_falls_back_to_the_backup_folder(svc):
     assert h.state == "OK" and h.last_file == path.name
 
 
+@pytest.mark.sqlite_only
 def test_failed_backup_is_recorded_shown_and_audited(svc, cfg, tmp_path):
     blocker = tmp_path / "not-a-folder"
     blocker.write_text("x")
@@ -88,6 +91,7 @@ def test_failed_backup_is_recorded_shown_and_audited(svc, cfg, tmp_path):
     assert not any("backup" in a.text.lower() for a in svc.dashboard.load().alerts)
 
 
+@pytest.mark.sqlite_only
 def test_disk_full_while_writing_leaves_no_half_backup(svc, cfg, monkeypatch):
     real = zipfile.ZipFile.writestr
 
@@ -104,6 +108,7 @@ def test_disk_full_while_writing_leaves_no_half_backup(svc, cfg, monkeypatch):
     assert svc.backup.health().state == "FAILED"
 
 
+@pytest.mark.sqlite_only
 def test_second_copy_folder(svc, cfg, tmp_path):
     cfg.backup_copy_dir = str(tmp_path / "usb")
     cfg.backups_to_keep = 3
@@ -133,6 +138,7 @@ def test_settings_for_the_schedule_are_saved_and_audited(svc, cfg, tmp_path):
 
 # --- restore -----------------------------------------------------------------------------------
 
+@pytest.mark.sqlite_only
 def test_restore_is_audited_in_the_restored_database(svc, sample, cfg):
     sample.receive(sample.mdf, 10)
     backup = svc.backup.create(note="before mistakes")
@@ -150,6 +156,7 @@ def test_restore_is_audited_in_the_restored_database(svc, sample, cfg):
     s2.ctx.db.dispose()
 
 
+@pytest.mark.sqlite_only
 def test_test_restore_checks_a_backup_without_touching_live_data(svc, sample, cfg, tmp_path):
     sample.receive(sample.mdf, 10)
     backup = svc.backup.create()
@@ -161,6 +168,7 @@ def test_test_restore_checks_a_backup_without_touching_live_data(svc, sample, cf
     assert actions(svc, "BACKUP_TESTED")
 
 
+@pytest.mark.sqlite_only
 def test_start_up_recovery_from_a_damaged_database(svc, sample, cfg):
     sample.receive(sample.mdf, 12)
     good = svc.backup.create(note="good")
@@ -179,6 +187,7 @@ def test_start_up_recovery_from_a_damaged_database(svc, sample, cfg):
     s2.ctx.db.dispose()
 
 
+@pytest.mark.sqlite_only
 def test_restore_of_a_damaged_backup_changes_nothing(svc, sample, cfg, tmp_path):
     sample.receive(sample.mdf, 3)
     backup = svc.backup.create()
@@ -196,6 +205,7 @@ def test_restore_of_a_damaged_backup_changes_nothing(svc, sample, cfg, tmp_path)
 
 # --- audit -------------------------------------------------------------------------------------
 
+@pytest.mark.sqlite_only
 def test_login_logout_and_backup_are_in_the_audit_log(svc):
     svc.backup.create(note="Friday")
     svc.auth.logout()
@@ -235,6 +245,7 @@ WORKER = textwrap.dedent('''
 ''')
 
 
+@pytest.mark.sqlite_only
 @pytest.mark.skipif(sys.platform == "win32", reason="SIGKILL is POSIX")
 def test_killed_while_posting_leaves_a_consistent_database(svc, sample, cfg, tmp_path):
     """Power cut / Task Manager 'End task' in the middle of posting: every document is either fully

@@ -316,6 +316,10 @@ def test_attachment_failure_rolls_back_delivery_and_removes_copied_files(svc, sa
 def test_missing_attachment_file_is_reported(svc, sample, tmp_path):
     att = svc.attachments.add("PRODUCT", sample.mdf.id, write(tmp_path, "p.png", PNG))
     svc.attachments.path_of(att).unlink()
+    if not svc.ctx.config.is_sqlite:  # shared server: its copy in the database is what counts
+        from sqlalchemy import text
+        with svc.ctx.db.session() as s:
+            s.execute(text("DELETE FROM attachment_files"))
     rep = svc.backup.integrity_check()
     assert rep.missing_files == ["p.png"] and not rep.ok
 
@@ -504,6 +508,7 @@ def test_upgrade_from_version_1_0_database(tmp_path):
 
 # --- 14. backup / restore ------------------------------------------------------------------
 
+@pytest.mark.sqlite_only
 def test_backup_contains_attachments_and_restore_brings_back_data(svc, sample, cfg, tmp_path):
     dn = svc.goods_in.post({"dn_number": "BK1", "supplier_id": sample.supplier.id, "delivery_date": TODAY},
                            [ReceiptLine(sample.mdf.id, "10", sample.bin1.id)], [write(tmp_path, "dn.pdf", PDF)])
@@ -530,6 +535,7 @@ def test_backup_contains_attachments_and_restore_brings_back_data(svc, sample, c
     db2.dispose()
 
 
+@pytest.mark.sqlite_only
 def test_restore_never_writes_outside_the_attachment_folder(svc, sample, cfg, tmp_path):
     backup = svc.backup.create()
     evil = tmp_path / "StoreWMS_evil.zip"
@@ -543,6 +549,7 @@ def test_restore_never_writes_outside_the_attachment_folder(svc, sample, cfg, tm
     assert not (cfg.data_dir / "zipslip_victim.txt").exists()
 
 
+@pytest.mark.sqlite_only
 def test_restore_rejects_damaged_or_foreign_files(svc, tmp_path):
     bad = tmp_path / "StoreWMS_bad.zip"
     with zipfile.ZipFile(bad, "w") as z:

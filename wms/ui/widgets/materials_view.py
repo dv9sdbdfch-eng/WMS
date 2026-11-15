@@ -159,8 +159,10 @@ STATUS_COLOURS = {"OUT": theme.DANGER, "LOW": theme.WARNING, "ARCHIVED": "#98A2B
 class _Thumbs:
     """Small cache of decoded thumbnails (only the size needed is decoded, so big JPEGs stay cheap)."""
 
-    def __init__(self, folder: Path, size: int = THUMB, keep: int = 600):
+    def __init__(self, folder: Path, size: int = THUMB, keep: int = 600, resolve=None):
         self.folder, self.size, self.keep = folder, size, keep
+        # stored name -> file to read; on the shared server it fetches a small copy once
+        self.resolve = resolve or (lambda name: self.folder / name)
         self.cache: OrderedDict[str, QPixmap | None] = OrderedDict()
 
     def get(self, name: str | None) -> QPixmap | None:
@@ -170,8 +172,12 @@ class _Thumbs:
             self.cache.move_to_end(name)
             return self.cache[name]
         pix = None
-        reader = QImageReader(str(self.folder / name))
-        if reader.canRead():
+        try:
+            path = self.resolve(name)
+        except Exception:  # noqa: BLE001 - no picture rather than a broken list (server unreachable)
+            path = None
+        reader = QImageReader(str(path) if path else "")
+        if path and reader.canRead():
             s = reader.size()
             if s.isValid() and s.width() > 0 and s.height() > 0:
                 reader.setScaledSize(s.scaled(QSize(self.size, self.size), Qt.AspectRatioMode.KeepAspectRatio))
@@ -540,7 +546,8 @@ class MaterialsView(QWidget):
 
         # -- table --------------------------------------------------------------------------
         self.model = MaterialsModel(self)
-        self.model.thumbs = _Thumbs(app.ctx.config.attachments_path)
+        self.model.thumbs = _Thumbs(app.ctx.config.attachments_path,
+                                    resolve=app.services.attachments.thumbnail_path)
         self.model.checked_changed.connect(self._selection_changed)
         self.table = QTableView()
         self.table.setModel(self.model)

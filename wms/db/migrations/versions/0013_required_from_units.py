@@ -31,7 +31,7 @@ def upgrade() -> None:
     bind = op.get_bind()
     if "units_qty" not in {c["name"] for c in sa.inspect(bind).get_columns("project_materials")}:
         # plain ADD COLUMN: no table rebuild
-        op.execute("ALTER TABLE project_materials ADD COLUMN units_qty INTEGER NOT NULL DEFAULT 0")
+        op.execute("ALTER TABLE project_materials ADD COLUMN units_qty BIGINT NOT NULL DEFAULT 0")
     rows = bind.execute(sa.text(
         "SELECT pu.site_id, um.product_id, s.status, SUM(pu.quantity * um.quantity_per_unit) "
         "FROM unit_materials um JOIN project_units pu ON pu.id = um.unit_id JOIN sites s ON s.id = pu.site_id "

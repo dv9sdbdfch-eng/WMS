@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import uuid
 from datetime import date
 from decimal import Decimal
 
@@ -30,10 +32,95 @@ def _quiet_ui(tmp_path):
     yield
 
 
+# Run the whole suite against PostgreSQL by setting WMS_TEST_PG to a server URL, e.g.
+#   WMS_TEST_PG=postgresql+psycopg://postgres@localhost:5432/postgres
+# Every test then gets its own new database, copied from a migrated template (fast).
+PG_URL = os.environ.get("WMS_TEST_PG", "")
+
+
+def _pg_admin():
+    from sqlalchemy import create_engine
+    return create_engine(PG_URL, isolation_level="AUTOCOMMIT", future=True)
+
+
+def _pg_url(name: str) -> str:
+    from sqlalchemy.engine import make_url
+    return make_url(PG_URL).set(database=name).render_as_string(hide_password=False)
+
+
+@pytest.fixture(scope="session")
+def _pg_template():
+    if not PG_URL:
+        yield None
+        return
+    from sqlalchemy import text
+    name = f"wms_tpl_{uuid.uuid4().hex[:8]}"
+    eng = _pg_admin()
+    with eng.connect() as c:
+        c.execute(text(f'CREATE DATABASE "{name}"'))
+    db = Database(_pg_url(name))
+    db.migrate()
+    db.dispose()
+    yield name
+    with eng.connect() as c:
+        c.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
+    eng.dispose()
+
+
 @pytest.fixture
-def cfg(tmp_path, monkeypatch):
+def pg_database(_pg_template):
+    """A new, migrated PostgreSQL database for one test (None when testing on SQLite)."""
+    if not _pg_template:
+        yield None
+        return
+    from sqlalchemy import text
+    name = f"wms_t_{uuid.uuid4().hex[:12]}"
+    eng = _pg_admin()
+    with eng.connect() as c:
+        c.execute(text(f'CREATE DATABASE "{name}" TEMPLATE "{_pg_template}"'))
+    yield _pg_url(name)
+    _close_windows()  # a screen left open would otherwise query the dropped database from a timer
+    with eng.connect() as c:
+        c.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
+    eng.dispose()
+
+
+def _close_windows() -> None:
+    import sys
+    if "PySide6.QtWidgets" not in sys.modules:
+        return
+    from PySide6.QtCore import QCoreApplication, QEvent
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance()
+    if app is None:
+        return
+    for w in app.topLevelWidgets():
+        w.close()
+        w.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
+
+def pytest_collection_modifyitems(config, items):
+    """Tests marked ``sqlite_only`` (the database file itself: file backups, file copies) are
+    skipped when the suite runs on PostgreSQL."""
+    if not PG_URL:
+        return
+    skip = pytest.mark.skip(reason="SQLite database file only")
+    for item in items:
+        if "sqlite_only" in item.keywords:
+            item.add_marker(skip)
+
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "sqlite_only: needs the SQLite database file")
+
+
+@pytest.fixture
+def cfg(tmp_path, monkeypatch, pg_database):
     monkeypatch.setenv("WMS_DATA_DIR", str(tmp_path / "data"))
     c = AppConfig.load()
+    if pg_database:
+        c.database_url = pg_database
     c.ensure_dirs()
     return c
 

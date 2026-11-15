@@ -28,6 +28,14 @@ branch_labels = None
 depends_on = None
 
 
+def _fk_name(table: str, column: str, target: str) -> str:
+    """The constraint name SQLAlchemy gives a new database: PostgreSQL allows 63 characters, so a
+    longer name is shortened the same way (first 55 characters + "_" + 4 characters of its MD5)."""
+    import hashlib
+    name = f"fk_{table}_{column}_{target}"
+    return name if len(name) <= 63 else f"{name[:55]}_{hashlib.md5(name.encode()).hexdigest()[-4:]}"
+
+
 def _add_reference(table: str, column: str, target: str) -> None:
     """Nullable foreign key column without rebuilding the table."""
     bind = op.get_bind()
@@ -38,7 +46,7 @@ def _add_reference(table: str, column: str, target: str) -> None:
                        f"REFERENCES {target} (id) ON DELETE RESTRICT")
     else:
         op.add_column(table, sa.Column(column, sa.Integer(), nullable=True))
-        op.create_foreign_key(f"fk_{table}_{column}_{target}", table, target, [column], ["id"],
+        op.create_foreign_key(_fk_name(table, column, target), table, target, [column], ["id"],
                               ondelete="RESTRICT")
     op.create_index(f"ix_{table}_{column}", table, [column])
 
@@ -51,7 +59,7 @@ def _drop_reference(table: str, column: str, target: str) -> None:
         # older versions ignore it and upgrading again reuses it.
         op.execute(f"UPDATE {table} SET {column} = NULL")
     else:
-        op.drop_constraint(f"fk_{table}_{column}_{target}", table, type_="foreignkey")
+        op.drop_constraint(_fk_name(table, column, target), table, type_="foreignkey")
         op.drop_column(table, column)
 
 

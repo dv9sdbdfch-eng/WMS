@@ -1206,9 +1206,9 @@ class ExcelImportService(BaseService):
                 audit.record(s, self.ctx, "EXCEL_IMPORT", "PRODUCT", None, plan.source.name,
                              f"Excel import of {plan.source.name} / {plan.options.sheet}: {created} created, "
                              f"{updated} updated, {counts['skip']} skipped, {counts['errors']} rows with errors, "
-                             f"{photos} photo(s). Backup {backup.name}.",
+                             f"{photos} photo(s). Backup {backup.name if backup else 'on the server'}.",
                              new={"created": created, "updated": updated, "skipped": counts["skip"],
-                                  "errors": counts["errors"], "photos": photos, "backup": backup.name,
+                                  "errors": counts["errors"], "photos": photos, "backup": backup.name if backup else None,
                                   "suppliers_created": sorted(sup_new), "categories_created": sorted(cat_new),
                                   "project_lines": lines, "projects_created": sorted(site_new),
                                   "project_lines_removed": removed})

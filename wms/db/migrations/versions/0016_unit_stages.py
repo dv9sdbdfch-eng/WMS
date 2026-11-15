@@ -25,8 +25,14 @@ depends_on = None
 _WHERE = "cancelled_at IS NULL AND piece_no IS NOT NULL"
 
 
+def _recreate() -> str:
+    # SQLite must rebuild the table to add CHECK constraints. PostgreSQL alters it in place: a
+    # rebuilt copy would get a new id counter starting at 1 and the next new row would clash.
+    return "always" if op.get_bind().dialect.name == "sqlite" else "auto"
+
+
 def upgrade() -> None:
-    with op.batch_alter_table('unit_completions', schema=None, recreate='always') as batch_op:
+    with op.batch_alter_table('unit_completions', schema=None, recreate=_recreate()) as batch_op:
         batch_op.add_column(sa.Column('stage', sa.String(length=12), nullable=False, server_default='DONE'))
         batch_op.add_column(sa.Column('piece_no', sa.Integer(), nullable=True))
         batch_op.create_check_constraint(op.f('ck_unit_completions_stage_valid'), "stage IN ('DONE', 'DISPATCHED', 'ON_SITE')")
@@ -39,7 +45,7 @@ def downgrade() -> None:
     op.drop_index('ux_unit_completions_piece_stage', table_name='unit_completions')
     # marks of the later stages have no meaning without the column: drop them, keep DONE rows
     op.execute("DELETE FROM unit_completions WHERE stage <> 'DONE'")
-    with op.batch_alter_table('unit_completions', schema=None, recreate='always') as batch_op:
+    with op.batch_alter_table('unit_completions', schema=None, recreate=_recreate()) as batch_op:
         batch_op.drop_constraint(op.f('ck_unit_completions_piece_no_valid'), type_='check')
         batch_op.drop_constraint(op.f('ck_unit_completions_stage_valid'), type_='check')
         batch_op.drop_column('piece_no')
