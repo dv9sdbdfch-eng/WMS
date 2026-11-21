@@ -1,23 +1,25 @@
-"""Stock reserved for projects.
+"""Project stock.
 
-Rules
------
-* A reservation sets stock aside for a project. It is not a stock movement: On Hand does not
-  change, Available (usable stock - reserved) goes down.
-* Nobody can reserve more than is available (no over-reservation).
-* Goods Out to the same project delivers the reservation: each Goods Out line points at the
-  reservation it fulfils, and "still reserved" is worked out from those posted lines. Reversing
-  the Goods Out puts the quantity back on reserve. When everything has been issued the
-  reservation is FULFILLED; RELEASED frees what is left (by hand, or when the project closes).
+Rules (v1.35, Ihor 21.11.2026: "no reservations - only stock split by project, and issue")
+-----------------------------------------------------------------------------------------
+* A project's stock is what was delivered for it (Goods In with the project). Each delivery makes
+  one row per material in ``stock_reservations`` (the table keeps its old name; hand reservations
+  made before v1.35 stay as project stock too). It is not a stock movement: On Hand does not
+  change; General stock (usable stock - all project stock) goes down.
+* Goods Out and production for the project use its own stock first: each line points at the row
+  it uses, and what is left is worked out from those posted lines (so a reversal puts it back).
+  When everything has been used the row is FULFILLED.
+* Other projects' stock cannot be issued; a Store Manager can allow it with a reason, and the stock
+  moves off the other project with a PSR record. Return to main (PSR) gives stock back to the
+  warehouse; closing a project does that for whatever it still holds.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
 from decimal import Decimal
 
-from sqlalchemy import case, func, or_, select
+from sqlalchemy import case, func, or_, select, union_all
 from sqlalchemy.orm import Session
 
 from wms.core.enums import OPEN_SITE_STATUSES, DocumentStatus, EntityType, ReservationStatus
@@ -29,13 +31,15 @@ from wms.db.models import (
     GoodsIssue,
     GoodsIssueLine,
     Product,
+    ProductionLine,
+    ProductionOrder,
     ProjectStockRelease,
     Site,
     StockLevel,
     StockReservation,
 )
 from wms.services import audit
-from wms.services.base import BaseService, check_client_token, clean_str, like_pattern
+from wms.services.base import BaseService, clean_str, like_pattern
 from wms.services.numbering import next_number
 
 
@@ -54,19 +58,33 @@ class ReservationView:
 
 # --- shared helpers (also used by Goods Out, products and the integrity check) ----------------
 
+def _used_lines():
+    """(reservation_id, quantity) of posted lines that use project stock: Goods Out to the
+    project and (v1.35) production for the project."""
+    gi = (select(GoodsIssueLine.reservation_id.label("rid"), GoodsIssueLine.quantity.label("qty"))
+          .join(GoodsIssue, GoodsIssue.id == GoodsIssueLine.issue_id)
+          .where(GoodsIssue.status == DocumentStatus.POSTED.value, GoodsIssueLine.reservation_id.is_not(None)))
+    pr = (select(ProductionLine.reservation_id.label("rid"), ProductionLine.quantity.label("qty"))
+          .join(ProductionOrder, ProductionOrder.id == ProductionLine.order_id)
+          .where(ProductionOrder.status == DocumentStatus.POSTED.value, ProductionLine.reservation_id.is_not(None)))
+    return union_all(gi, pr).subquery()
+
+
+def used_query():
+    """(rid, q): quantity used from each project stock row, as SQL (grouped subquery)."""
+    u = _used_lines()
+    return select(u.c.rid.label("rid"), func.sum(u.c.qty).label("q")).group_by(u.c.rid).subquery()
+
+
 def issued_by_reservation(s: Session, reservation_ids: list[int] | None = None) -> dict[int, Decimal]:
-    """Quantity issued against each reservation, from posted Goods Out lines only."""
-    q = (select(GoodsIssueLine.reservation_id, GoodsIssueLine.quantity)
-         .join(GoodsIssue, GoodsIssue.id == GoodsIssueLine.issue_id)
-         .where(GoodsIssue.status == DocumentStatus.POSTED.value, GoodsIssueLine.reservation_id.is_not(None)))
+    """Quantity used from each project stock row: posted Goods Out and production lines."""
+    u = _used_lines()
+    q = select(u.c.rid, func.sum(u.c.qty)).group_by(u.c.rid)
     if reservation_ids is not None:
         if not reservation_ids:
             return {}
-        q = q.where(GoodsIssueLine.reservation_id.in_(reservation_ids))
-    out: dict[int, Decimal] = {}
-    for rid, qty in s.execute(q).all():
-        out[rid] = out.get(rid, ZERO) + qty
-    return out
+        q = q.where(u.c.rid.in_(reservation_ids))
+    return {rid: Decimal(qty) for rid, qty in s.execute(q).all()}
 
 
 def active_reservations(s: Session, product_ids: list[int] | None = None,
@@ -95,11 +113,8 @@ def reserved_by_product(s: Session, product_ids: list[int] | None = None,
 def reserved_query():
     """(product_id, reserved) for every product with stock still reserved - the same figure as
     reserved_by_product, as SQL, so search can filter and sort on Available without loading rows."""
-    issued = (select(GoodsIssueLine.reservation_id.label("rid"), func.sum(GoodsIssueLine.quantity).label("issued"))
-              .join(GoodsIssue, GoodsIssue.id == GoodsIssueLine.issue_id)
-              .where(GoodsIssue.status == DocumentStatus.POSTED.value, GoodsIssueLine.reservation_id.is_not(None))
-              .group_by(GoodsIssueLine.reservation_id).subquery())
-    left = StockReservation.quantity - func.coalesce(issued.c.issued, 0)
+    issued = used_query()
+    left = StockReservation.quantity - func.coalesce(issued.c.q, 0)
     return (select(StockReservation.product_id.label("product_id"),
                    func.sum(case((left > 0, left), else_=0)).label("reserved"))
             .outerjoin(issued, issued.c.rid == StockReservation.id)
@@ -130,12 +145,20 @@ def refresh_statuses(s: Session, ctx, reservation_ids: list[int], why: str) -> N
         return
     s.flush()
     issued = issued_by_reservation(s, reservation_ids)
+    closed: dict[int, Site] = {}
     for r in s.scalars(select(StockReservation).where(StockReservation.id.in_(reservation_ids))):
         new = status_from_issues(r, issued.get(r.id, ZERO))
         if new != r.status:
             audit.record(s, ctx, "RESERVATION_STATUS_CHANGED", EntityType.RESERVATION.value, r.id, r.number, why,
                          old={"status": r.status}, new={"status": new})
             r.status = new
+        if r.status == ReservationStatus.ACTIVE.value and r.site.status not in OPEN_SITE_STATUSES:
+            closed[r.site_id] = r.site
+    # v1.35: a reversal after the project was closed must not leave stock on a closed project -
+    # it goes straight back to main stock, recorded (PSR) in the project's history
+    for site in closed.values():
+        s.flush()
+        release_for_closed_site(s, ctx, site, f"{why} after the project was closed")
 
 
 class Issuing:
@@ -180,16 +203,24 @@ class Issuing:
         return parts
 
 
-def release_for_closed_site(s: Session, ctx, site: Site) -> int:
-    """A completed / cancelled / archived project keeps nothing reserved."""
-    n = 0
+def release_for_closed_site(s: Session, ctx, site: Site, reason: str | None = None) -> str | None:
+    """A completed / cancelled / archived project keeps no stock. v1.35 (Ihor 21.11.2026): what it
+    still holds goes back to main stock with a Return to main record (PSR) and the reason, so the
+    leftover is documented in the project's history. Returns the PSR number, or None if nothing was
+    left."""
+    why = clean_str(reason) or f"Project {site.project_number} closed"
+    held = project_stock(s, site.id)
+    number = next_number(s, "PROJECT_RELEASE") if held else None
+    for pid, line in sorted(held.items()):
+        give_back(s, ctx, site, pid, line.total, number, f"Project closed: {why}",
+                  f"Returned to main stock ({number}): project closed - {why}", "back to main stock (project closed)")
+    # rows with nothing left (all issued) are simply closed
     for r in active_reservations(s, site_id=site.id):
         r.status, r.released_at, r.released_by_id = ReservationStatus.RELEASED.value, utcnow(), ctx.user.id
         r.release_reason = f"Project {site.project_number} closed."
         audit.record(s, ctx, "RESERVATION_RELEASED", EntityType.RESERVATION.value, r.id, r.number, r.release_reason,
                      old={"status": "ACTIVE"}, new={"status": "RELEASED"})
-        n += 1
-    return n
+    return number
 
 
 def reserve_delivery(s: Session, ctx, dn, site: Site, totals: dict[int, Decimal]) -> list[int]:
@@ -270,112 +301,145 @@ def project_stock(s: Session, site_id: int, product_ids: list[int] | None = None
     return out
 
 
+def give_back(s: Session, ctx, site: Site, product_id: int, qty: Decimal, number: str, reason: str,
+              why: str, where: str) -> None:
+    """Take ``qty`` of a material off a project's stock (newest rows first) and record it as a
+    ProjectStockRelease ``number``: Return to main, a project closed with stock left (v1.35), or
+    stock moved to another project by a Goods Out a manager allowed (v1.35). Nothing moves on the
+    shelves; the ledger is not touched."""
+    rows = list(s.scalars(select(StockReservation).where(
+        StockReservation.product_id == product_id, StockReservation.site_id == site.id,
+        StockReservation.status == ReservationStatus.ACTIVE.value).order_by(StockReservation.id.desc())
+        .with_for_update(of=StockReservation).execution_options(populate_existing=True)))
+    issued = issued_by_reservation(s, [r.id for r in rows])
+    rest = qty
+    for r in rows:
+        if rest <= ZERO:
+            break
+        done = issued.get(r.id, ZERO)
+        left = r.quantity - done
+        if left <= ZERO:
+            continue
+        take = min(rest, left)
+        rest -= take
+        old = {"quantity": r.quantity, "status": r.status}
+        r.quantity -= take
+        if r.quantity <= done:
+            if done > ZERO:
+                r.quantity, r.status = done, ReservationStatus.FULFILLED.value
+            else:
+                r.quantity = old["quantity"]  # quantity must stay > 0: keep it, mark released
+                r.status, r.released_at, r.released_by_id, r.release_reason = (
+                    ReservationStatus.RELEASED.value, utcnow(), ctx.user.id, why)
+        audit.record(s, ctx, "RESERVATION_CHANGED", EntityType.RESERVATION.value, r.id, r.number,
+                     why, old=old, new={"quantity": r.quantity, "status": r.status})
+    p = s.get(Product, product_id)
+    s.add(ProjectStockRelease(number=number, site_id=site.id, site_number_snapshot=site.project_number,
+                              site_name_snapshot=site.name, product_id=product_id, quantity=qty, reason=reason,
+                              user_id=ctx.user.id, user_name_snapshot=ctx.user.full_name))
+    audit.record(s, ctx, "PROJECT_STOCK_RETURNED", EntityType.SITE.value, site.id, site.display,
+                 f"{number}: {fmt_qty(qty)} {p.unit.code} {p.internal_code} {where} - {reason}",
+                 new={"number": number, "product_id": product_id, "quantity": qty})
+
+
+def from_other_projects(s: Session, site_id: int | None, totals: dict[int, Decimal]) -> dict[int, Decimal]:
+    """{product_id: quantity} that issuing ``totals`` to ``site_id`` would take out of other projects'
+    stock: what is left after the project's own stock and the general stock are used."""
+    if not totals:
+        return {}
+    ids = list(totals)
+    usable = usable_stock(s, ids)
+    others = reserved_by_product(s, ids, exclude_site_id=site_id)
+    out = {}
+    for pid, qty in totals.items():
+        held = others.get(pid, ZERO)
+        free = usable.get(pid, ZERO) - held
+        if held > ZERO and qty > free:
+            out[pid] = min(qty - max(free, ZERO), held)
+    return out
+
+
+def other_projects_message(s: Session, totals: dict[int, Decimal], from_others: dict[int, Decimal],
+                           what: str) -> str:
+    """The block message: how much would come from other projects and how much may go without a manager."""
+    parts = []
+    for pid, q in from_others.items():
+        p = s.get(Product, pid)
+        ok = totals[pid] - q
+        parts.append(f"{p.internal_code}: {fmt_qty(q)} {p.unit.code} from other projects - "
+                     f"you can use up to {fmt_qty(ok)} {p.unit.code} without a manager")
+    return (f"{what} would use stock that belongs to other projects.\n" + "\n".join(parts) +
+            "\nOnly a Store Manager can allow that, with a reason.")
+
+
+def take_from_other_projects(s: Session, ctx, site: Site | None, needed: dict[int, Decimal], doc_number: str,
+                             reason: str) -> list[dict]:
+    """v1.35 (Ihor 21.11.2026): a manager allowed a Goods Out or production to use other projects'
+    stock. That stock is moved off those projects (newest stock first) with a PSR record in their
+    history. Returns [{"site_id", "product_id", "quantity"}] so a reversal can give it back."""
+    number = None
+    moved: list[dict] = []
+    to = site.display if site else "production without a project"
+    for pid, qty in needed.items():
+        rest = qty
+        per_site: dict[int, Decimal] = {}
+        rows = sorted((r for r in active_reservations(s, [pid]) if site is None or r.site_id != site.id),
+                      key=lambda r: r.id, reverse=True)
+        issued = issued_by_reservation(s, [r.id for r in rows])
+        for r in rows:
+            if rest <= ZERO:
+                break
+            take = min(rest, max(r.quantity - issued.get(r.id, ZERO), ZERO))
+            if take > ZERO:
+                per_site[r.site_id] = per_site.get(r.site_id, ZERO) + take
+                rest -= take
+        for sid, q in per_site.items():
+            number = number or next_number(s, "PROJECT_RELEASE")
+            other = s.get(Site, sid)
+            give_back(s, ctx, other, pid, q, number, reason,
+                      f"Moved to {to} on {doc_number} ({number}): {reason}", f"moved to {to} on {doc_number}")
+            moved.append({"site_id": sid, "product_id": pid, "quantity": str(q)})
+    return moved
+
+
+def give_moved_stock_back(s: Session, ctx, moved: list[dict], doc_number: str) -> None:
+    """v1.35: the document that took other projects' stock was reversed, so the material is back on
+    the shelf: it becomes those projects' stock again (if they are still open), as a new row that
+    points at nothing but says why. A closed project's share stays in main stock."""
+    for m in moved:
+        site = s.get(Site, m["site_id"])
+        if site is None or site.status not in OPEN_SITE_STATUSES:
+            continue
+        product = s.get(Product, m["product_id"])
+        qty = to_qty(m["quantity"])
+        r = StockReservation(number=next_number(s, "RESERVATION"), product_id=product.id, site_id=site.id,
+                             site_number_snapshot=site.project_number, site_name_snapshot=site.name,
+                             quantity=qty, notes=f"Given back: {doc_number} was reversed",
+                             status=ReservationStatus.ACTIVE.value, created_by_id=ctx.user.id)
+        s.add(r)
+        s.flush()
+        audit.record(s, ctx, "RESERVATION_CREATED", EntityType.RESERVATION.value, r.id, r.number,
+                     f"{fmt_qty(qty)} {product.unit.code} {product.internal_code} back to {site.display}: "
+                     f"{doc_number} was reversed",
+                     new={"product_id": product.id, "site_id": site.id, "quantity": qty})
+
+
+def moved_by(s: Session, entity_type: str, entity_id: int) -> list[dict]:
+    """What a Goods Out / production took from other projects (from its audit record)."""
+    import json
+
+    from wms.db.models import AuditLog
+    out: list[dict] = []
+    for row in s.scalars(select(AuditLog).where(AuditLog.action == "PROJECT_STOCK_TAKEN",
+                                                AuditLog.entity_type == entity_type,
+                                                AuditLog.entity_id == entity_id)):
+        out += json.loads(row.new_values or "{}").get("moved", [])
+    return out
+
+
 # --- service -----------------------------------------------------------------------------------
 
 class ReservationService(BaseService):
-    def reserve(self, data: dict) -> ReservationView:
-        """Set stock aside for a project. Refused if more than the available stock is asked for."""
-        self.require(P.RESERVATIONS_EDIT)
-        with self.db.session() as s:
-            check_client_token(s, StockReservation, data.get("client_token"), "number",
-                               EntityType.RESERVATION.value, "reservation")
-            product = s.get(Product, data.get("product_id")) if data.get("product_id") else None
-            if product is None:
-                raise ValidationError("Choose the product to reserve.", "product_id")
-            if not product.is_active:
-                raise ValidationError(f"{product.internal_code} has been archived.", "product_id")
-            site = s.get(Site, data.get("site_id")) if data.get("site_id") else None
-            if site is None:
-                raise ValidationError("Choose the project to reserve for.", "site_id")
-            if site.status not in OPEN_SITE_STATUSES:
-                raise ValidationError(f"Project {site.display} is closed - reopen it to reserve stock for it.",
-                                      "site_id")
-            qty = self._qty(product, data.get("quantity"))
-            r = self._create(s, product, site, qty, data.get("required_by") or None, data.get("notes"),
-                             data.get("client_token") or None)
-            rid = r.id
-        return self.get(rid)
-
-    def _create(self, s: Session, product: Product, site: Site, qty: Decimal, required_by: date | None,
-                notes: str | None, client_token: str | None) -> StockReservation:
-        """One new reservation (checks what is available; also used by Reserve remaining)."""
-        self._check_available(s, product, qty)
-        r = StockReservation(number=next_number(s, "RESERVATION"), product_id=product.id, site_id=site.id,
-                             site_number_snapshot=site.project_number, site_name_snapshot=site.name,
-                             quantity=qty, required_by=required_by, notes=clean_str(notes),
-                             status=ReservationStatus.ACTIVE.value, created_by_id=self.user.id,
-                             client_token=client_token)
-        s.add(r)
-        s.flush()
-        audit.record(s, self.ctx, "RESERVATION_CREATED", EntityType.RESERVATION.value, r.id, r.number,
-                     f"{fmt_qty(qty)} {product.unit.code} {product.internal_code} for {site.display}",
-                     new={"product_id": product.id, "site_id": site.id, "quantity": qty,
-                          "required_by": r.required_by})
-        return r
-
-    def update(self, reservation_id: int, quantity, required_by: date | None = None,
-               notes: str | None = None) -> ReservationView:
-        """Change an active reservation. It cannot go below what has been issued, and an increase
-        must be available."""
-        self.require(P.RESERVATIONS_EDIT)
-        with self.db.session() as s:
-            r = self._active(s, reservation_id)
-            qty = self._qty(r.product, quantity)
-            issued = issued_by_reservation(s, [r.id]).get(r.id, ZERO)
-            if qty < issued:
-                raise ValidationError(f"{fmt_qty(issued)} has already been issued against {r.number}, so it cannot "
-                                      f"be reduced below that.", "quantity")
-            if qty > r.quantity:
-                self._check_available(s, r.product, qty - r.quantity)
-            old = {"quantity": r.quantity, "required_by": r.required_by, "notes": r.notes}
-            r.quantity, r.required_by, r.notes = qty, required_by, clean_str(notes)
-            o, n = audit.diff(old, {"quantity": r.quantity, "required_by": r.required_by, "notes": r.notes})
-            if n:
-                audit.record(s, self.ctx, "RESERVATION_CHANGED", EntityType.RESERVATION.value, r.id, r.number,
-                             old=o, new=n)
-            refresh_statuses(s, self.ctx, [r.id], "Quantity changed.")
-        return self.get(reservation_id)
-
-    def release(self, reservation_id: int, reason: str) -> ReservationView:
-        """Free what is still reserved (the project no longer needs it)."""
-        self.require(P.RESERVATIONS_EDIT)
-        reason = clean_str(reason, "reason", required=True)
-        with self.db.session() as s:
-            r = self._active(s, reservation_id)
-            r.status, r.released_at, r.released_by_id, r.release_reason = (
-                ReservationStatus.RELEASED.value, utcnow(), self.user.id, reason)
-            audit.record(s, self.ctx, "RESERVATION_RELEASED", EntityType.RESERVATION.value, r.id, r.number, reason,
-                         old={"status": "ACTIVE"}, new={"status": "RELEASED"})
-        return self.get(reservation_id)
-
-    @staticmethod
-    def _qty(product: Product, raw) -> Decimal:
-        qty = to_qty(raw if raw not in (None, "") else "0", "quantity")
-        if qty <= ZERO:
-            raise ValidationError("Quantity must be greater than zero.", "quantity")
-        if not product.unit.allow_decimal and qty != qty.to_integral_value():
-            raise ValidationError(f"{product.unit.code} quantities must be whole numbers.", "quantity")
-        return qty
-
-    @staticmethod
-    def _check_available(s: Session, product: Product, qty: Decimal) -> None:
-        usable = usable_stock(s, [product.id]).get(product.id, ZERO)
-        reserved = reserved_by_product(s, [product.id]).get(product.id, ZERO)
-        free = usable - reserved
-        if qty > free:
-            raise ValidationError(
-                f"Only {fmt_qty(max(free, ZERO))} {product.unit.code} of {product.internal_code} is available to "
-                f"reserve (on hand {fmt_qty(usable)}, already reserved {fmt_qty(reserved)}).", "quantity")
-
-    @staticmethod
-    def _active(s: Session, reservation_id: int) -> StockReservation:
-        r = s.get(StockReservation, reservation_id)
-        if r is None:
-            raise NotFoundError("Reservation not found.")
-        if r.status != ReservationStatus.ACTIVE.value:
-            raise ValidationError(f"Reservation {r.number} is {r.status.lower()} and can no longer be changed.")
-        return r
-
     def get(self, reservation_id: int) -> ReservationView:
         with self.db.read_session() as s:
             r = s.get(StockReservation, reservation_id)
@@ -411,7 +475,7 @@ class ReservationService(BaseService):
             return [ReservationView(r, issued.get(r.id, ZERO)) for r in rows]
 
     def conflicts(self, site_id: int | None, lines: list[tuple[int, Decimal]]) -> list[str]:
-        """Warnings before a Goods Out: lines that would use stock reserved for other projects."""
+        """Warnings before a Goods Out: lines that would use other projects' stock."""
         if not lines:
             return []
         totals: dict[int, Decimal] = {}
@@ -431,8 +495,8 @@ class ReservationService(BaseService):
                 if held > ZERO and qty > free:
                     p = s.get(Product, pid)
                     sites = sorted({r.site_label for r in active_reservations(s, [pid]) if r.site_id != site_id})
-                    out.append(f"{p.internal_code}: issuing {fmt_qty(qty)} uses {fmt_qty(min(qty - free, held))} "
-                               f"{p.unit.code} reserved for {', '.join(sites)}.")
+                    out.append(f"{p.internal_code}: issuing {fmt_qty(qty)} uses {fmt_qty(min(qty - max(free, ZERO), held))} "
+                               f"{p.unit.code} of the project stock of {', '.join(sites)}.")
         return out
 
     def project_stock(self, site_id: int) -> list[ProjectStockLine]:
@@ -475,38 +539,9 @@ class ReservationService(BaseService):
                     raise ValidationError(f"{p.internal_code}: the project holds {fmt_qty(have)} {p.unit.code}, "
                                           f"so {fmt_qty(qty)} cannot be returned.", "quantity")
             number = next_number(s, "PROJECT_RELEASE")
-            rows = sorted(active_reservations(s, list(wanted), site_id=site_id), key=lambda r: r.id, reverse=True)
-            issued = issued_by_reservation(s, [r.id for r in rows])
-            why = f"Returned to main stock ({number}): {reason}"
             for pid, qty in wanted.items():
-                rest = qty
-                for r in (r for r in rows if r.product_id == pid):
-                    if rest <= ZERO:
-                        break
-                    done = issued.get(r.id, ZERO)
-                    left = r.quantity - done
-                    if left <= ZERO:
-                        continue
-                    take = min(rest, left)
-                    rest -= take
-                    old = {"quantity": r.quantity, "status": r.status}
-                    r.quantity -= take
-                    if r.quantity <= done:
-                        if done > ZERO:
-                            r.quantity, r.status = done, ReservationStatus.FULFILLED.value
-                        else:
-                            r.quantity = old["quantity"]  # quantity must stay > 0: keep it, mark released
-                            r.status, r.released_at, r.released_by_id, r.release_reason = (
-                                ReservationStatus.RELEASED.value, utcnow(), self.user.id, why)
-                    audit.record(s, self.ctx, "RESERVATION_CHANGED", EntityType.RESERVATION.value, r.id, r.number,
-                                 why, old=old, new={"quantity": r.quantity, "status": r.status})
-                p = s.get(Product, pid)
-                s.add(ProjectStockRelease(number=number, site_id=site.id, site_number_snapshot=site.project_number,
-                                          site_name_snapshot=site.name, product_id=pid, quantity=qty, reason=reason,
-                                          user_id=self.user.id, user_name_snapshot=self.user.full_name))
-                audit.record(s, self.ctx, "PROJECT_STOCK_RETURNED", EntityType.SITE.value, site.id, site.display,
-                             f"{number}: {fmt_qty(qty)} {p.unit.code} {p.internal_code} back to main stock - {reason}",
-                             new={"number": number, "product_id": pid, "quantity": qty})
+                give_back(s, self.ctx, site, pid, qty, number, reason,
+                          f"Returned to main stock ({number}): {reason}", "back to main stock")
             return number
 
     def project_releases(self, site_id: int) -> list[ProjectStockRelease]:

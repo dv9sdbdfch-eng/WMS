@@ -12,6 +12,7 @@ from datetime import date
 from decimal import Decimal
 
 import pytest
+from conftest import hand_reserve
 
 from wms.services.goods_in import ReceiptLine
 from wms.services.goods_out import IssueLine
@@ -66,11 +67,12 @@ def test_production_output_and_other_projects_are_not_counted(svc, proj):
 
 
 def test_reserved_pick_list_leaves_out_what_production_used(svc, proj):
-    svc.allocation.reserve_remaining(proj.site.id, [(proj.mdf.id, D(14))])
+    hand_reserve(svc, {"product_id": proj.mdf.id, "site_id": proj.site.id, "quantity": "14"})
     svc.production.post({"finished_product_id": proj.cabinet.id, "quantity": "1", "production_date": TODAY,
                          "site_id": proj.site.id}, [MaterialInput(proj.mdf.id, "3", proj.bin2.id)])
     pick = svc.allocation.pick_list(proj.site.id, source="RESERVED")
     assert sum(r.quantity for r in pick.rows) == D(11)  # 14 reserved, 3 already used: not picked twice
+    assert mdf_row(svc, proj).proj_reserved == D(11)  # v1.35: production used the project's own stock
 
 
 # --- B-013: unit cost after a reversal, price warnings -----------------------------------------

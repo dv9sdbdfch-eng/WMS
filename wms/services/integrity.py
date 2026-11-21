@@ -274,19 +274,30 @@ def _reservation_checks(s: Session) -> list[IntegrityIssue]:
         out.append(IntegrityIssue(CRITICAL, "Reservation link",
                                   f"Goods Out {number} line {line_no} fulfils reservation {res}, which is for another "
                                   f"product or project."))
+    from wms.db.models import ProductionLine, ProductionOrder
+    bad = s.execute(
+        select(ProductionOrder.order_number, ProductionLine.line_no, StockReservation.number)
+        .join(ProductionOrder, ProductionOrder.id == ProductionLine.order_id)
+        .join(StockReservation, StockReservation.id == ProductionLine.reservation_id)
+        .where((StockReservation.product_id != ProductionLine.product_id)
+               | (StockReservation.site_id != ProductionOrder.site_id))).all()
+    for number, line_no, res in bad:
+        out.append(IntegrityIssue(CRITICAL, "Project stock link",
+                                  f"Production {number} line {line_no} uses project stock {res}, which is for another "
+                                  f"product or project."))
     issued = issued_by_reservation(s)
     for r in s.scalars(select(StockReservation).where(StockReservation.status != "RELEASED")):
         expected = status_from_issues(r, issued.get(r.id, ZERO))
         if expected != r.status:
             out.append(IntegrityIssue(WARNING, "Reservation status",
-                                      f"{r.number} is {r.status.lower()} but its Goods Out says {expected.lower()}."))
+                                      f"{r.number} is {r.status.lower()} but its Goods Out / production says {expected.lower()}."))
     reserved = reserved_by_product(s)
     if reserved:
         usable = usable_stock(s, list(reserved))
         codes = dict(s.execute(select(Product.id, Product.internal_code).where(Product.id.in_(list(reserved)))).all())
         for pid, q in sorted(reserved.items()):
             if q > usable.get(pid, ZERO):
-                out.append(IntegrityIssue(WARNING, "Over-reserved",
-                                          f"{codes.get(pid, pid)}: {_fmt(q)} reserved but only "
+                out.append(IntegrityIssue(WARNING, "Project stock above on hand",
+                                          f"{codes.get(pid, pid)}: {_fmt(q)} held as project stock but only "
                                           f"{_fmt(usable.get(pid, ZERO))} in stock that can be issued."))
     return out

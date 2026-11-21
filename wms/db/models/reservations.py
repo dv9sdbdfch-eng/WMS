@@ -1,4 +1,7 @@
-"""Stock reserved for projects.
+"""Project stock (table stock_reservations, kept from before v1.35).
+
+v1.35: rows are made by Goods In for a project; reserving by hand was removed, older hand
+reservations stay as project stock.
 
 A reservation is not a stock movement: nothing leaves a bin and On Hand does not change. It lowers
 Available (On Hand - Reserved) until the material is issued with Goods Out to the same project;

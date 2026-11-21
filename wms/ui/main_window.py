@@ -90,7 +90,7 @@ def _hidden():
         ("goods_in", "Goods In", P.GOODS_IN_POST, goods_in.GoodsInPage, None),
         ("goods_out", "Goods Out", P.GOODS_OUT_VIEW, goods_out.GoodsOutPage, None),
         ("low_stock", "Reorder Required", P.PRODUCTS_VIEW, low_stock.LowStockPage, "products"),
-        ("reservations", "Reservations", P.STOCK_VIEW, reservations.ReservationsPage, "projects"),
+        ("reservations", "Project Stock", P.STOCK_VIEW, reservations.ReservationsPage, "projects"),
         # the projects as one flat table (search, sort, export); the tree is the Projects screen
         ("sites", "Project List", P.SITES_VIEW, sites.SitesPage, "projects"),
         ("discrepancies", "Delivery Problems", P.PURCHASING_VIEW, discrepancies.DiscrepanciesPage, "delivery_notes"),

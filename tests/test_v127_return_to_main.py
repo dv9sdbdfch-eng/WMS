@@ -6,6 +6,7 @@ from datetime import date
 from decimal import Decimal
 
 import pytest
+from conftest import hand_reserve
 from sqlalchemy import select
 from test_ui_smoke import _errors, ui  # noqa: F401 - the shared screen fixture
 
@@ -27,7 +28,7 @@ def held(svc, sample):
                        "site_id": sample.site.id},
                       [ReceiptLine(sample.mdf.id, D(20), sample.bin1.id),
                        ReceiptLine(sample.edge.id, D(10), sample.bin2.id)])
-    svc.reservations.reserve({"product_id": sample.mdf.id, "site_id": sample.site.id, "quantity": "5"})
+    hand_reserve(svc, {"product_id": sample.mdf.id, "site_id": sample.site.id, "quantity": "5"})
     return sample
 
 

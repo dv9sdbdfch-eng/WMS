@@ -51,7 +51,7 @@ class FinishScheduleDialog(QDialog):
         lay.addWidget(self.summary)
         self.tree_cover = label("", "Muted", wrap=True)
         lay.addWidget(self.tree_cover)
-        lay.addWidget(label("Project stock = material delivered for the project or reserved for it, less what was "
+        lay.addWidget(label("Project stock = material delivered for the project, less what was "
                             "issued. It is shared by every unit of the project that uses the material.", "Muted",
                             wrap=True))
         self.edit_buttons = []

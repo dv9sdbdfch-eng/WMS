@@ -19,6 +19,7 @@ from wms.ui.widgets.common import (
     Col,
     DateEdit,
     PickCombo,
+    ask_other_projects,
     button,
     confirm,
     h,
@@ -123,7 +124,7 @@ class GoodsOutPage(Page):
                                tooltip="The material on the selected line is not in its bin: take the line off "
                                        "and flag the bin for a count. The project still needs it."),
                         button("Load from project...", self.load_from_project,
-                               tooltip="Fill the lines from what is reserved for / still needed by the chosen "
+                               tooltip="Fill the lines from the project's stock / what the chosen project still needs "
                                        "project, bin by bin in walking order")))
         # materials only: finished products leave with Dispatch (Delivery Note, v1.22)
         self.lines = LinesEditor(self.app, show_bin=True, bin_optional=True, show_stock=True, show_planned=True,
@@ -153,7 +154,7 @@ class GoodsOutPage(Page):
         self.lines.add_product(product_id)
 
     def load_from_project(self) -> bool:
-        """Put the project's picking list on the form (reserved or remaining, whole project or one part)."""
+        """Put the project's picking list on the form (project stock or remaining, whole project or one part)."""
         from wms.ui.dialogs.allocation import PickListDialog
         if not self.site.value():
             info(self, "Load from project", "Choose the site / project first.")
@@ -177,8 +178,8 @@ class GoodsOutPage(Page):
     def not_found(self) -> None:
         """v1.34 (B-015): the picker did not find the material in the bin. The line comes off this
         Goods Out (so nothing is issued that did not leave), the bin is flagged for a count (Dashboard:
-        Bins to Count) and the project's need stays open as Remaining / To Allocate. Reservations
-        are kept: the manager decides once the count shows what is really there."""
+        Bins to Count) and the project's need stays open as Remaining / Not covered. Project stock
+        stays as it is: the manager decides once the count shows what is really there."""
         r = self.lines.table.currentRow()
         values = {v.row - 1: v for v in self.lines.values(validate=False)}
         v = values.get(r)
@@ -254,15 +255,13 @@ class GoodsOutPage(Page):
                                 f"with exactly the same materials and quantities.\n\nIs this a separate, second "
                                 f"issue? Choose Cancel if it was already entered.", yes="Post again", danger=True):
             return
-        # Stock set aside for other projects: warn before it is taken (it has physically left anyway).
-        clash = self.app.services.reservations.conflicts(self.site.value(),
-                                                         [(v.product_id, v.quantity) for v in values])
-        if clash and not confirm(self, "Reserved for another project",
-                                 "\n".join(clash) + "\n\nThat project will be short. Post anyway?",
-                                 yes="Post anyway", danger=True):
+        # v1.35: other projects' stock is blocked; a Store Manager may allow it with a reason
+        go_on, other_reason = ask_other_projects(self, self.app, self.site.value(),
+                                                 [(v.product_id, v.quantity) for v in values])
+        if not go_on:
             return
         issue = run_with_override(self, self.app.can(P.STOCK_OVERRIDE_NEGATIVE), self.app.services.goods_out.post,
-                                  header=header, lines=lines)
+                                  header=header, lines=lines, other_projects_reason=other_reason)
         if issue:
             self.app.changed()
             if confirm(self, "Goods Out posted", f"{issue.issue_number} has been posted to {issue.site_label}.\n\n"

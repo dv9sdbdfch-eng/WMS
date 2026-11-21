@@ -118,7 +118,7 @@ class ExcelImportDialog(QDialog):
         if self.project_mode:
             what = f"the {self.project_name} " if self.project_name else "a project's "
             self.purpose = label(f"Updates {what}material requirements (Required quantities on the project's "
-                                 f"material list). It does NOT change stock, does NOT reserve and does NOT create "
+                                 f"material list). It does NOT change stock and does NOT create "
                                  f"Goods Out - physical stock moves only through warehouse transactions.",
                                  "InfoBanner", wrap=True)
         else:

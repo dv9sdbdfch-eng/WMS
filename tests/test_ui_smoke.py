@@ -7,13 +7,16 @@ unexpected error dialog fails the test.
 
 from __future__ import annotations
 
+from datetime import date
 from decimal import Decimal
 
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QDialog, QInputDialog, QMessageBox
+from PySide6.QtWidgets import QDialog, QInputDialog, QMessageBox, QPushButton
 
 from wms.ui.app import App
+
+TODAY = date.today()
 
 
 @pytest.fixture
@@ -587,29 +590,18 @@ def test_purchase_order_to_partial_delivery_and_problem(ui, sample, qtbot):
     assert not _errors(msgs), msgs
 
 
-def test_reserve_for_project_then_reorder_required(ui, sample, qtbot):
-    """Stage 4 on screen: reserve on the product card, see the stock states, get warned when another
-    project's reservation is about to be issued, and turn the Reorder Required list into draft orders."""
+def test_project_stock_then_reorder_required(ui, sample, qtbot):
+    """v1.35 on screen: stock delivered for a project shows on the product card as project stock,
+    another project's Goods Out needs a manager's reason (asked here), and the Reorder Required list
+    turns into draft orders."""
     app, win, msgs, opened = ui
+    from wms.services.goods_in import ReceiptLine
     from wms.ui.dialogs.product_dialog import ProductDialog
-    from wms.ui.dialogs.reservations import ReservationDialog
-    sample.receive(sample.mdf, 40)
+    sample.receive(sample.mdf, 5, number="DN-GEN")
+    app.services.goods_in.post({"dn_number": "DN-PRJ", "supplier_id": sample.supplier.id, "delivery_date": TODAY,
+                                "site_id": sample.site.id}, [ReceiptLine(sample.mdf.id, Decimal("35"), sample.bin1.id)])
+    res = app.services.reservations.list()[0].reservation
     other = app.services.sites.save(None, {"project_number": "P-2002", "name": "Hill House", "status": "ACTIVE"})
-
-    dlg = ReservationDialog(app, None, product_id=sample.mdf.id, site_id=sample.site.id)
-    qtbot.addWidget(dlg)
-    assert "available 40" in dlg.states.text()
-    dlg.qty.set_value(Decimal("35"))
-    dlg.save()
-    res = dlg.saved.reservation
-    assert res.number.startswith("RES-") and not _errors(msgs)
-
-    too_much = ReservationDialog(app, None, product_id=sample.mdf.id, site_id=other.id)
-    qtbot.addWidget(too_much)
-    too_much.qty.set_value(Decimal("10"))
-    too_much.save()
-    assert any("Only 5" in text for _, _, text in _errors(msgs))  # over-reservation refused
-    msgs.clear()
 
     card = ProductDialog(app, sample.mdf.id)
     qtbot.addWidget(card)
@@ -618,19 +610,22 @@ def test_reserve_for_project_then_reorder_required(ui, sample, qtbot):
                       "incoming": "0 SHEET", "minimum": "10 SHEET"}
     assert "Reorder" in card.ov_reorder.text() or "Low" in card.ov_reorder.text()
     assert [v.reservation.id for v in card.reservations.table.items()] == [res.id]
+    assert not [b.text() for b in card.findChildren(QPushButton) if b.text().startswith("Reserve")]
     card.reorder_level.set_value(Decimal("12"))
     card.save()
     assert app.services.products.get(sample.mdf.id).reorder_level == Decimal("12")
 
-    # Goods Out to the other project would eat P-1001's reservation: warned first (auto-confirmed here).
+    # Goods Out of 8 to the other project would take 3 of P-1001's stock: the manager gives a reason.
     win.go("goods_out")
     page = win.page("goods_out")
     page.site.set_value(other.id)
     page.lines.clear()
     page.lines.add_row(sample.mdf.id, Decimal("8"))
     page.post()
-    warning = [text for _, title, text in msgs if title == "Reserved for another project"]
-    assert warning and "P-1001" in warning[0] and "uses 3" in warning[0]
+    assert not _errors(msgs), msgs
+    assert app.services.reservations.get(res.id).remaining == Decimal("32")
+    [psr] = app.services.reservations.project_releases(sample.site.id)
+    assert psr.quantity == Decimal("3") and "Test reason" in psr.reason
 
     win.go("reservations")
     rp = win.page("reservations")
