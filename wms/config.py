@@ -116,7 +116,7 @@ class AppConfig:
     # "Skip this version": that version is not offered again at start-up (Settings > About still can).
     skipped_update_version: str = ""
     company_name: str = "My Company Ltd"
-    max_attachment_mb: int = 25
+    max_attachment_mb: int = 50   # drawings (DWG) can be large (v1.37: was 25)
     extra: dict = field(default_factory=dict)
 
     # -- resolved paths -----------------------------------------------------

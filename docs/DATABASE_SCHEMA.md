@@ -39,8 +39,12 @@ Protected tables (database triggers, see `wms.db.engine`):
 | is_deleted | Boolean | no |  |
 | deleted_at | UTCDateTime | yes |  |
 | deleted_by_id | Integer | yes | FK users.id, indexed |
+| revision | String(20) | yes |  |
+| doc_status | String(20) | yes |  |
+| superseded_by_id | Integer | yes | FK attachments.id, indexed |
 | id | Integer | no | PK |
 
+* CHECK doc_status IS NULL OR doc_status IN ('PRELIMINARY', 'APPROVED', 'SUPERSEDED')
 * INDEX ix_attachments_entity (entity_type, entity_id)
 
 ## audit_log

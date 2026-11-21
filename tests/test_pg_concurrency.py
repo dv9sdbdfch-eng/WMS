@@ -126,6 +126,29 @@ def test_a_pc_waiting_too_long_gets_a_clear_message(svc, sample, cfg, monkeypatc
     assert svc.products.row(sample.mdf.id).on_hand == D(10)
 
 
+def test_two_pcs_add_a_new_revision_of_the_same_drawing(svc, cfg, tmp_path):
+    """Only one becomes the next revision; the other is told and leaves no orphan file or row."""
+    from wms.core.enums import EntityType
+    from wms.core.exceptions import ValidationError
+    t = svc.project_tree
+    p = t.save_project(None, {"project_number": "CC", "name": "Clash", "status": "ACTIVE"})
+    u = t.save_unit(None, {"name": "Kitchen", "unit_code": "K01", "quantity": "1"}, site_id=p.id)
+    unit = EntityType.PROJECT_UNIT.value
+    first = tmp_path / "K01.pdf"
+    first.write_bytes(b"%PDF-1.4\n% b\n%%EOF\n")
+    [b] = svc.attachments.add_drawings(unit, u.id, [first], revision="B")
+    files = []
+    for i in range(2):
+        f = tmp_path / f"K01 c{i}.pdf"
+        f.write_bytes(b"%PDF-1.4\n% c" + str(i).encode() + b"\n%%EOF\n")
+        files.append(f)
+    results, errors = together(pcs(cfg, 2), lambda pc, i: pc.attachments.new_revision(b.id, files[i], revision="C"))
+    assert len(results) == 1 and len(errors) == 1
+    assert isinstance(next(iter(errors.values())), ValidationError)
+    rows = svc.attachments.drawings_for(unit, u.id)
+    assert sorted((a.revision, a.doc_status) for a in rows) == [("B", "SUPERSEDED"), ("C", "APPROVED")]
+
+
 def test_server_guards_match_sqlite(svc, sample):
     """The protective triggers work on PostgreSQL as on SQLite: a posted line or a reversed
     document cannot be changed, stock records cannot be deleted, the ledger is append-only."""

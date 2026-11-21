@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
     QSplitter,
     QStackedWidget,
     QStyledItemDelegate,
+    QTabWidget,
     QToolButton,
     QTreeWidget,
     QTreeWidgetItem,
@@ -41,7 +42,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from wms.core.enums import CLOSED_SITE_STATUSES, OPEN_SITE_STATUSES, SiteStatus
+from wms.core.enums import CLOSED_SITE_STATUSES, OPEN_SITE_STATUSES, EntityType, SiteStatus
 from wms.core.numbers import fmt_qty
 from wms.core.permissions import P
 from wms.services.project_tree import DIRECT, UNASSIGNED, TreeFilter, TreeMatches
@@ -62,6 +63,7 @@ from wms.ui.dialogs.project_tree import (
 )
 from wms.ui.pages.base import Page
 from wms.ui.widgets.common import QTY, Col, DataTable, DecimalEdit, SearchBox, button, confirm, h, info, label, run
+from wms.ui.widgets.drawings import DrawingsPanel
 
 #: one column per level of the hierarchy (v1.17), then Details. Since v1.29 the materials of a unit
 #: are not rows of the tree: double-clicking a unit opens its Finish Schedule window.
@@ -203,14 +205,17 @@ def id_of(key: str) -> int | None:
 
 class ProjectsPage(Page):
     title = "Projects"
-    subtitle = ("Manager → Project → Block → Level → Unit (Block and Level are optional). Click the Project "
-                "Manager or Project header to show just managers or all projects. Double-click a unit for its "
-                "Finish Schedule (the materials to make it); double-click another name to change it. Required "
-                "follows the units by itself. Right-click or ⋯ for actions.")
+    subtitle = "Manager → Project → Block → Level → Unit · double-click a unit for its Finish Schedule · right-click for more"
+    help_text = ("Manager → Project → Block → Level → Unit (Block and Level are optional). Click the Project "
+                 "Manager or Project header to show just managers or all projects. Double-click a unit for its "
+                 "Finish Schedule (the materials to make it); double-click another name to change it. Required "
+                 "follows the units by itself. Right-click or ⋯ for actions. Drawings: select a project or unit, "
+                 "tab Drawings on the right.")
 
     def __init__(self, app, parent=None):
         super().__init__(app, parent)
         self.can_edit = app.can(P.SITES_EDIT)
+        self.titles_widget.setToolTip(self.help_text)
         self.svc = app.services.project_tree
         self.items: dict[str, QTreeWidgetItem] = {}
         self._coverage: dict[int, object] = {}  # site id -> ProjectCoverage, read once per refresh
@@ -354,9 +359,35 @@ class ProjectsPage(Page):
         rows (the two expansion buttons) or by the search box."""
         return TreeFilter(None, None, self.status_filter.currentData())
 
+    def _load_drawing_counts(self) -> None:
+        """How many current drawings each project and unit has (two small queries per refresh)."""
+        att = self.app.services.attachments
+        self._drawings = {k: (run(self, att.drawing_counts, k) or {})
+                          for k in (EntityType.SITE.value, EntityType.PROJECT_UNIT.value)}
+
+    def _clip(self, entity_type: str, entity_id: int) -> str:
+        n = getattr(self, "_drawings", {}).get(entity_type, {}).get(entity_id, 0)
+        return f"📎 {n}" if n else ""
+
+    def drawings_changed(self, key: str | None) -> None:
+        """A drawing was added / removed in the panel: update the 📎 count on its tree row."""
+        self._load_drawing_counts()
+        item = self.items.get(key) if key else None
+        if item is None:
+            return
+        node = item.data(0, NODE)
+        texts = self._project_texts(node) if kind_of(key) == "P" else self._unit_texts(node)
+        self._set_texts(item, texts)
+
+    def project_title(self, site_id: int) -> str:
+        item = self.items.get(f"P:{site_id}")
+        node = item.data(0, NODE) if item is not None else None
+        return getattr(node, "name", None) or "project"
+
     def refresh(self) -> None:
         if self._skip_refresh:
             return
+        self._load_drawing_counts()
         self._coverage.clear()
         selected = self.current_key()
         text = self.search.text().strip()
@@ -562,7 +593,8 @@ class ProjectsPage(Page):
         return item
 
     def _project_texts(self, node) -> list[str]:
-        parts = [node.code, node.status_label]
+        # 📎 first: the Details column is narrow and the end of the text is often cut off
+        parts = [self._clip(EntityType.SITE.value, node.id), node.code, node.status_label]
         if node.blocks:
             parts.append(_n(node.blocks, "block"))
         parts.append(_n(node.units, "unit"))
@@ -602,7 +634,8 @@ class ProjectsPage(Page):
 
     def _unit_texts(self, node) -> list[str]:
         n = node.materials
-        return [node.name, "  ·  ".join(p for p in (node.code, f"× {fmt_qty(node.quantity)}",
+        return [node.name, "  ·  ".join(p for p in (self._clip(EntityType.PROJECT_UNIT.value, node.id), node.code,
+                                                     f"× {fmt_qty(node.quantity)}",
                                                      f"{n} material{'' if n == 1 else 's'}") if p)]
 
     def _add_unit(self, parent, node, full: bool) -> QTreeWidgetItem:
@@ -1531,10 +1564,35 @@ class NodePanel(QStackedWidget):
                            "Right-click a row (or click ⋯) for its actions.", "Muted", wrap=True)
         self.empty.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.addWidget(self.empty)
-        self.pages = {"M": self._manager_page(), "P": self._project_page(), "B": self._group_page("b", "Block"),
-                      "V": self._group_page("v", "Level"), "U": self._unit_page()}
+        # projects and units: Details | Drawings tabs (v1.37)
+        self.p_drawings = DrawingsPanel(self.app)
+        self.u_drawings = DrawingsPanel(self.app)
+        self.p_tabs = self._tabs(self._project_page(), self.p_drawings)
+        self.u_tabs = self._tabs(self._unit_page(), self.u_drawings)
+        self.p_drawings.changed.connect(lambda: self._drawings_changed("P"))
+        self.u_drawings.changed.connect(lambda: self._drawings_changed("U"))
+        self.pages = {"M": self._manager_page(), "P": self.p_tabs, "B": self._group_page("b", "Block"),
+                      "V": self._group_page("v", "Level"), "U": self.u_tabs}
         for w in self.pages.values():
             self.addWidget(w)
+
+    @staticmethod
+    def _tabs(details: QWidget, drawings: QWidget) -> QTabWidget:
+        tabs = QTabWidget()
+        tabs.setDocumentMode(True)
+        tabs.addTab(details, "Details")
+        tabs.addTab(drawings, "Drawings")
+        tabs.setTabToolTip(1, "Drawings of this record: PDF, DWG, DXF or pictures, with revision and status")
+        return tabs
+
+    def _set_drawing_tab(self, tabs: QTabWidget, panel) -> None:
+        n = panel.count
+        tabs.setTabText(1, f"Drawings ({n})" if n else "Drawings")
+
+    def _drawings_changed(self, k: str) -> None:
+        tabs, panel = (self.p_tabs, self.p_drawings) if k == "P" else (self.u_tabs, self.u_drawings)
+        self._set_drawing_tab(tabs, panel)
+        self.page.drawings_changed(self.shown_key)
 
     @staticmethod
     def _box(title: str) -> tuple[QWidget, QVBoxLayout, QFormLayout]:
@@ -1732,6 +1790,8 @@ class NodePanel(QStackedWidget):
         self._enable(self.p_code, self.p_name, self.p_manager, self.p_status, self.p_notes, self.p_save,
                      on=self.page.can_edit)
         self.p_apply.setEnabled(self.page.can_edit and n.status not in CLOSED_SITE_STATUSES)
+        self.p_drawings.set_entity(EntityType.SITE.value, n.id)
+        self._set_drawing_tab(self.p_tabs, self.p_drawings)
         qty, lines = self.svc.unit_totals(n.id)
         rows = run(self, self.app.services.project_demand.compare_with_project_list, n.id) or []
         self.p_table.set_items(rows)
@@ -1764,6 +1824,11 @@ class NodePanel(QStackedWidget):
         self.u_qty.set_value(n.quantity)
         self.u_notes.setPlainText(n.notes or "")
         self._enable(self.u_name, self.u_code, self.u_qty, self.u_notes, self.u_save, on=self.page.can_edit)
+        site_id = getattr(n, "site_id", None)
+        self.u_drawings.set_entity(EntityType.PROJECT_UNIT.value, n.id,
+                                   (EntityType.SITE.value, site_id, self.page.project_title(site_id))
+                                   if site_id else None)
+        self._set_drawing_tab(self.u_tabs, self.u_drawings)
         rows = run(self, self.app.services.project_demand.for_unit, n.id) or []
         self.u_table.set_items(rows)
         self.u_info.setText(f"Materials for {fmt_qty(n.quantity)} × {n.label} (quantity per unit × "

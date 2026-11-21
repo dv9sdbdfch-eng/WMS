@@ -21,10 +21,10 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from wms.core.enums import AttachmentKind
+from wms.core.enums import AttachmentKind, DocStatus
 from wms.core.exceptions import NotFoundError, ValidationError
 from wms.core.numbers import utcnow
 from wms.core.permissions import P
@@ -40,8 +40,13 @@ ALLOWED = {
     ".gif": "image/gif",
     ".webp": "image/webp",
     ".pdf": "application/pdf",
+    # drawings (v1.37): AutoCAD files are kept and opened in the PC's own viewer (no preview here)
+    ".dwg": "application/acad",
+    ".dxf": "application/dxf",
 }
 PHOTO_EXT = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"}
+#: files that can be attached as drawings
+DRAWING_EXT = {".pdf", ".dwg", ".dxf", *PHOTO_EXT}
 
 # First bytes of each allowed format. A file renamed to .pdf (or a damaged download) is refused
 # instead of being stored as a "delivery note" nobody can open later.
@@ -51,6 +56,7 @@ SIGNATURES = {
     "image/bmp": (b"BM",),
     "image/gif": (b"GIF87a", b"GIF89a"),
     "application/pdf": (b"%PDF-",),
+    "application/acad": (b"AC10",),      # every DWG version starts "AC10xx"
 }
 
 
@@ -59,6 +65,14 @@ def content_matches(path: Path, mime: str) -> bool:
         head = f.read(16)
     if mime == "image/webp":
         return head[:4] == b"RIFF" and head[8:12] == b"WEBP"
+    if mime == "application/dxf":
+        # binary DXF has a fixed header; text DXF starts with group code 0 and a SECTION
+        with open(path, "rb") as f:
+            start = f.read(4096)
+        if start.startswith(b"AutoCAD Binary DXF"):
+            return True
+        text = start.decode("latin-1").lstrip()
+        return text.startswith("0") and "SECTION" in text
     if mime == "application/pdf":
         # Some scanners write a few bytes (BOM, whitespace) before the PDF header.
         with open(path, "rb") as f:
@@ -194,7 +208,7 @@ class AttachmentService(BaseService):
             raise ValidationError(f"File not found: {src}")
         ext = src.suffix.lower()
         if ext not in ALLOWED:
-            raise ValidationError("Only JPG, PNG, BMP, GIF, WEBP and PDF files can be attached.")
+            raise ValidationError("Only JPG, PNG, BMP, GIF, WEBP, PDF, DWG and DXF files can be attached.")
         size = src.stat().st_size
         max_bytes = int(self.ctx.config.max_attachment_mb) * 1024 * 1024
         if size > max_bytes:
@@ -316,6 +330,117 @@ class AttachmentService(BaseService):
                             Attachment.entity_type == att.entity_type, Attachment.entity_id == att.entity_id,
                             Attachment.is_deleted.is_(False), Attachment.is_primary.is_(True)))):
                     first.is_primary = True
+
+    # ---- drawings (v1.37) ------------------------------------------------------------------------
+    def drawings_for(self, entity_type: str, entity_id: int) -> list[Attachment]:
+        """The drawings of a project or unit: current ones first (by name), then superseded ones."""
+        rows = self.list_for(entity_type, entity_id, AttachmentKind.DRAWING.value)
+        return sorted(rows, key=lambda a: (a.doc_status == DocStatus.SUPERSEDED.value, a.original_name.casefold(),
+                                           -(a.id or 0)))
+
+    def drawing_counts(self, entity_type: str, ids=None) -> dict[int, int]:
+        """{record id: number of current (not superseded) drawings}, in one query."""
+        with self.db.read_session() as s:
+            q = (select(Attachment.entity_id, func.count())
+                 .where(Attachment.entity_type == entity_type, Attachment.kind == AttachmentKind.DRAWING.value,
+                        Attachment.is_deleted.is_(False),
+                        (Attachment.doc_status.is_(None)) | (Attachment.doc_status != DocStatus.SUPERSEDED.value))
+                 .group_by(Attachment.entity_id))
+            if ids is not None:
+                ids = list(ids)
+                if not ids:
+                    return {}
+                q = q.where(Attachment.entity_id.in_(ids))
+            return {eid: n for eid, n in s.execute(q)}
+
+    @staticmethod
+    def _status(status: str | None) -> str:
+        status = status or DocStatus.APPROVED.value
+        if status not in (DocStatus.PRELIMINARY.value, DocStatus.APPROVED.value):
+            raise ValidationError("A drawing can be added as Preliminary or Approved.")
+        return status
+
+    def add_drawings(self, entity_type: str, entity_id: int, paths, revision: str | None = None,
+                     status: str | None = None, note: str | None = None) -> list[Attachment]:
+        """Attach one or more drawings (all or none). Each file is checked first (type, size, content)."""
+        self.require(P.ATTACHMENTS_ADD)
+        status = self._status(status)
+        for p in paths:
+            if Path(p).suffix.lower() not in DRAWING_EXT:
+                raise ValidationError(f"'{Path(p).name}': drawings can be PDF, DWG, DXF or a picture.")
+        staged: list[StagedFile] = []
+        try:
+            for p in paths:
+                staged.append(self.stage(p, AttachmentKind.DRAWING.value))
+            with self.db.session() as s:
+                out = []
+                for f in staged:
+                    att = self.attach_staged(s, entity_type, entity_id, f, caption=(note or "").strip()[:200] or None)
+                    att.revision = (revision or "").strip()[:20] or None
+                    att.doc_status = status
+                    out.append(att)
+                s.flush()
+                return out
+        except BaseException:
+            self.discard(staged)
+            raise
+
+    def new_revision(self, attachment_id: int, path, revision: str | None = None, status: str | None = None,
+                     note: str | None = None) -> Attachment:
+        """A new revision of a drawing: the new file is attached and the old one is kept, marked
+        Superseded (it stays in the list and in the audit trail)."""
+        self.require(P.ATTACHMENTS_ADD)
+        status = self._status(status)
+        staged = self.stage(path, AttachmentKind.DRAWING.value)
+        try:
+            with self.db.session() as s:
+                found = s.get(Attachment, attachment_id)
+                if found is None or found.is_deleted or found.kind != AttachmentKind.DRAWING.value:
+                    raise NotFoundError("Drawing not found.")
+                # upload the new file first; the old row is locked only for the short status change below
+                new = self.attach_staged(s, found.entity_type, found.entity_id, staged,
+                                         caption=(note or "").strip()[:200] or None)
+                new.revision = (revision or "").strip()[:20] or None
+                new.doc_status = status
+                s.flush()
+                old = self._lock(s, attachment_id)
+                if old is None or old.is_deleted:
+                    raise NotFoundError("Drawing not found.")
+                if old.doc_status == DocStatus.SUPERSEDED.value:
+                    raise ValidationError(f"'{old.original_name}' rev {old.revision or '-'} is already superseded: "
+                                          "add the new revision to the current one.")
+                old.doc_status = DocStatus.SUPERSEDED.value
+                old.superseded_by_id = new.id
+                audit.record(s, self.ctx, "DRAWING_SUPERSEDED", old.entity_type, old.entity_id, old.original_name,
+                             f"'{old.original_name}' rev {old.revision or '-'} superseded by "
+                             f"'{new.original_name}' rev {new.revision or '-'}.")
+                return new
+        except BaseException:
+            self.discard([staged])
+            raise
+
+    @staticmethod
+    def _lock(s, attachment_id: int) -> Attachment | None:
+        """Lock only the attachments row (its joined uploader must not be locked: PostgreSQL refuses
+        FOR UPDATE on the nullable side of an outer join), and read its committed state."""
+        return s.scalar(select(Attachment).where(Attachment.id == attachment_id)
+                        .with_for_update(of=Attachment).execution_options(populate_existing=True))
+
+    def set_doc_status(self, attachment_id: int, status: str) -> None:
+        """Preliminary <-> Approved (Superseded is set only by a new revision)."""
+        self.require(P.ATTACHMENTS_ADD)
+        status = self._status(status)
+        with self.db.session() as s:
+            att = self._lock(s, attachment_id)
+            if att is None or att.is_deleted or att.kind != AttachmentKind.DRAWING.value:
+                raise NotFoundError("Drawing not found.")
+            if att.doc_status == DocStatus.SUPERSEDED.value:
+                raise ValidationError("A superseded revision cannot change status.")
+            if att.doc_status != status:
+                audit.record(s, self.ctx, "DRAWING_STATUS", att.entity_type, att.entity_id, att.original_name,
+                             f"'{att.original_name}' rev {att.revision or '-'}: "
+                             f"{DocStatus(att.doc_status).label if att.doc_status else '-'} -> {DocStatus(status).label}.")
+                att.doc_status = status
 
     def missing_files(self) -> list[Attachment]:
         with self.db.read_session() as s:
