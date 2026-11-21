@@ -99,7 +99,7 @@ def restore_costs(s, ctx, dn: DeliveryNote) -> list[str]:
         .where(DeliveryNoteLine.product_id.in_(pids), DeliveryNoteLine.unit_cost.is_not(None),
                DeliveryNote.id > dn.id, DeliveryNote.status == DocumentStatus.POSTED.value).distinct()))
     products = {p.id: p for p in s.scalars(select(Product).where(Product.id.in_(pids))
-                                           .with_for_update().execution_options(populate_existing=True))}
+                                           .with_for_update(of=Product).execution_options(populate_existing=True))}
     messages: list[str] = []
     for pid in pids:
         changes, touched_after = [], False
