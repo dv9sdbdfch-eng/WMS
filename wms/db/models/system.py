@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Boolean, Index, Integer, LargeBinary, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, CheckConstraint, Index, Integer, LargeBinary, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from wms.core.numbers import utcnow
@@ -21,7 +21,11 @@ class Attachment(IdMixin, Base):
     """
 
     __tablename__ = "attachments"
-    __table_args__ = (Index("ix_attachments_entity", "entity_type", "entity_id"),)
+    __table_args__ = (
+        Index("ix_attachments_entity", "entity_type", "entity_id"),
+        CheckConstraint("doc_status IS NULL OR doc_status IN ('PRELIMINARY', 'APPROVED', 'SUPERSEDED')",
+                        name="doc_status_valid"),
+    )
 
     entity_type: Mapped[str] = mapped_column(String(30), nullable=False)
     entity_id: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -38,6 +42,10 @@ class Attachment(IdMixin, Base):
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     deleted_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     deleted_by_id: Mapped[int | None] = fk("users.id")
+    # drawings (v1.37): revision ("C", "P2"), status, and the newer revision that replaced it
+    revision: Mapped[str | None] = mapped_column(String(20))
+    doc_status: Mapped[str | None] = mapped_column(String(20))
+    superseded_by_id: Mapped[int | None] = fk("attachments.id")
 
     uploaded_by = relationship("User", foreign_keys=[uploaded_by_id], lazy="joined")
 

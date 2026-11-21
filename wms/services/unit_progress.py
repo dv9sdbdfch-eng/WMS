@@ -113,6 +113,7 @@ class ProjectCard:
     name: str
     manager: str
     status: str
+    end_date: date | None = None
     total: int = 0
     done: int = 0          # pieces made (also those since dispatched / on site)
     dispatched: int = 0    # pieces dispatched (also those since on site)
@@ -155,7 +156,7 @@ class UnitProgressService(BaseService):
         self.require(P.SITES_VIEW)
         with self.db.read_session() as s:
             q = (select(Site.id, Site.project_number, Site.name, Site.status, Site.manager_id,
-                        Manager.name, Site.project_manager)
+                        Manager.name, Site.project_manager, Site.end_date)
                  .outerjoin(Manager, Manager.id == Site.manager_id).order_by(Site.project_number))
             if include_closed:
                 q = q.where(Site.status != SiteStatus.ARCHIVED.value)
@@ -190,7 +191,7 @@ class UnitProgressService(BaseService):
             place = (0, bl[2], bl[0], lv[3], lv[0]) if lv else (1, 0, 0, 0, 0)
             return site[1], site[0], place, u[6], u[0]
 
-        cards = {sid: ProjectCard(sid, r[1], r[2], r[5] or r[6] or "", r[3]) for sid, r in sites.items()}
+        cards = {sid: ProjectCard(sid, r[1], r[2], r[5] or r[6] or "", r[3], r[7]) for sid, r in sites.items()}
         rows: list[PieceRow] = []
         for u in sorted(units, key=order):
             uid, sid, level_id, code, name, qty, _ = u

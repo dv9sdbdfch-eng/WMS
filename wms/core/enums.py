@@ -159,6 +159,14 @@ class ReasonUse(LabelledEnum):
 class AttachmentKind(LabelledEnum):
     PHOTO = "PHOTO"
     DOCUMENT = "DOCUMENT"
+    DRAWING = "DRAWING"     # v1.37: drawings on projects and units (PDF, DWG, DXF, images)
+
+
+class DocStatus(LabelledEnum):
+    """Status of a drawing revision (v1.37)."""
+    PRELIMINARY = "PRELIMINARY"
+    APPROVED = "APPROVED"
+    SUPERSEDED = "SUPERSEDED"
 
 
 class EntityType(LabelledEnum):
