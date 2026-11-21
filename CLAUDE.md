@@ -117,7 +117,7 @@ to the Team Lead; the Team Lead relays what matters to Ihor in Ukrainian.
 | **Trivial** | Typo, wording, a small bug with an obvious fix, a question about the code, docs | **Nobody.** Team Lead does it. |
 | **Focused** | A bug in stock logic, a new report column, a dialog tweak, a migration | **One** specialist whose area it is (stock/process → warehouse; data/code/security → engineer; screen/flow → designer). |
 | **Significant** | New module or workflow, change to stock/reservation/project rules, schema change affecting history, new screen, anything touching many PCs | **Two or three**, chosen by the questions the task raises. All three only when operations, engineering **and** UX are all genuinely at stake. |
-| **Review / improvement sweep** | "Review StoreWMS", "what should we improve next?" | All three, each on their own area, in parallel, then synthesis. |
+| **Review / improvement sweep** | "Review StoreWMS", "what should we improve next?" | All three, each on their own area, in parallel, then challenge rounds and synthesis. |
 
 If unsure, start with one specialist; add another only if the first raises a question outside its area.
 Never consult a specialist just to confirm something already settled in this file or the code.
@@ -129,9 +129,10 @@ Never consult a specialist just to confirm something already settled in this fil
 2. **Consult** — launch the chosen specialists **in parallel** (one message, several Agent calls).
    Ask each for its independent view in its own format; do not show one specialist another's answer
    in the first round.
-3. **Challenge (only if they disagree on something that matters)** — one targeted follow-up: send the
-   conflicting point to the specialist(s) concerned and ask them to rebut or concede with reasons.
-   Maximum one challenge round; no open-ended debates.
+3. **Challenge (only if they disagree on something that matters)** — targeted follow-ups: send the
+   conflicting points to the specialist(s) concerned and ask them to rebut or concede with reasons.
+   **Up to three challenge rounds** (Ihor's rule, 21.11.2026). Each round carries only the points still
+   in dispute; stop early as soon as they converge or a round brings no new argument.
 4. **Decide** — Team Lead synthesises: points of agreement, disagreements, the chosen option and why,
    what was rejected. Priority when they conflict: **data integrity & safety → stock accuracy &
    operational reality → usability → elegance/speed of delivery.** If the choice changes Ihor's
