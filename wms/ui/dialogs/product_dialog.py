@@ -148,8 +148,8 @@ class ProductDialog(QDialog):
         self.ov_states: dict[str, QLabel] = {}
         for col, (key, text, tip) in enumerate((
                 ("on_hand", "On Hand", "Physically in the warehouse, in every bin"),
-                ("reserved", "Reserved", "Set aside for projects, not yet issued"),
-                ("available", "Available", "On Hand minus Reserved (quarantine bins excluded)"),
+                ("reserved", "Project stock", "Delivered for projects, not yet issued"),
+                ("available", "General stock", "On Hand minus Project stock (quarantine bins excluded)"),
                 ("incoming", "Incoming", "Still to arrive on purchase orders"),
                 ("minimum", "Minimum Stock", "Reorder when Available falls to the reorder level / minimum"))):
             head = label(text, "Muted")
@@ -214,7 +214,7 @@ class ProductDialog(QDialog):
         block("Documents", self.ov_docs, 1, 1)
         right.addLayout(sections, 1)
 
-        # Actions (spec 21): Goods In, Goods Out, Transfer, Reserve, History
+        # Actions (spec 21): Goods In, Goods Out, Transfer, History
         actions = []
         if self.app.can(P.GOODS_IN_POST):
             actions.append(button("Goods In", lambda: self._start("goods_in")))
@@ -222,8 +222,6 @@ class ProductDialog(QDialog):
             actions.append(button("Goods Out", lambda: self._start("goods_out")))
         if self.app.can(P.STOCK_TRANSFER):
             actions.append(button("Transfer...", self.transfer))
-        if self.app.can(P.RESERVATIONS_EDIT):
-            actions.append(button("Reserve...", self.reserve))
         if self.app.can(P.STOCK_ADJUST):
             actions.append(button("Adjust...", self.adjust))
         actions.append(button("History", lambda: self.tabs.setCurrentWidget(self.history_tab)))
@@ -255,7 +253,7 @@ class ProductDialog(QDialog):
         self.ov_states["minimum"].setText(f"{fmt_qty(p.min_stock)} {u}" if p.min_stock else "-")
         notes = []
         if r.quarantine > 0:
-            notes.append(f"{fmt_qty(r.quarantine)} {u} is in quarantine bins and cannot be issued or reserved.")
+            notes.append(f"{fmt_qty(r.quarantine)} {u} is in quarantine bins and cannot be issued.")
         if r.status in (StockStatus.OUT, StockStatus.LOW, StockStatus.REORDER):
             notes.append(f"{r.status.label}: suggested order {fmt_qty(r.shortfall)} {u}.")
         self.ov_reorder.setText("  ".join(notes))
@@ -287,13 +285,6 @@ class ProductDialog(QDialog):
         p = self.product
         if self.app.start_posting(page_key, p.id, supplier_id=p.supplier_id):
             self.accept()
-
-    def reserve(self):
-        from wms.ui.dialogs.reservations import ReservationDialog
-        if ReservationDialog(self.app, self, product_id=self.product_id).exec():
-            self.saved = True
-            self.app.changed()
-            self._load()
 
     # -- details tab --------------------------------------------------------
     def _build_details(self, default_type):
@@ -445,7 +436,7 @@ class ProductDialog(QDialog):
         if self.reservations is None:
             from wms.ui.dialogs.reservations import ReservationsPanel
             self.reservations = ReservationsPanel(app, product_id=p.id)
-            self.tabs.insertTab(self.tabs.indexOf(self.history_tab), self.reservations, "Reservations")
+            self.tabs.insertTab(self.tabs.indexOf(self.history_tab), self.reservations, "Project stock")
         else:
             self.reservations.refresh()
 

@@ -6,6 +6,8 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 
+from conftest import hand_reserve
+
 from wms.services.goods_in import ReceiptLine
 from wms.services.goods_out import IssueLine
 from wms.services.purchasing import POLineInput
@@ -77,7 +79,7 @@ def test_purchase_orders_are_searchable_and_filterable(svc, sample):
 
 def test_reservations_and_delivery_problems_found_by_number(svc, sample):
     sample.receive(sample.mdf, 20)
-    res = svc.reservations.reserve({"product_id": sample.mdf.id, "site_id": sample.site.id, "quantity": "5"})
+    res = hand_reserve(svc, {"product_id": sample.mdf.id, "site_id": sample.site.id, "quantity": "5"})
     d = svc.purchasing.record_discrepancy({"supplier_id": sample.supplier.id, "product_id": sample.mdf.id,
                                            "reason_code": "DAMAGED", "quantity": "1"})
     kinds = {(h.kind, h.entity_id) for h in svc.search.matches(res.reservation.number)}
@@ -91,7 +93,7 @@ def test_low_stock_filter_counts_reservations_and_reorder_level(svc, sample):
     sample.receive(sample.mdf, 30)  # minimum 10
     low = SearchCriteria(stock_status="LOW_STOCK")
     assert codes(svc.search.products(low)) == set()
-    svc.reservations.reserve({"product_id": sample.mdf.id, "site_id": sample.site.id, "quantity": "22"})
+    hand_reserve(svc, {"product_id": sample.mdf.id, "site_id": sample.site.id, "quantity": "22"})
     got = svc.search.products(low)
     assert codes(got) == {"MDF-18"}
     row = got.rows[0]

@@ -356,6 +356,7 @@ Protected tables (database triggers, see `wms.db.engine`):
 | quantity | Quantity | no |  |
 | bin_id | Integer | no | FK bins.id, indexed |
 | movement_id | Integer | yes | FK stock_movements.id, indexed |
+| reservation_id | Integer | yes | FK stock_reservations.id, indexed |
 | id | Integer | no | PK |
 
 ## production_orders

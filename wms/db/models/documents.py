@@ -389,6 +389,9 @@ class ProductionLine(_LineHistory, IdMixin, Base):
     quantity: Mapped[Decimal] = mapped_column(Quantity, nullable=False)
     bin_id: Mapped[int] = fk("bins.id", nullable=False)
     movement_id: Mapped[int | None] = fk("stock_movements.id")
+    # v1.35: the project stock row this material came out of (production for a project uses the
+    # project's own stock first, as Goods Out does)
+    reservation_id: Mapped[int | None] = fk("stock_reservations.id")
 
     order: Mapped[ProductionOrder] = relationship(back_populates="lines")
     product = relationship("Product", lazy="joined")

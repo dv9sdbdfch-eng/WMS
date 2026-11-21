@@ -69,8 +69,13 @@ def allocate(s: Session, product: Product, qty: Decimal, shortfall_bin: Bin | No
 
 
 class GoodsOutService(BaseService):
-    def post(self, header: dict, lines: list[IssueLine], override_reason: str | None = None) -> GoodsIssue:
-        """Issue materials to a site. All lines post or none do."""
+    def post(self, header: dict, lines: list[IssueLine], override_reason: str | None = None,
+             other_projects_reason: str | None = None) -> GoodsIssue:
+        """Issue materials to a site. All lines post or none do.
+
+        v1.35 (Ihor 21.11.2026): a Goods Out may not use another project's stock. A Store Manager
+        (``reservations.edit``) can allow it with ``other_projects_reason``; that stock is then moved
+        off the other projects with a PSR record in their history."""
         self.require(P.GOODS_OUT_POST)
         issue_date = validate_doc_date(header.get("issue_date"), "issue_date")
         if not lines:
@@ -84,9 +89,24 @@ class GoodsOutService(BaseService):
             if site.status in CLOSED_SITE_STATUSES:
                 raise ValidationError(f"Site {site.project_number} is {SiteStatus(site.status).label.lower()} - "
                                       f"reopen it before issuing material.", "site_id")
+            from wms.services.reservations import from_other_projects, other_projects_message
+            totals: dict[int, Decimal] = {}
+            for ln in lines:
+                if ln.product_id and ln.quantity not in (None, ""):
+                    q = to_qty(ln.quantity, "quantity")
+                    if q > ZERO:
+                        totals[ln.product_id] = totals.get(ln.product_id, ZERO) + q
+            # the number is taken first: it locks the counter, so two PCs check project stock one after the other
+            issue_number = next_number(s, "GOODS_ISSUE")
+            from_others = from_other_projects(s, site.id, totals)
+            other_reason = clean_str(other_projects_reason)
+            if from_others and not other_reason:
+                raise ValidationError(other_projects_message(s, totals, from_others, "This Goods Out"), "other_projects")
+            if from_others:
+                self.require(P.RESERVATIONS_EDIT)
             issued_by = clean_str(header.get("issued_by"), max_len=120) or self.user.full_name
             issue = GoodsIssue(
-                issue_number=next_number(s, "GOODS_ISSUE"),
+                issue_number=issue_number,
                 issue_date=issue_date,
                 site_id=site.id,
                 site_number_snapshot=site.project_number,
@@ -153,6 +173,12 @@ class GoodsOutService(BaseService):
                                                           reservation_id=reservation_id))
             s.flush()
             refresh_statuses(s, self.ctx, issuing.touched, f"Issued on {issue.issue_number}.")
+            if from_others:
+                from wms.services.reservations import take_from_other_projects
+                moved = take_from_other_projects(s, self.ctx, site, from_others, issue.issue_number, other_reason)
+                audit.record(s, self.ctx, "PROJECT_STOCK_TAKEN", EntityType.GOODS_ISSUE.value, issue.id,
+                             f"{issue.issue_number} to {site.project_number}",
+                             f"Used other projects' stock: {other_reason}", new={"moved": moved})
             audit.record(s, self.ctx, "GOODS_OUT_POSTED", EntityType.GOODS_ISSUE.value, issue.id,
                          f"{issue.issue_number} to {site.project_number}", f"{line_no} line(s) issued.",
                          new={"site": site.display, "reference": issue.reference, "requested_by": issue.requested_by,
@@ -180,9 +206,11 @@ class GoodsOutService(BaseService):
             issue.reversed_at = utcnow()
             issue.reversed_by_id = self.user.id
             issue.reversal_reason = reason
-            from wms.services.reservations import refresh_statuses
+            from wms.services.reservations import give_moved_stock_back, moved_by, refresh_statuses
             refresh_statuses(s, self.ctx, sorted({l.reservation_id for l in issue.lines if l.reservation_id}),
                              f"{issue.issue_number} reversed.")
+            give_moved_stock_back(s, self.ctx, moved_by(s, EntityType.GOODS_ISSUE.value, issue.id),
+                                  issue.issue_number)
             audit.record(s, self.ctx, "GOODS_OUT_REVERSED", EntityType.GOODS_ISSUE.value, issue.id,
                          issue.issue_number, reason, old={"status": "POSTED"}, new={"status": "REVERSED"})
         return self.get(issue_id)

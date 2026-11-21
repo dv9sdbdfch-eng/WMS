@@ -6,6 +6,7 @@ from datetime import date
 from decimal import Decimal
 
 import pytest
+from conftest import hand_reserve
 from sqlalchemy import select
 
 from wms.core.exceptions import ValidationError
@@ -50,7 +51,7 @@ def test_delivery_without_project_is_warehouse_stock(svc, sample):
 def test_project_stock_adds_hand_reservations_and_goes_down_when_issued(svc, sample):
     _receive(svc, sample, "DN-W1", [(sample.mdf, "30")])
     _receive(svc, sample, "DN-P1", [(sample.mdf, "10")], sample.site.id)
-    svc.reservations.reserve({"product_id": sample.mdf.id, "site_id": sample.site.id, "quantity": "4"})
+    hand_reserve(svc, {"product_id": sample.mdf.id, "site_id": sample.site.id, "quantity": "4"})
     assert _stock(svc, sample.site.id) == {"MDF-18": (D(10), D(4))}
     svc.goods_out.post({"site_id": sample.site.id, "issue_date": TODAY}, [IssueLine(sample.mdf.id, D(12))])
     left = _stock(svc, sample.site.id)["MDF-18"]

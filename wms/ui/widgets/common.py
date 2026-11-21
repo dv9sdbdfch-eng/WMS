@@ -153,6 +153,27 @@ def run_with_override(parent: QWidget | None, can_override: bool, fn: Callable, 
         return None
 
 
+def ask_other_projects(parent: QWidget | None, app, site_id: int | None, lines: list[tuple[int, object]],
+                       what: str = "this project") -> tuple[bool, str | None]:
+    """v1.35 (Ihor 21.11.2026): before a Goods Out / production, check whether it would use another
+    project's stock. Returns (go_on, reason). Without a Store Manager's right it stops with a message;
+    a manager is asked for a reason (the stock is then moved off the other project, with a record)."""
+    from wms.core.permissions import P
+    clash = app.services.reservations.conflicts(site_id, lines)
+    if not clash:
+        return True, None
+    text = "\n".join(clash)
+    if not app.can(P.RESERVATIONS_EDIT):
+        QMessageBox.warning(parent, "Stock of another project",
+                            f"{text}\n\nThat stock belongs to another project. Reduce the quantity or ask a "
+                            f"Store Manager to allow it.\n\nNothing was posted.")
+        return False, None
+    reason = ask_text(parent, "Stock of another project",
+                      f"{text}\n\nThat project will be short: the stock is taken off it and moved to {what}. "
+                      f"The other project's history shows when, by whom and why. Why?")
+    return (True, reason) if reason else (False, None)
+
+
 # --- table -----------------------------------------------------------------------
 
 @dataclass

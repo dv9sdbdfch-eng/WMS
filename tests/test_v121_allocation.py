@@ -1,14 +1,14 @@
-"""v1.21: Remaining / To Allocate, Reserve remaining, picking list and Load from project."""
+"""v1.21: Remaining / To Allocate (v1.35: Not covered), picking list and Load from project."""
 
 from __future__ import annotations
 
-import uuid
 from datetime import date
 from decimal import Decimal
 
 import pytest
+from conftest import hand_reserve
 
-from wms.core.exceptions import AlreadyPostedError, ValidationError
+from wms.core.exceptions import ValidationError
 from wms.services.goods_out import IssueLine
 
 D = Decimal
@@ -47,47 +47,26 @@ def test_areas_list_blocks_levels_and_units(svc, proj):
 
 
 def test_remaining_ignores_reservations_and_to_allocate_does_not(svc, proj):
-    svc.reservations.reserve({"product_id": proj.mdf.id, "site_id": proj.site.id, "quantity": "5"})
+    hand_reserve(svc, {"product_id": proj.mdf.id, "site_id": proj.site.id, "quantity": "5"})
     r = mdf_row(svc, proj)
     assert (r.required, r.proj_reserved, r.net, r.remaining, r.to_allocate) == (D(14), D(5), 0, D(14), D(9))
 
 
-def test_reserve_remaining_preview_then_one_transaction(svc, proj):
-    svc.reservations.reserve({"product_id": proj.mdf.id, "site_id": proj.site.id, "quantity": "2"})
-    plan = svc.allocation.reserve_plan(proj.site.id)
-    assert [(x.code, x.need, x.available, x.quantity, x.short) for x in plan] == \
-        [("MDF-18", D(12), D(14), D(12), 0)]
-    token = uuid.uuid4().hex
-    numbers = svc.allocation.reserve_remaining(proj.site.id, [(x.product_id, x.quantity) for x in plan],
-                                               client_token=token)
-    assert len(numbers) == 1
-    r = mdf_row(svc, proj)
-    assert (r.proj_reserved, r.to_allocate) == (D(14), 0)
-    assert svc.allocation.reserve_plan(proj.site.id) == []  # nothing left to reserve
-    with pytest.raises(AlreadyPostedError):  # the same form twice
-        svc.allocation.reserve_remaining(proj.site.id, [(proj.mdf.id, D(1))], client_token=token)
-    with pytest.raises(ValidationError):
-        svc.allocation.reserve_remaining(proj.site.id, [])
-
-
-def test_reserve_remaining_never_more_than_available(svc, proj):
-    other = svc.sites.save(None, {"project_number": "P-2002", "name": "Other"})
-    svc.reservations.reserve({"product_id": proj.mdf.id, "site_id": other.id, "quantity": "10"})
-    [line] = svc.allocation.reserve_plan(proj.site.id)
-    assert (line.need, line.available, line.quantity, line.short) == (D(14), D(6), D(6), D(8))
-    # asking for more than is free is refused and nothing is saved
-    with pytest.raises(ValidationError):
-        svc.allocation.reserve_remaining(proj.site.id, [(proj.mdf.id, D(7))])
-    assert mdf_row(svc, proj).proj_reserved == 0
+def test_reserving_by_hand_is_gone(svc):
+    """v1.35 (Ihor 21.11.2026): no reservations - only project stock (Goods In for a project) and issue."""
+    for name in ("reserve", "update", "release"):
+        assert not hasattr(svc.reservations, name)
+    for name in ("reserve_plan", "reserve_remaining"):
+        assert not hasattr(svc.allocation, name)
 
 
 def test_area_caps_the_quantity(svc, proj):
-    [line] = svc.allocation.reserve_plan(proj.site.id, f"UNIT:{proj.desk.id}")
-    assert line.quantity == D(2)
-    [line] = svc.allocation.reserve_plan(proj.site.id, f"LEVEL:{proj.level.id}")
-    assert line.quantity == D(12)
+    pick = svc.allocation.pick_list(proj.site.id, f"UNIT:{proj.desk.id}", "REMAINING")
+    assert sum(r.quantity for r in pick.rows) == D(2)
+    pick = svc.allocation.pick_list(proj.site.id, f"LEVEL:{proj.level.id}", "REMAINING")
+    assert sum(r.quantity for r in pick.rows) == D(12)
     with pytest.raises(ValidationError):
-        svc.allocation.reserve_plan(proj.site.id, "UNIT:999999")
+        svc.allocation.pick_list(proj.site.id, "UNIT:999999")
 
 
 def test_picking_list_walking_order_and_shortage(svc, proj):
@@ -99,7 +78,7 @@ def test_picking_list_walking_order_and_shortage(svc, proj):
     assert svc.allocation.pick_list(proj.site.id, source="RESERVED").rows == []
     # another project holds 10: only 6 can be picked, 8 short
     other = svc.sites.save(None, {"project_number": "P-2002", "name": "Other"})
-    svc.reservations.reserve({"product_id": proj.mdf.id, "site_id": other.id, "quantity": "10"})
+    hand_reserve(svc, {"product_id": proj.mdf.id, "site_id": other.id, "quantity": "10"})
     pick = svc.allocation.pick_list(proj.site.id, source="REMAINING")
     assert sum(r.quantity for r in pick.rows) == D(6)
     assert [(x.code, x.wanted, x.missing) for x in pick.short] == [("MDF-18", D(14), D(8))]
@@ -109,7 +88,7 @@ def test_picking_list_walking_order_and_shortage(svc, proj):
 
 def test_pick_list_pdf_and_goods_out_from_it(svc, proj, tmp_path):
     from wms.exporters.export import export_pdf
-    svc.allocation.reserve_remaining(proj.site.id, [(proj.mdf.id, D(12))])
+    hand_reserve(svc, {"product_id": proj.mdf.id, "site_id": proj.site.id, "quantity": "12"})
     pick = svc.allocation.pick_list(proj.site.id, f"LEVEL:{proj.level.id}", "RESERVED")
     assert sum(r.quantity for r in pick.rows) == D(12)
     out = export_pdf(svc.allocation.pick_report(pick), tmp_path / "pick.pdf")
@@ -132,18 +111,6 @@ def win(qtbot, svc):
     return w
 
 
-def test_reserve_remaining_dialog(svc, proj, win, monkeypatch):
-    import wms.ui.dialogs.allocation as dlgmod
-    monkeypatch.setattr(dlgmod, "info", lambda *a, **k: None)
-    dlg = dlgmod.ReserveRemainingDialog(win.app, proj.site.id, win)
-    assert dlg.table.model_.rowCount() == 1 and dlg.ok.isEnabled()
-    dlg.area.setCurrentIndex(dlg.area.findData(f"UNIT:{proj.desk.id}"))
-    assert dlg.plan[0].quantity == D(2)
-    dlg.save()
-    assert len(dlg.numbers) == 1
-    assert mdf_row(svc, proj).proj_reserved == D(2)
-
-
 def test_site_dialog_buttons_and_goods_out_load_from_project(svc, proj, win, monkeypatch, tmp_path):
     from PySide6.QtWidgets import QPushButton
 
@@ -151,7 +118,7 @@ def test_site_dialog_buttons_and_goods_out_load_from_project(svc, proj, win, mon
     from wms.ui.dialogs.site_dialog import SiteDialog
     sd = SiteDialog(win.app, proj.site.id)
     texts = [b.text() for b in sd.findChildren(QPushButton)]
-    assert "Reserve Remaining..." in texts and "Picking List..." in texts
+    assert "Picking List..." in texts and not [x for x in texts if x.startswith("Reserve")]
     # the picking list dialog saves a PDF
     pl = dlgmod.PickListDialog(win.app, proj.site.id, win)
     pl.source.setCurrentIndex(pl.source.findData("REMAINING"))

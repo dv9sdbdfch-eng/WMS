@@ -11,7 +11,7 @@ from wms.ui.widgets.common import QTY, Col, DataTable, button, confirm, h, info,
 
 class LowStockPage(Page):
     title = "Reorder Required"
-    subtitle = ("Products whose Available stock (On Hand minus Reserved, quarantine not counted) is at or below "
+    subtitle = ("Products whose Available stock (On Hand minus Project stock, quarantine not counted) is at or below "
                 "their reorder level or minimum")
 
     def __init__(self, app, parent=None):

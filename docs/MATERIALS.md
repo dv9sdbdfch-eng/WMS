@@ -42,6 +42,9 @@
 
 ## Список матеріалів проєкту
 
+> v1.35: Reserved показується як **Project stock**, Available — як **General stock**, To Allocate —
+> як **Not covered**; резервування вручну прибрано (див. `docs/INVENTORY_CONTROL.md`).
+
 Картка проєкту тепер має вкладки **Overview / Materials / Movements / Reservations / Documents / Audit**.
 
 * **Overview**: цифри проєкту (Materials, Required, Reserved, Issued, Returned, Net issued, вартість

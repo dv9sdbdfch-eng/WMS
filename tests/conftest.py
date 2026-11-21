@@ -201,3 +201,23 @@ def pytest_sessionfinish(session, exitstatus):
     QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
     app.processEvents()
     gc.collect()
+
+
+def hand_reserve(svc: Services, data: dict):
+    """A hand reservation as versions before 1.35 made them (reserving by hand was removed in
+    v1.35, Ihor 21.11.2026). Live databases still hold such rows; they count as project stock."""
+    from wms.core.numbers import to_qty
+    from wms.db.models import Product, Site, StockReservation
+    from wms.services.numbering import next_number
+    db = svc.reservations.db
+    with db.session() as s:
+        site = s.get(Site, data["site_id"])
+        product = s.get(Product, data["product_id"])
+        r = StockReservation(number=next_number(s, "RESERVATION"), product_id=product.id, site_id=site.id,
+                             site_number_snapshot=site.project_number, site_name_snapshot=site.name,
+                             quantity=to_qty(data["quantity"]), required_by=data.get("required_by"),
+                             notes=data.get("notes"), status="ACTIVE", created_by_id=svc.reservations.user.id)
+        s.add(r)
+        s.flush()
+        rid = r.id
+    return svc.reservations.get(rid)

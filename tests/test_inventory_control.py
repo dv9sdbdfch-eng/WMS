@@ -6,9 +6,10 @@ from datetime import date, timedelta
 from decimal import Decimal
 
 import pytest
+from conftest import hand_reserve
 
 from wms.core.enums import StockStatus
-from wms.core.exceptions import AlreadyPostedError, PermissionDeniedError, ValidationError
+from wms.core.exceptions import PermissionDeniedError, ValidationError
 from wms.services.goods_out import IssueLine
 from wms.services.purchasing import POLineInput
 from wms.services.stocktake import CountEntry
@@ -39,7 +40,7 @@ def test_stock_states_example_from_the_brief(svc, sample):
     """On Hand 120, Reserved 30, Available 90, Incoming 50."""
     mdf = sample.mdf
     sample.receive(mdf, 120)
-    res = svc.reservations.reserve({"product_id": mdf.id, "site_id": sample.site.id, "quantity": "30",
+    res = hand_reserve(svc, {"product_id": mdf.id, "site_id": sample.site.id, "quantity": "30",
                                     "required_by": TODAY + timedelta(days=7)})
     po = svc.purchasing.save(None, {"supplier_id": sample.supplier.id}, [POLineInput(mdf.id, "50")])
     svc.purchasing.mark_ordered(po.id)
@@ -53,28 +54,15 @@ def test_stock_states_example_from_the_brief(svc, sample):
     assert critical(svc) == []
 
 
-def test_over_reservation_is_refused(svc, sample, second_site):
-    sample.receive(sample.mdf, 100)
-    svc.reservations.reserve({"product_id": sample.mdf.id, "site_id": sample.site.id, "quantity": "70"})
-    with pytest.raises(ValidationError, match="Only 30 SHEET .* available to reserve"):
-        svc.reservations.reserve({"product_id": sample.mdf.id, "site_id": second_site.id, "quantity": "31"})
-    svc.reservations.reserve({"product_id": sample.mdf.id, "site_id": second_site.id, "quantity": "30"})
-    assert states(svc, sample.mdf)[1:3] == (D("100"), D("0"))
-    with pytest.raises(ValidationError, match="Only 0"):
-        svc.reservations.reserve({"product_id": sample.mdf.id, "site_id": sample.site.id, "quantity": "1"})
-
-
-def test_quarantine_stock_cannot_be_reserved(svc, sample):
+def test_quarantine_stock_is_not_general_stock(svc, sample):
     sample.receive(sample.mdf, 10, sample.bin1)
     sample.receive(sample.mdf, 5, sample.quarantine, "DN-Q")
     assert states(svc, sample.mdf) == (D("15"), D("0"), D("10"), D("0"))
-    with pytest.raises(ValidationError, match="Only 10"):
-        svc.reservations.reserve({"product_id": sample.mdf.id, "site_id": sample.site.id, "quantity": "11"})
 
 
 def test_goods_out_fulfils_the_reservation(svc, sample):
     sample.receive(sample.mdf, 100)
-    res = svc.reservations.reserve({"product_id": sample.mdf.id, "site_id": sample.site.id, "quantity": "30"})
+    res = hand_reserve(svc, {"product_id": sample.mdf.id, "site_id": sample.site.id, "quantity": "30"})
     gi1 = issue(svc, sample.site, sample.mdf, 10)
     v = svc.reservations.get(res.reservation.id)
     assert (v.issued, v.remaining, v.reservation.status) == (D("10"), D("20"), "ACTIVE")
@@ -94,60 +82,91 @@ def test_goods_out_fulfils_the_reservation(svc, sample):
     assert "Reservation status" not in warnings
 
 
-def test_issuing_reserved_stock_to_another_project_warns(svc, sample, second_site):
+def test_another_projects_stock_needs_a_manager_and_a_reason(svc, sample, second_site):
+    """v1.35 (Ihor 21.11.2026): project A's stock is not issued to project B unless a Store Manager
+    allows it with a reason; the stock then moves off A with a PSR record in A's history."""
     sample.receive(sample.mdf, 40)
-    svc.reservations.reserve({"product_id": sample.mdf.id, "site_id": sample.site.id, "quantity": "30"})
+    a = hand_reserve(svc, {"product_id": sample.mdf.id, "site_id": sample.site.id, "quantity": "30"})
     rs = svc.reservations
     assert rs.conflicts(second_site.id, [(sample.mdf.id, D("10"))]) == []
     warn = rs.conflicts(second_site.id, [(sample.mdf.id, D("15"))])
-    assert warn == ["MDF-18: issuing 15 uses 5 SHEET reserved for P-1001 - Riverside Apartments."]
-    assert rs.conflicts(sample.site.id, [(sample.mdf.id, D("40"))]) == []  # its own reservation
-    issue(svc, second_site, sample.mdf, 15)  # allowed after the warning: the material physically left
-    assert states(svc, sample.mdf)[:3] == (D("25"), D("30"), D("-5"))
-    assert "Over-reserved" in {i.check for i in svc.ledger.integrity_check()}
-    assert any("more reserved for projects than is in stock" in a.text for a in svc.dashboard.load().alerts)
+    assert warn == ["MDF-18: issuing 15 uses 5 SHEET of the project stock of P-1001 - Riverside Apartments."]
+    assert rs.conflicts(sample.site.id, [(sample.mdf.id, D("40"))]) == []  # its own stock
+    with pytest.raises(ValidationError, match="belongs to other projects") as e:
+        issue(svc, second_site, sample.mdf, 15)
+    assert "MDF-18: 5 SHEET from other projects - you can use up to 10 SHEET without a manager" in str(e.value)
+    assert states(svc, sample.mdf)[0] == D("40")  # nothing was posted
+    gi = svc.goods_out.post({"site_id": second_site.id, "issue_date": TODAY}, [IssueLine(sample.mdf.id, "15")],
+                            other_projects_reason="Urgent repair at County Hall")
+    assert states(svc, sample.mdf)[:3] == (D("25"), D("25"), D("0"))  # A gave up 5: never more than is there
+    assert rs.get(a.reservation.id).remaining == D("25")
+    [psr] = rs.project_releases(sample.site.id)
+    assert psr.quantity == D("5") and "County Hall" in psr.reason
+    assert "PROJECT_STOCK_RETURNED" in {e.action for e in svc.audit.search(entity_type="SITE")}
+    assert "PROJECT_STOCK_TAKEN" in {e.action for e in svc.audit.search(entity_type="GOODS_ISSUE")}
+    assert "Project stock above on hand" not in {i.check for i in svc.ledger.integrity_check()}
+    assert critical(svc) == []
+    # reversed by mistake: the 15 sheets are back on the shelf and A gets its 5 back
+    svc.goods_out.reverse(gi.id, "Wrong project")
+    assert states(svc, sample.mdf)[:3] == (D("40"), D("30"), D("10"))
+    assert {x.code: x.total for x in rs.project_stock(sample.site.id)} == {"MDF-18": D("30")}
+    assert critical(svc) == []
 
 
-def test_change_release_and_project_closing(svc, sample, second_site):
-    sample.receive(sample.mdf, 50)
-    rs = svc.reservations
-    a = rs.reserve({"product_id": sample.mdf.id, "site_id": sample.site.id, "quantity": "20"}).reservation
-    issue(svc, sample.site, sample.mdf, 5)
-    with pytest.raises(ValidationError, match="already been issued"):
-        rs.update(a.id, "4")
-    with pytest.raises(ValidationError, match="available to reserve"):
-        rs.update(a.id, "51")
-    rs.update(a.id, "10", TODAY, "Phase 1 only")
-    assert rs.get(a.id).remaining == D("5")
-    released = rs.release(a.id, "Customer changed the board")
-    assert released.reservation.status == "RELEASED" and released.remaining == D("0")
-    with pytest.raises(ValidationError, match="can no longer be changed"):
-        rs.release(a.id, "again")
-    b = rs.reserve({"product_id": sample.mdf.id, "site_id": second_site.id, "quantity": "8"}).reservation
-    svc.sites.set_status(second_site.id, "COMPLETED")
-    assert rs.get(b.id).reservation.status == "RELEASED"
-    assert states(svc, sample.mdf)[1] == D("0")
-    with pytest.raises(ValidationError, match="closed"):
-        rs.reserve({"product_id": sample.mdf.id, "site_id": second_site.id, "quantity": "1"})
-    actions = {e.action for e in svc.audit.search(entity_type="RESERVATION")}
-    assert {"RESERVATION_CREATED", "RESERVATION_CHANGED", "RESERVATION_RELEASED"} <= actions
-    assert [v.reservation.number for v in rs.list(text="RES-000002")] == ["RES-000002"]
+def test_reversal_after_a_project_closed_leaves_its_stock_in_main(svc, sample, second_site):
+    """A Goods Out reversed after the project was closed does not bring project stock back."""
+    sample.receive(sample.mdf, 20)
+    hand_reserve(svc, {"product_id": sample.mdf.id, "site_id": second_site.id, "quantity": "8"})
+    gi = issue(svc, second_site, sample.mdf, 3)
+    svc.sites.set_status(second_site.id, "COMPLETED", "Done")
+    assert svc.reservations.project_stock(second_site.id) == []
+    svc.goods_out.reverse(gi.id, "Entered twice")
+    assert svc.reservations.project_stock(second_site.id) == []
+    assert states(svc, sample.mdf)[:3] == (D("20"), D("0"), D("20"))
+    assert critical(svc) == []
 
 
-def test_duplicate_submission_and_permissions(svc, sample):
+def test_over_held_stock_counts_only_what_is_there(svc, sample, second_site):
+    """Old hand reservations may hold more than is on the shelf: never take more than was asked."""
     sample.receive(sample.mdf, 10)
-    data = {"product_id": sample.mdf.id, "site_id": sample.site.id, "quantity": "2", "client_token": "r-1"}
-    svc.reservations.reserve(data)
-    with pytest.raises(AlreadyPostedError):
-        svc.reservations.reserve(data)
-    assert states(svc, sample.mdf)[1] == D("2")
+    hand_reserve(svc, {"product_id": sample.mdf.id, "site_id": sample.site.id, "quantity": "15"})
+    from wms.services.reservations import from_other_projects
+    with svc.reservations.db.read_session() as s:
+        assert from_other_projects(s, second_site.id, {sample.mdf.id: D("4")}) == {sample.mdf.id: D("4")}
+
+
+def test_only_a_manager_may_use_another_projects_stock(svc, sample, second_site):
+    sample.receive(sample.mdf, 10)
+    hand_reserve(svc, {"product_id": sample.mdf.id, "site_id": sample.site.id, "quantity": "10"})
     roles = {r.code: r for r in svc.users.list_roles()}
     svc.users.create_user({"username": "op", "full_name": "Op", "role_id": roles["OPERATIVE"].id,
                            "must_change_password": False}, "secret1")
     svc.auth.login("op", "secret1")
     with pytest.raises(PermissionDeniedError):
-        svc.reservations.reserve({"product_id": sample.mdf.id, "site_id": sample.site.id, "quantity": "1"})
-    assert len(svc.reservations.list()) == 1  # but can see them
+        svc.goods_out.post({"site_id": second_site.id, "issue_date": TODAY}, [IssueLine(sample.mdf.id, "2")],
+                           other_projects_reason="Urgent")
+    with pytest.raises(PermissionDeniedError):
+        svc.reservations.return_to_main(sample.site.id, [(sample.mdf.id, "1")], "Not needed")
+    assert len(svc.reservations.list()) == 1  # but can see it
+
+
+def test_closing_a_project_returns_its_stock_with_a_record(svc, sample, second_site):
+    sample.receive(sample.mdf, 50)
+    rs = svc.reservations
+    a = hand_reserve(svc, {"product_id": sample.mdf.id, "site_id": second_site.id, "quantity": "8"}).reservation
+    issue(svc, second_site, sample.mdf, 3)
+    svc.sites.set_status(second_site.id, "COMPLETED", "Job finished, 5 sheets spare")
+    v = rs.get(a.id)
+    assert v.reservation.status == "FULFILLED" and v.remaining == 0
+    assert states(svc, sample.mdf)[1] == D("0")
+    [psr] = rs.project_releases(second_site.id)
+    assert psr.quantity == D("5") and "Job finished" in psr.reason
+    assert rs.project_stock(second_site.id) == []
+    # closed again without stock left: nothing more to record
+    svc.sites.set_status(second_site.id, "ACTIVE")
+    svc.sites.set_status(second_site.id, "COMPLETED")
+    assert len(rs.project_releases(second_site.id)) == 1
+    assert [v.reservation.number for v in rs.list(text=a.number)] == [a.number]
 
 
 def test_reorder_level_and_suggested_order(svc, sample):
@@ -157,7 +176,7 @@ def test_reorder_level_and_suggested_order(svc, sample):
     sample.receive(mdf, 30)
     row = svc.products.row(mdf.id)
     assert row.status is StockStatus.OK
-    svc.reservations.reserve({"product_id": mdf.id, "site_id": sample.site.id, "quantity": "6"})
+    hand_reserve(svc, {"product_id": mdf.id, "site_id": sample.site.id, "quantity": "6"})
     row = svc.products.row(mdf.id)
     assert row.available == D("24") and row.status is StockStatus.REORDER
     assert row.shortfall == D("41")  # 25 + 40 - 24 available
@@ -222,7 +241,7 @@ def test_stocktake_example_from_the_brief(svc, sample):
 def test_tampered_reservation_link_is_critical(svc, sample, second_site):
     from sqlalchemy import text
     sample.receive(sample.mdf, 20)
-    svc.reservations.reserve({"product_id": sample.mdf.id, "site_id": second_site.id, "quantity": "5"})
+    hand_reserve(svc, {"product_id": sample.mdf.id, "site_id": second_site.id, "quantity": "5"})
     issue(svc, sample.site, sample.mdf, 3)
     with svc.ctx.db.session() as s:
         s.execute(text("UPDATE goods_issue_lines SET reservation_id = (SELECT MIN(id) FROM stock_reservations)"))

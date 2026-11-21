@@ -52,8 +52,8 @@ MATERIAL_COLUMNS = [
     Col("Category", TEXT, 18, lambda r: r.product.category.full_name if r.product.category else ""),
     Col("Unit", TEXT, 7, lambda r: r.product.unit.code),
     Col("On Hand", QTY, 10, lambda r: _qty(r.on_hand)),
-    Col("Reserved", QTY, 10, lambda r: _qty(r.reserved)),
-    Col("Available", QTY, 10, lambda r: _qty(r.available)),
+    Col("Project Stock (all)", QTY, 10, lambda r: _qty(r.reserved)),
+    Col("General Stock", QTY, 10, lambda r: _qty(r.available)),
     Col("Incoming", QTY, 10, lambda r: _qty(r.incoming)),
     Col("Bins", TEXT, 24, lambda r: r.bins_detail),
     Col("Default Bin", TEXT, 14, lambda r: r.product.default_bin.full_code if r.product.default_bin else ""),
@@ -68,11 +68,11 @@ PROJECT_COLUMNS = [
     Col("Supplier", TEXT, 20, lambda r: r.product.supplier.name if r.product.supplier else ""),
     Col("Unit", TEXT, 7, lambda r: r.product.unit.code),
     Col("Required", QTY, 10, lambda r: _qty(r.required)),
-    Col("Reserved", QTY, 10, lambda r: _qty(r.proj_reserved)),
+    Col("Project Stock", QTY, 10, lambda r: _qty(r.proj_reserved)),
     Col("Issued", QTY, 10, lambda r: _qty(r.issued)),
     Col("Returned", QTY, 10, lambda r: _qty(r.returned)),
     Col("Net Issued", QTY, 11, lambda r: _qty(r.net)),
-    Col("Available in Stock", QTY, 12, lambda r: _qty(r.available)),
+    Col("General Stock in Warehouse", QTY, 12, lambda r: _qty(r.available)),
 ]
 
 #: screen column key (widgets/materials_view.py) -> export column, for "Export Current View" with the
@@ -81,12 +81,12 @@ _BY_TITLE = {c.title: c for c in MATERIAL_COLUMNS + PROJECT_COLUMNS}
 SCREEN_COLUMNS = {
     "code": _BY_TITLE["Code"], "name": _BY_TITLE["Material"], "product_no": _BY_TITLE["Product Number"],
     "supplier": _BY_TITLE["Supplier"], "required": _BY_TITLE["Required"],
-    "proj_reserved": Col("Project Reserved", QTY, 11, lambda r: _qty(r.proj_reserved)),
+    "proj_reserved": Col("Project Stock", QTY, 11, lambda r: _qty(r.proj_reserved)),
     "issued": _BY_TITLE["Issued"], "returned": _BY_TITLE["Returned"], "net": _BY_TITLE["Net Issued"],
     "remaining": Col("Remaining", QTY, 11, lambda r: _qty(r.remaining)),
-    "to_allocate": Col("To Allocate", QTY, 11, lambda r: _qty(r.to_allocate)),
-    "qty": _BY_TITLE["On Hand"], "available": _BY_TITLE["Available"], "bin": _BY_TITLE["Bins"],
-    "status": _BY_TITLE["Stock Status"], "unit": _BY_TITLE["Unit"], "reserved": _BY_TITLE["Reserved"],
+    "to_allocate": Col("Not Covered", QTY, 11, lambda r: _qty(r.to_allocate)),
+    "qty": _BY_TITLE["On Hand"], "available": _BY_TITLE["General Stock"], "bin": _BY_TITLE["Bins"],
+    "status": _BY_TITLE["Stock Status"], "unit": _BY_TITLE["Unit"], "reserved": _BY_TITLE["Project Stock (all)"],
     "incoming": _BY_TITLE["Incoming"], "description": _BY_TITLE["Description"], "barcode": _BY_TITLE["Barcode"],
     "brand": _BY_TITLE["Brand"], "category": _BY_TITLE["Category"], "default_bin": _BY_TITLE["Default Bin"],
     "bins": _BY_TITLE["Bins"], "updated": _BY_TITLE["Last Changed"],
@@ -210,7 +210,7 @@ def export_project(svc: MaterialsService, site_id: int, path: Path, company: str
         f"Project: {site.project_number} - {site.name}",
         f"Customer: {site.customer or '-'}   Project manager: {site.project_manager or '-'}   "
         f"Status: {site.status.replace('_', ' ').title()}",
-        f"{summary.materials} materials · Required {summary.required.normalize():f} · Reserved "
+        f"{summary.materials} materials · Required {summary.required.normalize():f} · Project stock "
         f"{summary.reserved.normalize():f} · Issued {summary.issued.normalize():f} · Returned "
         f"{summary.returned.normalize():f} · Net issued {summary.net.normalize():f}",
         f"{company + ' - ' if company else ''}Exported {datetime.now():%d/%m/%Y %H:%M}",

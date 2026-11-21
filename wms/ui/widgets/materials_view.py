@@ -5,7 +5,7 @@ The same widget is used in two places:
 
 * the Materials screen (``MaterialsView(app)``) - every material;
 * Projects -> Project -> Materials (``MaterialsView(app, fixed_site_id=...)``) - the project is
-  fixed, the project columns (Required / Reserved / Issued / Returned / Net) are shown and the
+  fixed, the project columns (Required / Project stock / Issued / Returned / Net) are shown and the
   project's material list can be edited.
 
 Both run exactly the same service call (``MaterialsService``), so the two can never disagree.
@@ -83,16 +83,16 @@ log = logging.getLogger(__name__)
 SELECT, PHOTO = "select", "photo"
 #: the project banner: (ProjectSummary attribute, label, tooltip) - definitions in services/materials.py
 PROJECT_FIGURES = (
-    ("materials", "Materials", "Materials on the list, reserved, issued or returned for this project"),
+    ("materials", "Materials", "Materials on the list, delivered, issued or returned for this project"),
     ("required", "Required", "Quantity the project needs (its material list). Changing it never changes stock."),
-    ("reserved", "Reserved", "Stock set aside for the project, still in the warehouse"),
+    ("reserved", "Project stock", "Delivered for the project (Goods In with the project), still in the warehouse"),
     ("issued", "Issued", "Sent from the warehouse to the project (Goods Out)"),
     ("returned", "Returned", "Physically returned from the project"),
     ("net", "Net Issued", "Net Issued = Issued - Returned (what is still out on the project)"),
     ("remaining", "Remaining", "Remaining = Required - Net Issued, never below 0: what the project still needs "
                                "from the warehouse. A return makes that quantity needed again."),
-    ("to_allocate", "To Allocate", "To Allocate = Remaining - Reserved, never below 0: still needed and not "
-                                   "reserved yet (reserve it, or buy it)."),
+    ("to_allocate", "Not covered", "Not covered = Remaining - Project stock, never below 0: still needed and "
+                                   "not in the project's stock (issue it from general stock, or buy it)."),
 )
 #: header tooltips of the project columns, so the Remaining calculation can be followed on screen
 HEADER_TIPS = {k: tip for k, _t, tip in PROJECT_FIGURES if k != "materials"}
@@ -125,19 +125,19 @@ COLUMNS: list[MCol] = [
     MCol("product_no", "Product Number", lambda r: r.product.supplier_code or "", width=130, sort="product_no"),
     MCol("supplier", "Supplier", _sup, width=140, sort="supplier"),
     MCol("required", "Required", lambda r: r.required, QTY, 85, "required", project=True),
-    MCol("proj_reserved", "Reserved", lambda r: r.proj_reserved, QTY, 85, "proj_reserved", project=True),
+    MCol("proj_reserved", "Project stock", lambda r: r.proj_reserved, QTY, 85, "proj_reserved", project=True),
     MCol("issued", "Issued", lambda r: r.issued, QTY, 80, "issued", project=True),
     MCol("returned", "Returned", lambda r: r.returned, QTY, 85, "returned", project=True),
     MCol("net", "Net Issued", lambda r: r.net, QTY, 90, "net", project=True),
     MCol("remaining", "Remaining", lambda r: r.remaining, QTY, 95, "remaining", project=True),
-    MCol("to_allocate", "To Allocate", lambda r: r.to_allocate, QTY, 95, "to_allocate", project=True),
+    MCol("to_allocate", "Not covered", lambda r: r.to_allocate, QTY, 95, "to_allocate", project=True),
     MCol("qty", "On Hand", lambda r: r.on_hand, QTY, 85, "qty"),
-    MCol("available", "Available", lambda r: r.available, QTY, 90, "available"),
+    MCol("available", "General stock", lambda r: r.available, QTY, 90, "available"),
     MCol("bin", "Bin", lambda r: r.bin_text, width=90, sort="bin"),
     MCol("status", "Status", lambda r: r.status_label, width=100, sort="status"),
     # optional columns (right-click the header to show them)
     MCol("unit", "Unit", lambda r: r.product.unit.code, width=60, default=False),
-    MCol("reserved", "Reserved (all)", lambda r: r.reserved, QTY, 100, "reserved", default=False),
+    MCol("reserved", "Project stock (all)", lambda r: r.reserved, QTY, 100, "reserved", default=False),
     MCol("incoming", "Incoming", lambda r: r.incoming, QTY, 90, "incoming", default=False),
     MCol("description", "Description", lambda r: r.product.description or "", width=220, default=False),
     MCol("barcode", "Barcode", lambda r: r.product.barcode or "", width=120, default=False),
@@ -317,10 +317,10 @@ class MaterialsModel(QAbstractTableModel):
                     f"(Issued {format_value(r.issued or 0, QTY)} - Returned {format_value(r.returned or 0, QTY)}) "
                     f"= {format_value(r.remaining, QTY)}")
         if role == Qt.ItemDataRole.ToolTipRole and c.key == "to_allocate" and r.required is not None:
-            return (f"To Allocate = Remaining {format_value(r.remaining, QTY)} - Reserved "
+            return (f"Not covered = Remaining {format_value(r.remaining, QTY)} - Project stock "
                     f"{format_value(r.proj_reserved or 0, QTY)} = {format_value(r.to_allocate, QTY)}")
         if role == Qt.ItemDataRole.ToolTipRole and c.key == "required" and r.required is None:
-            return "Not on the project's material list (reserved or issued only)"
+            return "Not on the project's material list (delivered or issued only)"
         if role == Qt.ItemDataRole.ToolTipRole and c.kind not in (QTY,):
             try:  # spec 39: a cut-off name / supplier / notes shows in full on hover
                 text = format_value(c.get(r), c.kind)
@@ -1435,8 +1435,8 @@ class ProjectListDialog(QDialog):
         self.add = QRadioButton("Add to the quantity already required")
         self.replace.setChecked(True)
         lay.addLayout(h(self.same, None, self.replace, self.add))
-        lay.addWidget(label("This list says what the project NEEDS. It does not reserve or move stock - use "
-                            "Reserve or Goods Out for that.", "Muted", wrap=True))
+        lay.addWidget(label("This list says what the project NEEDS. It does not move stock - use "
+                            "Goods In / Goods Out for that.", "Muted", wrap=True))
         lay.addLayout(h(None, button("Cancel", self.reject), button("Save list", self.save, primary=True)))
 
     def fill_all(self) -> None:

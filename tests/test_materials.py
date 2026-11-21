@@ -6,6 +6,7 @@ from datetime import date
 from decimal import Decimal
 
 import pytest
+from conftest import hand_reserve
 from openpyxl import load_workbook
 
 from wms.core.exceptions import ValidationError
@@ -76,7 +77,7 @@ def test_project_list_reservation_issue_and_return_are_separate(svc, ws):
     # Adding to the project list changes no stock and creates no movement.
     assert svc.products.row(ws.oak.id).on_hand == before
     assert svc.products.movements(ws.grey.id) == []
-    svc.reservations.reserve({"product_id": ws.oak.id, "site_id": site.id, "quantity": "30"})
+    hand_reserve(svc, {"product_id": ws.oak.id, "site_id": site.id, "quantity": "30"})
     issue(svc, site, ws.oak, 20, ws.bin1)
     issue(svc, site, ws.mdf, 6)  # not on the list: still belongs to the project
     svc.stock.post_return({"return_type": "FROM_SITE", "return_date": TODAY, "site_id": site.id},
@@ -138,7 +139,7 @@ def test_bin_filters_handle_products_in_several_bins(svc, ws):
 
 def test_stock_filters_use_totals_over_every_bin(svc, ws):
     # 85 + 42 = 127 on hand; the reorder level (40) is judged on the total, not on one bin.
-    svc.reservations.reserve({"product_id": ws.oak.id, "site_id": ws.site.id, "quantity": "100"})
+    hand_reserve(svc, {"product_id": ws.oak.id, "site_id": ws.site.id, "quantity": "100"})
     assert "H3311" in codes(svc, F(stock="LOW_STOCK"))  # 127 - 100 = 27 available <= 40
     assert "H3311" in codes(svc, F(stock="IN_STOCK"))
     assert "H3311" in codes(svc, F(stock="RESERVED"))
@@ -198,7 +199,7 @@ def test_export_current_view_selected_and_all(svc, ws, tmp_path):
     n = export_materials(svc.materials, tmp_path / "view.xlsx", CURRENT, f)
     got, header = _sheet_codes(tmp_path / "view.xlsx")
     assert n == 2 and got == codes(svc, f) == ["U708", "H3311"]
-    assert "Product Number" in header and "Available" in header
+    assert "Product Number" in header and "General Stock" in header
     sel = [ws.mdf.id, ws.oak.id]
     export_materials(svc.materials, tmp_path / "sel.xlsx", SELECTED, f, ids=sel)
     assert _sheet_codes(tmp_path / "sel.xlsx")[0] == ["MDF-18", "H3311"]
@@ -218,7 +219,7 @@ def test_export_project(svc, ws, tmp_path):
     got, header = _sheet_codes(tmp_path / "p.xlsx", "Internal Code")
     assert got == ["H3311"]
     assert list(header[:10]) == ["Internal Code", "Material", "Product Number", "Supplier", "Unit", "Required",
-                                 "Reserved", "Issued", "Returned", "Net Issued"]
+                                 "Project Stock", "Issued", "Returned", "Net Issued"]
     row = next(r for r in load_workbook(tmp_path / "p.xlsx").active.iter_rows(values_only=True) if r[0] == "H3311")
     assert row[5:10] == (50, 0, 20, 0, 20)
     assert "Project: P-1001" in str(load_workbook(tmp_path / "p.xlsx").active["A2"].value)
