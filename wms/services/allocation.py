@@ -248,6 +248,8 @@ class AllocationService(BaseService):
         for r in figures.values():
             if source == "RESERVED":
                 wanted = r.proj_reserved
+                if r.remaining is not None:  # material already issued or used in production is not picked twice
+                    wanted = min(wanted, max(r.remaining, ZERO))
                 if area_need is not None:
                     wanted = min(wanted, area_need.get(r.id, ZERO))
                 pickable = wanted

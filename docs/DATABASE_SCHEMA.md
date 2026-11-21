@@ -62,6 +62,19 @@ Protected tables (database triggers, see `wms.db.engine`):
 
 * INDEX ix_audit_log_entity (entity_type, entity_id)
 
+## bin_count_requests
+
+| Column | Type | Null | Key / reference |
+|---|---|---|---|
+| bin_id | Integer | no | FK bins.id, indexed |
+| product_id | Integer | yes | FK products.id, indexed |
+| reason | String(200) | no |  |
+| requested_by_id | Integer | no | FK users.id, indexed |
+| requested_at | UTCDateTime | no |  |
+| resolved_at | UTCDateTime | yes | indexed |
+| resolved_count_id | Integer | yes | FK stock_counts.id, indexed |
+| id | Integer | no | PK |
+
 ## bins
 
 | Column | Type | Null | Key / reference |

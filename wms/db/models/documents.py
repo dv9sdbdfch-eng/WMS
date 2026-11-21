@@ -452,3 +452,23 @@ class StockCountLine(IdMixin, Base):
     @property
     def difference(self) -> Decimal | None:
         return None if self.counted_qty is None else self.counted_qty - self.system_qty
+
+
+class BinCountRequest(IdMixin, Base):
+    """A bin someone asked to be counted (v1.34): e.g. material on a picking list was not found
+    there. Shown on the Dashboard as "Bins to Count"; closed automatically when an approved count
+    includes the bin. Never changes stock by itself."""
+
+    __tablename__ = "bin_count_requests"
+
+    bin_id: Mapped[int] = fk("bins.id", nullable=False)
+    product_id: Mapped[int | None] = fk("products.id")
+    reason: Mapped[str] = mapped_column(String(200), nullable=False)
+    requested_by_id: Mapped[int] = fk("users.id", nullable=False)
+    requested_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, nullable=False)
+    resolved_at: Mapped[datetime | None] = mapped_column(UTCDateTime, index=True)
+    resolved_count_id: Mapped[int | None] = fk("stock_counts.id")
+
+    bin = relationship("Bin", lazy="joined")
+    product = relationship("Product", lazy="joined")
+    requested_by = relationship("User", lazy="joined")

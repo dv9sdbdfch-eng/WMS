@@ -78,6 +78,10 @@ class StocktakePage(Page):
         self.can_approve = app.can(P.STOCK_ADJUST)
         if self.can_count:
             self.add_action(button("New count", self.new, primary=True, shortcut="Ctrl+N"))
+            # v1.34: bins flagged because material was not found there (Goods Out "Not found")
+            self.b_flagged = button("Count flagged bins", self.count_flagged,
+                                    tooltip="Start one count for every bin where material was not found")
+            self.add_action(self.b_flagged)
         self.status = QComboBox()
         for text, val in (("Open and awaiting approval", "active"), ("All counts", None), ("Open", "OPEN"),
                           ("Awaiting approval", "SUBMITTED"), ("Approved", "APPROVED"), ("Cancelled", "CANCELLED")):
@@ -145,6 +149,10 @@ class StocktakePage(Page):
             rows = [c for c in rows if c.status in (CountStatus.OPEN.value, CountStatus.SUBMITTED.value)]
         # Only the list is reloaded here: the open count keeps any quantities typed but not yet saved.
         self.counts.set_items(rows)
+        if self.can_count:
+            n = len({r.bin_id for r in self.app.services.stocktake.open_requests()})
+            self.b_flagged.setText(f"Count flagged bins ({n})")
+            self.b_flagged.setEnabled(n > 0)
 
     def load(self, count):
         if count is None:
@@ -236,6 +244,13 @@ class StocktakePage(Page):
             return
         c = run(self, self.app.services.stocktake.create, dlg.location.value(), dlg.description.text(),
                 dlg.zero.isChecked())
+        if c:
+            self.status.setCurrentIndex(0)
+            self.refresh()
+            self._show(c)
+
+    def count_flagged(self):
+        c = run(self, self.app.services.stocktake.create_for_requests)
         if c:
             self.status.setCurrentIndex(0)
             self.refresh()

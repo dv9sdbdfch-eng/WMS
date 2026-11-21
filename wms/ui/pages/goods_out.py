@@ -24,6 +24,7 @@ from wms.ui.widgets.common import (
     h,
     info,
     label,
+    run,
     run_with_override,
     show_error,
 )
@@ -116,12 +117,16 @@ class GoodsOutPage(Page):
         form.addRow("Job reference", self.reference)
         form.addRow("Notes", self.notes)
         lay.addLayout(form)
-        lay.addLayout(h(label("Materials", "SectionTitle"), None,
+        self.not_found_note = label("", "Muted")
+        lay.addLayout(h(label("Materials", "SectionTitle"), self.not_found_note, None,
+                        button("Not found...", self.not_found,
+                               tooltip="The material on the selected line is not in its bin: take the line off "
+                                       "and flag the bin for a count. The project still needs it."),
                         button("Load from project...", self.load_from_project,
                                tooltip="Fill the lines from what is reserved for / still needed by the chosen "
                                        "project, bin by bin in walking order")))
         # materials only: finished products leave with Dispatch (Delivery Note, v1.22)
-        self.lines = LinesEditor(self.app, show_bin=True, bin_optional=True, show_stock=True,
+        self.lines = LinesEditor(self.app, show_bin=True, bin_optional=True, show_stock=True, show_planned=True,
                                  product_types=[t.value for t in ItemType if t is not ItemType.FINISHED])
         lay.addWidget(self.lines, 1)
         lay.addLayout(h(label("Leave the bin empty to pick automatically (default bin first, then the bins with most "
@@ -166,8 +171,37 @@ class GoodsOutPage(Page):
             if w is not None and w.value() is None:
                 self.lines.table.removeRow(r)
         for p in rows:
-            self.lines.add_row(p.product_id, p.quantity, p.bin_id)
+            self.lines.add_row(p.product_id, p.quantity, p.bin_id, planned=p.quantity)
         self.lines.add_row()
+
+    def not_found(self) -> None:
+        """v1.34 (B-015): the picker did not find the material in the bin. The line comes off this
+        Goods Out (so nothing is issued that did not leave), the bin is flagged for a count (Dashboard:
+        Bins to Count) and the project's need stays open as Remaining / To Allocate. Reservations
+        are kept: the manager decides once the count shows what is really there."""
+        r = self.lines.table.currentRow()
+        values = {v.row - 1: v for v in self.lines.values(validate=False)}
+        v = values.get(r)
+        if v is None or v.product_id is None:
+            info(self, "Not found", "Select the line of the material that is not in its bin.")
+            return
+        if v.bin_id is None:
+            info(self, "Not found", "Choose the bin where the material should have been, then press Not found.")
+            return
+        row = self.lines._row(v.product_id)
+        code = row.product.internal_code if row is not None else "This material"
+        bin_code = self.lines.table.cellWidget(r, self.lines._bin_col_index()).currentText()
+        if not confirm(self, "Not found", f"{code} is not in {bin_code}?\n\nThe line is taken off this Goods Out "
+                       f"and the bin is flagged for a count. The project still needs the material.",
+                       yes="Not found"):
+            return
+        if run(self, self.app.services.stocktake.request_count, v.bin_id, v.product_id,
+               f"Not found when picking for Goods Out ({code})") is None:
+            return
+        self.lines.table.removeRow(r)
+        self.lines._update_total()
+        self.lines.changed.emit()
+        self.not_found_note.setText(f"Bin {bin_code} flagged for a count.")
 
     def clear(self):
         self.requested_by.clear()
@@ -177,6 +211,7 @@ class GoodsOutPage(Page):
         self.date.set_value(date.today())
         self.lines.clear()
         self.lines.add_row()
+        self.not_found_note.setText("")
         self._token = uuid.uuid4().hex
 
     def post(self):
