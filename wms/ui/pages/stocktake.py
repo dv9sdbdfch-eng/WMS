@@ -46,6 +46,12 @@ from wms.ui.widgets.common import (
 )
 
 
+def _area(c) -> str:
+    if c.location:
+        return c.location.path
+    return "Excel import" if (c.description or "").startswith("Excel import") else "Whole warehouse"
+
+
 class NewCountDialog(QDialog):
     def __init__(self, app, parent=None):
         super().__init__(parent)
@@ -82,6 +88,10 @@ class StocktakePage(Page):
             self.b_flagged = button("Count flagged bins", self.count_flagged,
                                     tooltip="Start one count for every bin where material was not found")
             self.add_action(self.b_flagged)
+            # v1.38: quantities from an Excel file -> a count waiting for approval
+            self.add_action(button("Import from Excel...", self.import_excel,
+                                   tooltip="Set stock quantities from an Excel file (Code, Bin, Quantity). "
+                                           "A manager approves the differences."))
         self.status = QComboBox()
         for text, val in (("Open and awaiting approval", "active"), ("All counts", None), ("Open", "OPEN"),
                           ("Awaiting approval", "SUBMITTED"), ("Approved", "APPROVED"), ("Cancelled", "CANCELLED")):
@@ -96,11 +106,11 @@ class StocktakePage(Page):
         self.counts = DataTable([
             Col("Number", lambda c: c.count_number, width=100),
             Col("Status", lambda c: CountStatus(c.status).label, width=130),
-            Col("Area", lambda c: c.location.path if c.location else "Whole warehouse", width=260),
+            Col("Area", _area, width=260),
             Col("Description", lambda c: c.description or "", width=240),
-            Col("Lines", lambda c: len(c.lines), INT, 60),
-            Col("Counted", lambda c: sum(1 for l in c.lines if l.counted_qty is not None), INT, 70),
-            Col("Differences", lambda c: sum(1 for l in c.lines if l.difference), INT, 85),
+            Col("Lines", lambda c: c.line_stats[0], INT, 60),
+            Col("Counted", lambda c: c.line_stats[1], INT, 70),
+            Col("Differences", lambda c: c.line_stats[2], INT, 85),
             Col("Started", lambda c: c.created_at, DATETIME, 130),
             Col("By", lambda c: c.created_by.full_name)])
         self.counts.activated_item.connect(self.load)
@@ -144,7 +154,8 @@ class StocktakePage(Page):
     # -- list ---------------------------------------------------------------
     def refresh(self):
         val = self.status.currentData()
-        rows = self.app.services.stocktake.list(None if val in (None, "active") else val, limit=None)
+        rows = self.app.services.stocktake.list(None if val in (None, "active") else val, limit=None,
+                                               with_lines=False)
         if val == "active":
             rows = [c for c in rows if c.status in (CountStatus.OPEN.value, CountStatus.SUBMITTED.value)]
         # Only the list is reloaded here: the open count keeps any quantities typed but not yet saved.
@@ -181,7 +192,7 @@ class StocktakePage(Page):
         if c is None:
             self.summary.setText("")
             return
-        self.header.setText(f"{c.count_number} - {c.location.path if c.location else 'Whole warehouse'}"
+        self.header.setText(f"{c.count_number} - {_area(c)}"
                             f"  ({status.label})")
         counted = sum(1 for l in c.lines if l.counted_qty is not None)
         diffs = [l for l in c.lines if l.difference]
@@ -205,19 +216,27 @@ class StocktakePage(Page):
                 if col == 4:
                     item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 self.lines.setItem(r, col, item)
-            q = DecimalEdit()
-            q.set_value(l.counted_qty)
-            q.setReadOnly(not editable)
-            q.returnPressed.connect(lambda row=r: self._next(row))
-            self.lines.setCellWidget(r, 5, q)
+            if editable:
+                q = DecimalEdit()
+                q.set_value(l.counted_qty)
+                q.returnPressed.connect(lambda row=r: self._next(row))
+                self.lines.setCellWidget(r, 5, q)
+            else:  # plain cells: a 10 000-line import opens in a moment
+                q = QTableWidgetItem(fmt_qty(l.counted_qty) if l.counted_qty is not None else "")
+                q.setFlags(q.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                q.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                self.lines.setItem(r, 5, q)
             diff = QTableWidgetItem("" if l.difference is None else
                                     (("+" if l.difference > 0 else "") + fmt_qty(l.difference)))
             diff.setFlags(diff.flags() & ~Qt.ItemFlag.ItemIsEditable)
             diff.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             self.lines.setItem(r, 6, diff)
-            n = QLineEdit(l.notes or "")
-            n.setReadOnly(not editable)
-            self.lines.setCellWidget(r, 7, n)
+            if editable:
+                self.lines.setCellWidget(r, 7, QLineEdit(l.notes or ""))
+            else:
+                n = QTableWidgetItem(l.notes or "")
+                n.setFlags(n.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                self.lines.setItem(r, 7, n)
         if editable and c.lines:
             self.lines.cellWidget(0, 5).setFocus()
 
@@ -337,6 +356,19 @@ class StocktakePage(Page):
             self._show(done)
             self.refresh()
             info(self, "Stocktake", f"{c.count_number} approved: {len(diffs)} adjustment(s) posted.")
+
+    def import_excel(self):
+        from wms.ui.dialogs.stock_import import StockImportDialog
+        dlg = StockImportDialog(self.app, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted or dlg.count is None:
+            return
+        c = dlg.count
+        self.status.setCurrentIndex(0)
+        self.refresh()
+        self._show(c)
+        info(self, "Stock import", f"{c.count_number} created with {len(c.lines):,} line(s) and is waiting for "
+             f"approval." + ("" if self.can_approve else " Ask a manager to approve it here on the Stocktake "
+                             "screen.") + " Stock changes only when it is approved.")
 
     def cancel(self):
         reason = ask_text(self, "Cancel count", "Why is this count being cancelled?")

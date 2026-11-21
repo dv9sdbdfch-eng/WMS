@@ -265,7 +265,10 @@ class StockOpsService(BaseService):
         if product is None or b is None:
             raise ValidationError("Choose a product and a bin.")
         engine = StockEngine(s, self.ctx)
-        previous = engine.qty_in_bin(product.id, b.id)
+        # lock the balance before reading it: two PCs adjusting the same bin queue here, and the
+        # second one sees the first one's result (no double adjustment)
+        lvl = engine.lock_levels([(product.id, b.id)], create=True).get((product.id, b.id))
+        previous = lvl.quantity if lvl else ZERO
         if expected_previous is not None and previous != expected_previous:
             raise ValidationError(
                 f"The quantity in {b.full_code} changed to {previous.normalize():f} while you were entering the "

@@ -159,6 +159,11 @@ class Services:
         return StocktakeService(self.ctx)
 
     @cached_property
+    def stock_import(self):
+        from wms.services.stock_import import StockImportService
+        return StockImportService(self.ctx)
+
+    @cached_property
     def ledger(self):
         from wms.services.ledger import LedgerService
         return LedgerService(self.ctx)

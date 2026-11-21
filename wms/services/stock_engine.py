@@ -17,8 +17,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import case, func, select
-from sqlalchemy.orm import Session
+from sqlalchemy import bindparam, case, func, select, tuple_, update
+from sqlalchemy.orm import Session, lazyload
+from sqlalchemy.orm.attributes import set_committed_value
 
 from wms.core.enums import CLOSED_SITE_STATUSES, MovementType, ReasonUse, SiteStatus
 from wms.core.exceptions import InsufficientStockError, ValidationError
@@ -38,6 +39,24 @@ class Discrepancy:
     bin_code: str
     ledger_qty: Decimal
     level_qty: Decimal
+
+
+@dataclass
+class BulkLine:
+    """One line of a bulk posting (``StockEngine.post_many``): ``delta`` > 0 puts stock into the
+    bin, < 0 takes it out. Used for large stock counts / Excel stock imports."""
+    product: Product
+    bin: Bin
+    delta: Decimal
+    movement_type: MovementType
+    doc_type: str | None = None
+    doc_id: int | None = None
+    doc_number: str | None = None
+    notes: str | None = None
+
+
+#: rows per locked read in bulk postings (keeps each SQL statement a sensible size)
+BULK_CHUNK = 500
 
 
 class StockEngine:
@@ -141,7 +160,34 @@ class StockEngine:
         if to_bin is not None:
             self._adjust_level(product.id, to_bin.id, qty)
 
-        mv = StockMovement(
+        mv = self._movement(movement_type, product, qty, from_bin, to_bin, unit_cost=unit_cost, site=site,
+                            supplier=supplier, doc_type=doc_type, doc_id=doc_id, doc_number=doc_number,
+                            reference=reference, notes=notes, occurred_at=occurred_at,
+                            reversal_of_id=reversal_of_id, is_override=is_override,
+                            override_reason=override_reason)
+        self.s.add(mv)
+        self.s.flush()
+        if is_override:
+            audit.record(
+                self.s,
+                self.ctx,
+                "NEGATIVE_STOCK_OVERRIDE",
+                "PRODUCT",
+                product.id,
+                product.internal_code,
+                f"{qty.normalize():f} {product.unit.code} taken from {from_bin.full_code} "
+                f"leaving negative stock. Reason: {override_reason}",
+            )
+        return mv
+
+    def _movement(self, movement_type, product: Product, qty: Decimal, from_bin: Bin | None, to_bin: Bin | None, *,
+                  unit_cost=None, site: Site | None = None, supplier: Supplier | None = None, doc_type=None,
+                  doc_id=None, doc_number=None, reference=None, notes=None, occurred_at=None,
+                  reversal_of_id=None, is_override=False, override_reason=None) -> StockMovement:
+        """The immutable movement row, with name snapshots so later renames never rewrite history."""
+        site_id = site.id if site else None
+        supplier_id = supplier.id if supplier else None
+        return StockMovement(
             movement_type=MovementType(movement_type).value,
             product_id=product.id,
             quantity=qty,
@@ -170,20 +216,92 @@ class StockEngine:
             supplier_name_snapshot=supplier.name if supplier else None,
             user_name_snapshot=self.ctx.user.full_name,
         )
-        self.s.add(mv)
+
+    # -- bulk posting ---------------------------------------------------------
+    def lock_levels(self, pairs, create: bool = False) -> dict[tuple[int, int], StockLevel]:
+        """Lock the balance rows of many (product, bin) pairs in a few statements (sorted, so two
+        PCs locking overlapping sets queue instead of deadlocking) and read their latest values.
+
+        ``create=True``: on the shared server, a missing (empty-bin) balance row is inserted first
+        (insert-or-skip), so there is always a row to lock - two PCs putting first stock into the
+        same empty bin then queue here instead of both reading 0."""
+        keys = sorted(set(pairs))
+        if create and keys and self.s.get_bind().dialect.name == "postgresql":
+            from sqlalchemy.dialects.postgresql import insert
+            now = utcnow()
+            for i in range(0, len(keys), BULK_CHUNK):
+                self.s.execute(insert(StockLevel).values([
+                    dict(product_id=p, bin_id=b, quantity=ZERO, version=1, updated_at=now)
+                    for p, b in keys[i:i + BULK_CHUNK]]).on_conflict_do_nothing(
+                    index_elements=["product_id", "bin_id"]))
+        out: dict[tuple[int, int], StockLevel] = {}
+        for i in range(0, len(keys), BULK_CHUNK):
+            chunk = keys[i:i + BULK_CHUNK]
+            q = (select(StockLevel).options(lazyload("*"))
+                 .where(tuple_(StockLevel.product_id, StockLevel.bin_id).in_(chunk))
+                 .order_by(StockLevel.product_id, StockLevel.bin_id)
+                 .with_for_update(of=StockLevel).execution_options(populate_existing=True))
+            out.update({(lvl.product_id, lvl.bin_id): lvl for lvl in self.s.scalars(q)})
+        return out
+
+    def post_many(self, lines: list[BulkLine]) -> list[StockMovement]:
+        """Post many single-bin movements in one go: the same checks as ``post`` (active product and
+        bin, whole units, never below zero), but the balances are locked and written in a few
+        statements instead of several per line - 10 000 lines over the VPN take seconds, not an hour.
+        All or nothing (the caller's transaction)."""
+        if not lines:
+            return []
+        for ln in lines:
+            qty = abs(to_qty(ln.delta))
+            if qty <= ZERO:
+                raise ValidationError(f"Quantity for {ln.product.internal_code} must not be zero.", "quantity")
+            if not ln.product.unit.allow_decimal and qty != qty.to_integral_value():
+                raise ValidationError(f"{ln.product.internal_code} is counted in whole {ln.product.unit.code} - "
+                                      f"quantity must be a whole number.", "quantity")
+            if not ln.product.is_active:
+                raise ValidationError(f"Product {ln.product.internal_code} is inactive - it has been removed from "
+                                      f"active use. Restore it first if it is needed again.")
+            if not ln.bin.is_active:
+                raise ValidationError(f"Bin {ln.bin.full_code} is inactive - it has been removed from active "
+                                      f"use. Restore it first if it is needed again.")
+        levels = self.lock_levels(((ln.product.id, ln.bin.id) for ln in lines), create=True)
+        missing = sorted({(ln.product.id, ln.bin.id) for ln in lines} - set(levels))  # SQLite only
+        for key in missing:
+            if key not in levels:
+                lvl = StockLevel(product_id=key[0], bin_id=key[1], quantity=ZERO)
+                self.s.add(lvl)
+                levels[key] = lvl
+        movements = []
+        now = utcnow()
+        changes: dict[int, list] = {}  # stored balance row id -> [row, total change]
+        for ln in lines:
+            lvl = levels[(ln.product.id, ln.bin.id)]
+            delta = to_qty(ln.delta)
+            qty = abs(delta)
+            current = (lvl.quantity or ZERO) + (changes[lvl.id][1] if lvl.id in changes else ZERO)
+            if delta < ZERO and current < qty:
+                raise InsufficientStockError(ln.product.internal_code, ln.bin.full_code, current, qty)
+            if lvl.id is None:  # a new balance row (SQLite): inserted with the session
+                lvl.quantity = current + delta
+            else:
+                changes.setdefault(lvl.id, [lvl, ZERO])[1] += delta
+            movements.append(self._movement(
+                ln.movement_type, ln.product, qty, ln.bin if delta < ZERO else None,
+                ln.bin if delta > ZERO else None, doc_type=ln.doc_type, doc_id=ln.doc_id,
+                doc_number=ln.doc_number, notes=ln.notes, occurred_at=now))
+        if changes:
+            # one UPDATE sent as a batch, not one versioned UPDATE per row; the rows are locked above
+            self.s.execute(
+                update(StockLevel.__table__).where(StockLevel.__table__.c.id == bindparam("lid"))
+                .values(quantity=StockLevel.__table__.c.quantity + bindparam("delta"),
+                        version=StockLevel.__table__.c.version + 1, updated_at=now),
+                [{"lid": lid, "delta": d} for lid, (_lvl, d) in changes.items()])
+            for lvl, d in changes.values():
+                set_committed_value(lvl, "quantity", lvl.quantity + d)
+                set_committed_value(lvl, "version", lvl.version + 1)
+        self.s.add_all(movements)
         self.s.flush()
-        if is_override:
-            audit.record(
-                self.s,
-                self.ctx,
-                "NEGATIVE_STOCK_OVERRIDE",
-                "PRODUCT",
-                product.id,
-                product.internal_code,
-                f"{qty.normalize():f} {product.unit.code} taken from {from_bin.full_code} "
-                f"leaving negative stock. Reason: {override_reason}",
-            )
-        return mv
+        return movements
 
     @staticmethod
     def _check_site(site: Site | None, movement_type: MovementType) -> None:
