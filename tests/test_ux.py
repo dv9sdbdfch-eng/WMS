@@ -55,8 +55,9 @@ def test_passport_purchasing_projects_and_documents(svc, sample, tmp_path):
 def test_dashboard_counters_open_exactly_their_records(svc, sample):
     from wms.services.search import SearchCriteria
     d = svc.dashboard.load()
-    assert [a.key for a in d.actions] == ["low_stock", "overdue_po", "partial_po", "stocktake", "discrepancies",
-                                          "no_bin", "no_photo"]
+    assert [a.key for a in d.actions] == ["low_stock", "overdue_po", "partial_po", "stocktake", "bins_to_count",
+                                          "discrepancies", "no_bin", "no_photo"]
+    assert d.action("bins_to_count").count == len({r.bin_id for r in svc.stocktake.open_requests()}) == 0
     # MDF has a minimum of 10 and no stock: reorder, and out of stock
     low = d.action("low_stock")
     assert low.count == len(svc.products.low_stock()) and low.level == "danger"

@@ -23,6 +23,8 @@ from wms.core.enums import (
 from wms.core.permissions import P
 from wms.db.models import (
     Attachment,
+    Bin,
+    BinCountRequest,
     DeliveryDiscrepancy,
     DeliveryNote,
     GoodsIssue,
@@ -167,6 +169,10 @@ class DashboardService(BaseService):
                 .where(StockCount.status == CountStatus.SUBMITTED.value, StockCountLine.counted_qty.is_not(None),
                        StockCountLine.counted_qty != StockCountLine.system_qty)) or 0,
                 "stocktake", hint="Counted lines waiting for approval"))
+            out.append(ActionItem("bins_to_count", "Bins to Count", s.scalar(
+                select(func.count(func.distinct(BinCountRequest.bin_id))).join(Bin, Bin.id == BinCountRequest.bin_id)
+                .where(BinCountRequest.resolved_at.is_(None), Bin.is_active.is_(True)))
+                or 0, "stocktake", hint="Material was not found there - count these bins"))
         if can(P.PURCHASING_VIEW):
             out.append(ActionItem("discrepancies", "Delivery Discrepancies", s.scalar(select(func.count(
                 DeliveryDiscrepancy.id)).where(DeliveryDiscrepancy.status == DiscrepancyStatus.OPEN.value)) or 0,

@@ -8,6 +8,7 @@ DANGER = "#B42318"
 WARNING = "#B54708"
 SUCCESS = "#067647"
 LOW_STOCK_BG = "#FDECEA"
+EDITED_BG = "#FEF0C7"  # a quantity changed from the planned one (Goods Out, v1.34)
 NEGATIVE_FG = "#B42318"
 MUTED = "#667085"
 

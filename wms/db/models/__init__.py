@@ -1,6 +1,7 @@
 """All ORM models. Importing this package registers every table on Base.metadata."""
 
 from wms.db.models.documents import (
+    BinCountRequest,
     DeliveryNote,
     DeliveryNoteLine,
     Dispatch,
@@ -87,6 +88,7 @@ __all__ = [
     "StockAdjustment",
     "StockCount",
     "StockCountLine",
+    "BinCountRequest",
     "StockLevel",
     "StockMovement",
     "ProjectStockRelease",

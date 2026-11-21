@@ -435,16 +435,26 @@ def _incoming_sq():
             .having(left > 0).subquery())
 
 
+# Movements that make up a project's Net Issued: Goods Out, returns from site and (v1.34)
+# material consumed by Production for the project.
+PROJECT_ISSUE_TYPES = (MovementType.GOODS_OUT.value, MovementType.RETURN_FROM_SITE.value,
+                       MovementType.PRODUCTION_CONSUME.value)
+
+
 class _Project:
     """Required / Reserved / Issued / Returned for one project, as subqueries keyed by product."""
 
     def __init__(self, site_id: int):
         m = StockMovement
-        go, rfs = MovementType.GOODS_OUT.value, MovementType.RETURN_FROM_SITE.value
-        issued = func.sum(case((m.movement_type != go, 0), (m.from_bin_id.is_not(None), m.quantity), else_=-m.quantity))
+        rfs = MovementType.RETURN_FROM_SITE.value
+        # Material used by Production for this project counts as issued to it (v1.34, B-014): it left
+        # the bins for the project just like a Goods Out, so Remaining must not ask for it again.
+        # Each unit leaves a bin once only, so nothing is counted twice; reversals net off (to_bin set).
+        issued = func.sum(case((m.movement_type == rfs, 0), (m.from_bin_id.is_not(None), m.quantity),
+                               else_=-m.quantity))
         returned = func.sum(case((m.movement_type != rfs, 0), (m.to_bin_id.is_not(None), m.quantity), else_=-m.quantity))
         self.mov = (select(m.product_id.label("pid"), issued.label("issued"), returned.label("returned"))
-                    .where(m.site_id == site_id, m.movement_type.in_((go, rfs)))
+                    .where(m.site_id == site_id, m.movement_type.in_(PROJECT_ISSUE_TYPES))
                     .group_by(m.product_id).subquery())
         self.req = (select(ProjectMaterial.product_id.label("pid"), ProjectMaterial.required_qty.label("required"))
                     .where(ProjectMaterial.site_id == site_id).subquery())
@@ -488,9 +498,7 @@ def project_product_ids(site_ids):
         select(ProjectMaterial.product_id).where(ProjectMaterial.site_id.in_(site_ids)),
         select(StockReservation.product_id).where(StockReservation.site_id.in_(site_ids),
                                                   StockReservation.status != ReservationStatus.RELEASED.value),
-        select(m.product_id).where(m.site_id.in_(site_ids),
-                                   m.movement_type.in_((MovementType.GOODS_OUT.value,
-                                                        MovementType.RETURN_FROM_SITE.value))))
+        select(m.product_id).where(m.site_id.in_(site_ids), m.movement_type.in_(PROJECT_ISSUE_TYPES)))
 
 
 # --- the service ---------------------------------------------------------------------------------

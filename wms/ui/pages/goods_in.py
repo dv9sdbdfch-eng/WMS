@@ -376,6 +376,13 @@ class GoodsInPage(Page):
                   "site_id": self.project.value(), "dn_number": self.dn_number.text(), "delivery_date": d,
                   "po_reference": self.po.text(), "notes": self.notes.text(), "client_token": self._token}
         lines = [ReceiptLine(v.product_id, v.quantity, v.bin_id, v.unit_cost, v.notes) for v in values]
+        # v1.34: one question for the whole note when a price looks wrong (warning only, never a block)
+        odd = self.app.services.goods_in.price_warnings(lines, self.order.value())
+        if odd and not confirm(self, "Check unit costs",
+                               "These prices are very different from the purchase order or the last cost:\n\n"
+                               + "\n".join(odd) + "\n\nThe unit cost of each product is updated from this note. "
+                               "Are the prices correct?", yes="Prices are correct"):
+            return
         dn = run(self, self.app.services.goods_in.post, header, lines, list(self._paths))
         if dn and self._draft_id:
             try:

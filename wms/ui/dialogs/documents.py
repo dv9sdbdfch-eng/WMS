@@ -242,9 +242,13 @@ class DeliveryNoteDialog(QDialog):
         picked = _ask_reversal_reason(self, "Why is this delivery note being reversed?")
         if not picked:
             return
-        if run_with_override(self, self.app.can(P.STOCK_OVERRIDE_NEGATIVE), self.app.services.goods_in.reverse,
-                             dn_id=self.dn.id, reason_code=picked[0], reason=picked[1]):
+        done = run_with_override(self, self.app.can(P.STOCK_OVERRIDE_NEGATIVE), self.app.services.goods_in.reverse,
+                                 dn_id=self.dn.id, reason_code=picked[0], reason=picked[1])
+        if done:
             self.app.changed()
+            notes = getattr(done, "cost_messages", None)
+            if notes:  # v1.34: the unit cost this note set is put back (or why it was not)
+                info(self, "Unit costs", "\n".join(notes))
             self.accept()
 
 

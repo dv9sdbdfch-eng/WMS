@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
@@ -12,9 +13,20 @@ from sqlalchemy.orm import selectinload
 
 from wms.core.enums import OPEN_SITE_STATUSES, DocumentStatus, EntityType, MovementType
 from wms.core.exceptions import DuplicateError, NotFoundError, ValidationError
-from wms.core.numbers import ZERO, to_money, to_qty, utcnow
+from wms.core.numbers import ZERO, fmt_money, to_money, to_qty, utcnow
 from wms.core.permissions import P
-from wms.db.models import Attachment, Bin, DeliveryNote, DeliveryNoteLine, Product, Site, StockMovement, Supplier
+from wms.db.models import (
+    Attachment,
+    AuditLog,
+    Bin,
+    DeliveryNote,
+    DeliveryNoteLine,
+    Product,
+    PurchaseOrderLine,
+    Site,
+    StockMovement,
+    Supplier,
+)
 from wms.services import audit
 from wms.services.attachments import AttachmentService
 from wms.services.base import BaseService, check_client_token, clean_str, like_pattern
@@ -56,6 +68,65 @@ def validate_doc_date(d: date | None, field: str = "date") -> date:
     return d
 
 
+# Price check on posting (v1.34, B-013): a warning only, never a block - real prices do move.
+PO_PRICE_TOLERANCE = Decimal("0.25")   # more than 25 % away from the agreed purchase order price
+LAST_COST_FACTOR = Decimal("3")        # without a PO: 3x the last cost or a third of it (a slipped decimal)
+
+
+def _audit_cost(value) -> Decimal | None:
+    return None if value in (None, "") else to_money(value)
+
+
+COST_AUDIT_ACTIONS = ("PRODUCT_COST_UPDATED", "PRODUCT_COST_RESTORED", "PRODUCT_UPDATED")
+
+
+def restore_costs(s, ctx, dn: DeliveryNote) -> list[str]:
+    """Put back the unit cost a reversed delivery note set on its products (v1.34, B-013).
+
+    Only when nothing has touched the cost since this note set it: a later delivery note with a unit
+    cost for the product (even at the same price, which writes no cost change), a manual edit of the
+    cost or another restore all leave the cost alone, and the user is told. Notes posted before v1.34
+    did not record which note changed the cost, so they are left alone too. Three queries in total,
+    whatever the number of lines (many PCs over VPN)."""
+    pids = list(dict.fromkeys(line.product_id for line in dn.lines))
+    rows: dict[int, list[AuditLog]] = {pid: [] for pid in pids}
+    for row in s.scalars(select(AuditLog).where(AuditLog.action.in_(COST_AUDIT_ACTIONS),
+                                                AuditLog.entity_type == "PRODUCT", AuditLog.entity_id.in_(pids))
+                         .order_by(AuditLog.id)):
+        rows[row.entity_id].append(row)
+    later_dn = set(s.scalars(
+        select(DeliveryNoteLine.product_id).join(DeliveryNote, DeliveryNote.id == DeliveryNoteLine.delivery_note_id)
+        .where(DeliveryNoteLine.product_id.in_(pids), DeliveryNoteLine.unit_cost.is_not(None),
+               DeliveryNote.id > dn.id, DeliveryNote.status == DocumentStatus.POSTED.value).distinct()))
+    products = {p.id: p for p in s.scalars(select(Product).where(Product.id.in_(pids))
+                                           .with_for_update().execution_options(populate_existing=True))}
+    messages: list[str] = []
+    for pid in pids:
+        changes, touched_after = [], False
+        for row in rows[pid]:
+            new = json.loads(row.new_values or "{}")
+            if row.action == "PRODUCT_COST_UPDATED" and new.get("delivery_note_id") == dn.id:
+                changes.append((json.loads(row.old_values or "{}"), new))
+                touched_after = False
+            elif changes and "unit_cost" in new:
+                touched_after = True  # another change of the cost after this note's own
+        if not changes:
+            continue
+        product = products[pid]
+        before, set_by_note = _audit_cost(changes[0][0].get("unit_cost")), _audit_cost(changes[-1][1].get("unit_cost"))
+        if touched_after or pid in later_dn or product.unit_cost != set_by_note:
+            messages.append(f"{product.internal_code}: unit cost not restored - the current {fmt_money(product.unit_cost)} "
+                            f"was set or confirmed after delivery note {dn.dn_number}.")
+            continue
+        audit.record(s, ctx, "PRODUCT_COST_RESTORED", "PRODUCT", product.id, product.internal_code,
+                     f"Unit cost restored: delivery note {dn.dn_number} was reversed.",
+                     old={"unit_cost": product.unit_cost}, new={"unit_cost": before, "delivery_note_id": dn.id})
+        product.unit_cost = before
+        messages.append(f"{product.internal_code}: unit cost restored to {fmt_money(before) or 'no cost'} "
+                        f"(was {fmt_money(set_by_note)} from this note).")
+    return messages
+
+
 class GoodsInService(BaseService):
     def find_existing(self, supplier_id: int, dn_number: str) -> DeliveryNote | None:
         norm = normalise_dn_number(dn_number)
@@ -86,6 +157,41 @@ class GoodsInService(BaseService):
             att_service.discard(staged)
             raise
         return self.get(dn_id)
+
+    def price_warnings(self, lines: list[ReceiptLine], purchase_order_id: int | None = None) -> list[str]:
+        """Lines whose unit cost looks wrong, to confirm before posting (warning only, v1.34).
+
+        With a purchase order: more than 25 % away from the PO line's price. Otherwise: more than 3x
+        the product's last cost, or less than a third of it."""
+        self.require(P.GOODS_IN_POST)
+        out: list[str] = []
+        with self.db.read_session() as s:
+            po_cost: dict[int, Decimal] = {}
+            if purchase_order_id:
+                for pid, cost in s.execute(select(PurchaseOrderLine.product_id, PurchaseOrderLine.unit_cost)
+                                           .where(PurchaseOrderLine.purchase_order_id == purchase_order_id,
+                                                  PurchaseOrderLine.unit_cost.is_not(None))):
+                    po_cost.setdefault(pid, cost)
+            products = {p.id: p for p in s.scalars(select(Product).where(
+                Product.id.in_({ln.product_id for ln in lines if ln.product_id is not None})))}
+            for i, ln in enumerate(lines, start=1):
+                if ln.unit_cost in (None, ""):
+                    continue
+                cost = to_money(ln.unit_cost)
+                product = products.get(ln.product_id)
+                if product is None or cost <= ZERO:
+                    continue
+                agreed = po_cost.get(product.id)
+                if agreed:
+                    if abs(cost - agreed) > agreed * PO_PRICE_TOLERANCE:
+                        out.append(f"Line {i} {product.internal_code}: {fmt_money(cost)} vs purchase order price "
+                                   f"{fmt_money(agreed)}.")
+                elif product.unit_cost and product.unit_cost > ZERO:
+                    last = product.unit_cost
+                    if cost > last * LAST_COST_FACTOR or cost * LAST_COST_FACTOR < last:
+                        out.append(f"Line {i} {product.internal_code}: {fmt_money(cost)} vs last cost "
+                                   f"{fmt_money(last)}.")
+        return out
 
     def _post(self, header, lines, dn_number, delivery_date, update_costs, att_service, staged) -> int:
         with self.db.session() as s:
@@ -164,7 +270,8 @@ class GoodsInService(BaseService):
                 if update_costs and cost is not None and cost != product.unit_cost:
                     audit.record(s, self.ctx, "PRODUCT_COST_UPDATED", "PRODUCT", product.id, product.internal_code,
                                  f"Unit cost updated from delivery note {dn_number}.",
-                                 old={"unit_cost": product.unit_cost}, new={"unit_cost": cost})
+                                 old={"unit_cost": product.unit_cost},
+                                 new={"unit_cost": cost, "delivery_note_id": dn.id})
                     product.unit_cost = cost
             s.flush()
             if site is not None:
@@ -201,6 +308,7 @@ class GoodsInService(BaseService):
                                reason_code=reason_code)
             if dn.site_id:
                 unreserve_delivery(s, self.ctx, dn, f"Delivery note {dn.dn_number} reversed: {reason}")
+            cost_messages = restore_costs(s, self.ctx, dn)
             dn.status = DocumentStatus.REVERSED.value
             dn.reversed_at = utcnow()
             dn.reversed_by_id = self.user.id
@@ -209,7 +317,9 @@ class GoodsInService(BaseService):
             after_delivery_reversed(s, self.ctx, dn)
             audit.record(s, self.ctx, "GOODS_IN_REVERSED", EntityType.DELIVERY_NOTE.value, dn.id, dn.dn_number,
                          reason, old={"status": "POSTED"}, new={"status": "REVERSED"})
-        return self.get(dn_id)
+        result = self.get(dn_id)
+        result.cost_messages = cost_messages  # shown to the user after the reversal (v1.34)
+        return result
 
     def update_header(self, dn_id: int, po_reference: str | None, notes: str | None) -> DeliveryNote:
         """Correct the PO reference / notes of a posted delivery note. Supplier, number, date and lines

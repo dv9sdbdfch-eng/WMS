@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 from wms.core.enums import ReturnCondition
 from wms.core.exceptions import ValidationError
 from wms.core.numbers import fmt_qty
+from wms.ui.theme import EDITED_BG
 from wms.ui.widgets.common import DecimalEdit, PickCombo, button, h, label
 
 
@@ -41,13 +42,16 @@ class LinesEditor(QWidget):
 
     def __init__(self, app, *, show_bin: bool = True, bin_optional: bool = False, show_cost: bool = False,
                  show_stock: bool = False, show_condition: bool = False, product_types: list[str] | None = None,
-                 bin_label: str = "Bin", parent=None):
+                 bin_label: str = "Bin", show_planned: bool = False, parent=None):
         super().__init__(parent)
         self.app = app
         self.show_bin, self.show_cost, self.show_stock = show_bin, show_cost, show_stock
         self.show_condition, self.bin_optional = show_condition, bin_optional
         self.product_types = product_types
+        self.show_planned = show_planned
         cols = ["Product", "Quantity", "Unit"]
+        if show_planned:  # v1.34: quantity from the picking list, shown once lines are loaded from it
+            cols.append("Planned")
         if show_stock:
             cols.append("Available")
         if show_bin:
@@ -70,11 +74,13 @@ class LinesEditor(QWidget):
         self.table.setColumnWidth(0, 340)
         self.table.setColumnWidth(1, 100)
         self.table.setColumnWidth(2, 65)
-        for name, width in (("Available", 90), ("Condition", 110), ("Unit Cost", 100)):
+        for name, width in (("Planned", 80), ("Available", 90), ("Condition", 110), ("Unit Cost", 100)):
             if any(c.startswith(name) for c in cols):
                 self.table.setColumnWidth(self._col(name), width)
         if show_bin:
             self.table.setColumnWidth(self._bin_col_index(), 240)
+        if show_planned:
+            self.table.setColumnHidden(self._col("Planned"), True)
         lay.addWidget(self.table, 1)
         self.total_label = label("", "Muted")
         lay.addLayout(h(button("Add line", self.add_row, shortcut="Ctrl+L"),
@@ -106,7 +112,8 @@ class LinesEditor(QWidget):
     def _col(self, name_start: str) -> int:
         return next(i for i, c in enumerate(self.cols) if c.startswith(name_start))
 
-    def add_row(self, product_id: int | None = None, qty: Decimal | None = None, bin_id: int | None = None):
+    def add_row(self, product_id: int | None = None, qty: Decimal | None = None, bin_id: int | None = None,
+                planned: Decimal | None = None):
         r = self.table.rowCount()
         self.table.insertRow(r)
         prod = PickCombo("Type code or name...")
@@ -128,6 +135,16 @@ class LinesEditor(QWidget):
         unit.setReadOnly(True)
         unit.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.table.setCellWidget(r, 2, unit)
+        if self.show_planned:
+            pl = QLineEdit(fmt_qty(planned) if planned is not None else "")
+            pl.setReadOnly(True)
+            pl.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            pl.setAlignment(Qt.AlignmentFlag.AlignRight)
+            pl.setProperty("planned", planned)
+            self.table.setCellWidget(r, self._col("Planned"), pl)
+            if planned is not None:
+                self.table.setColumnHidden(self._col("Planned"), False)
+                q.textChanged.connect(lambda _t, qe=q, p=planned: self._mark_edited(qe, p))
         if self.show_stock:
             av = QLineEdit()
             av.setReadOnly(True)
@@ -193,7 +210,7 @@ class LinesEditor(QWidget):
             self.table.cellWidget(r + 1, 0).setFocus()
 
     def _bin_col_index(self) -> int:
-        return next(i for i, c in enumerate(self.cols) if i > 2 and c not in ("Available", "Condition", "Notes")
+        return next(i for i, c in enumerate(self.cols) if i > 2 and c not in ("Planned", "Available", "Condition", "Notes")
                     and not c.startswith("Unit Cost"))
 
     def _bin_widget(self, r: int) -> PickCombo:
@@ -250,6 +267,22 @@ class LinesEditor(QWidget):
                 return
         self.add_row()
 
+    @staticmethod
+    def _mark_edited(qty_edit: DecimalEdit, planned: Decimal) -> None:
+        """Picked quantity differs from the picking list: show it (v1.34), so a short pick is seen."""
+        try:
+            now = qty_edit.value()
+        except ValidationError:
+            now = None
+        qty_edit.setStyleSheet("" if now == planned else f"background: {EDITED_BG};")
+        qty_edit.setToolTip("" if now == planned else f"Changed from the planned {fmt_qty(planned)}")
+
+    def planned_of(self, r: int) -> Decimal | None:
+        if not self.show_planned:
+            return None
+        w = self.table.cellWidget(r, self._col("Planned"))
+        return w.property("planned") if w is not None else None
+
     def remove_row(self):
         r = self.table.currentRow()
         if r < 0:
@@ -261,6 +294,8 @@ class LinesEditor(QWidget):
 
     def clear(self):
         self.table.setRowCount(0)
+        if self.show_planned:
+            self.table.setColumnHidden(self._col("Planned"), True)
         self._update_total()
 
     def _update_total(self):

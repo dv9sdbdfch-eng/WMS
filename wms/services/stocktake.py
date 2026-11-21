@@ -23,10 +23,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from wms.core.enums import AdjustmentReason, CountStatus, EntityType
-from wms.core.exceptions import NotFoundError, ValidationError
+from wms.core.exceptions import NotFoundError, PermissionDeniedError, ValidationError
 from wms.core.numbers import ZERO, fmt_qty, to_qty, utcnow
 from wms.core.permissions import P
-from wms.db.models import Bin, Location, Product, StockCount, StockCountLine, StockLevel
+from wms.db.models import Bin, BinCountRequest, Location, Product, StockCount, StockCountLine, StockLevel
 from wms.services import audit
 from wms.services.base import BaseService, clean_str, prefix_pattern
 from wms.services.numbering import next_number
@@ -60,9 +60,12 @@ class StocktakeService(BaseService):
 
     # -- workflow -----------------------------------------------------------
     def create(self, location_id: int | None = None, description: str | None = None,
-               include_zero_bins: bool = False, bin_id: int | None = None) -> StockCount:
+               include_zero_bins: bool = False, bin_id: int | None = None,
+               bin_ids: list[int] | None = None, extra_pairs: list[tuple[int, int]] | None = None) -> StockCount:
         """Start a count. ``include_zero_bins`` also lists each product's default bin in the area
-        when it shows no stock (useful to confirm a bin really is empty)."""
+        when it shows no stock (useful to confirm a bin really is empty). ``bin_ids`` counts just
+        those bins (the Bins to Count list, v1.34); ``extra_pairs`` adds (product, bin) lines even
+        when the system shows nothing there."""
         self.require(P.STOCKTAKE_COUNT)
         with self.db.session() as s:
             loc = s.get(Location, location_id) if location_id else None
@@ -75,6 +78,8 @@ class StocktakeService(BaseService):
             if one_bin is not None:  # count just this bin (from the bin screen)
                 in_area = in_area & (Bin.id == one_bin.id)
                 loc = loc or one_bin.location
+            elif bin_ids:
+                in_area = in_area & Bin.id.in_(list(bin_ids))
             elif loc is not None:
                 in_area = in_area & Bin.full_code.like(prefix_pattern(loc.path), escape="\\")
             levels = list(s.execute(
@@ -91,6 +96,11 @@ class StocktakeService(BaseService):
                     if (pid, bid) not in keys:
                         levels.append((pid, bid, ZERO))
                         keys.add((pid, bid))
+            for pid, bid in extra_pairs or []:
+                b = s.get(Bin, bid)
+                if (pid, bid) not in keys and b is not None and b.is_active:
+                    levels.append((pid, bid, ZERO))
+                    keys.add((pid, bid))
             if not levels:
                 raise ValidationError("There is no stock to count in this area.")
             count = StockCount(count_number=next_number(s, "STOCK_COUNT"), status=CountStatus.OPEN.value,
@@ -103,7 +113,7 @@ class StocktakeService(BaseService):
                 s.add(StockCountLine(count_id=count.id, line_no=i, product_id=pid, bin_id=bid, system_qty=qty))
             audit.record(s, self.ctx, "STOCK_COUNT_STARTED", EntityType.STOCK_COUNT.value, count.id,
                          count.count_number, f"{len(levels)} line(s) in "
-                         f"{one_bin.full_code if one_bin else loc.path if loc else 'whole warehouse'}.")
+                         f"{one_bin.full_code if one_bin else f'{len(bin_ids)} bin(s)' if bin_ids else loc.path if loc else 'whole warehouse'}.")
             count_id = count.id
         return self.get(count_id)
 
@@ -210,6 +220,52 @@ class StocktakeService(BaseService):
                              c.count_number, f"{n} line(s) changed since the count started and must be recounted.")
         return n
 
+    # ---- bins to count (v1.34) -------------------------------------------------------------
+    def request_count(self, bin_id: int, product_id: int | None, reason: str) -> BinCountRequest:
+        """Ask for a bin to be counted (e.g. material on a picking list was not found there).
+        Changes no stock; one open request per bin and product."""
+        if not (self.ctx.has(P.STOCKTAKE_COUNT) or self.ctx.has(P.GOODS_OUT_POST)):
+            raise PermissionDeniedError("You do not have permission to perform this action.")
+        reason = clean_str(reason, "reason", required=True, max_len=200)
+        with self.db.session() as s:
+            b = s.get(Bin, bin_id)
+            if b is None:
+                raise NotFoundError("Bin not found.")
+            if product_id is not None and s.get(Product, product_id) is None:
+                raise NotFoundError("Product not found.")
+            req = s.scalar(select(BinCountRequest).where(BinCountRequest.resolved_at.is_(None),
+                                                         BinCountRequest.bin_id == bin_id,
+                                                         BinCountRequest.product_id == product_id
+                                                         if product_id is not None
+                                                         else BinCountRequest.product_id.is_(None)))
+            if req is None:
+                req = BinCountRequest(bin_id=bin_id, product_id=product_id, reason=reason,
+                                      requested_by_id=self.user.id)
+                s.add(req)
+                s.flush()
+                audit.record(s, self.ctx, "BIN_COUNT_REQUESTED", "BIN", b.id, b.full_code, reason,
+                             new={"product_id": product_id})
+            s.expunge(req)
+            return req
+
+    def open_requests(self) -> list[BinCountRequest]:
+        """Bins waiting to be counted, oldest first."""
+        self.require(P.STOCKTAKE_COUNT)
+        with self.db.read_session() as s:
+            # a bin taken out of use has nothing left to count: its flag drops off the list
+            return list(s.scalars(select(BinCountRequest).join(Bin, Bin.id == BinCountRequest.bin_id)
+                                  .where(BinCountRequest.resolved_at.is_(None), Bin.is_active.is_(True))
+                                  .order_by(BinCountRequest.requested_at, BinCountRequest.id)))
+
+    def create_for_requests(self) -> StockCount:
+        """Start one count covering every bin waiting to be counted."""
+        reqs = self.open_requests()
+        if not reqs:
+            raise ValidationError("No bins are waiting to be counted.")
+        bins = sorted({r.bin_id for r in reqs})
+        pairs = [(r.product_id, r.bin_id) for r in reqs if r.product_id is not None]
+        return self.create(description="Bins to count", bin_ids=bins, extra_pairs=pairs)
+
     def approve(self, count_id: int, note: str | None = None) -> StockCount:
         """Post every difference as a stock adjustment, all or nothing."""
         self.require(P.STOCK_ADJUST)
@@ -239,6 +295,15 @@ class StocktakeService(BaseService):
                 posted += 1
             c.status = CountStatus.APPROVED.value
             c.closed_by_id, c.closed_at, c.close_reason = self.user.id, utcnow(), clean_str(note)
+            # a flag is closed only by a count that started after it was raised and counted that
+            # product in that bin (a flag for the whole bin: any line in the bin)
+            counted = {(l.bin_id, l.product_id) for l in c.lines}
+            counted_bins = {b for b, _ in counted}
+            for req in s.scalars(select(BinCountRequest).where(BinCountRequest.resolved_at.is_(None),
+                                                               BinCountRequest.bin_id.in_(counted_bins),
+                                                               BinCountRequest.requested_at <= c.created_at)):
+                if req.product_id is None or (req.bin_id, req.product_id) in counted:
+                    req.resolved_at, req.resolved_count_id = c.closed_at, c.id
             audit.record(s, self.ctx, "STOCK_COUNT_APPROVED", EntityType.STOCK_COUNT.value, c.id, c.count_number,
                          f"{posted} adjustment(s) posted from {len(c.lines)} counted line(s).")
         return self.get(count_id)
