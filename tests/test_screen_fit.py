@@ -8,6 +8,7 @@ from datetime import date
 from pathlib import Path
 
 import pytest
+from conftest import hand_reserve
 from PySide6.QtWidgets import QApplication
 from test_ui_smoke import ui  # noqa: F401 - the shared screen fixture
 
@@ -53,7 +54,7 @@ def _long_texts(svc, sample):
     """Data that makes the footers long: low stock, reservations, several rows everywhere."""
     sample.receive(sample.mdf, 12)
     sample.receive(sample.edge, 50, number="DN-2")
-    svc.reservations.reserve({"product_id": sample.mdf.id, "site_id": sample.site.id, "quantity": "4"})
+    hand_reserve(svc, {"product_id": sample.mdf.id, "site_id": sample.site.id, "quantity": "4"})
     svc.goods_out.post({"site_id": sample.site.id, "issue_date": date.today()},
                        [IssueLine(sample.mdf.id, "3")])
 

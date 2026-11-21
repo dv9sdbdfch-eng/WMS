@@ -65,7 +65,7 @@ def test_materials_header_columns_button_project_banner_and_assign(ui, sample): 
     first = v.layout().itemAt(0)
     assert (first.widget() or first.layout().itemAt(0).widget()) is v.search  # search line first
     assert [c.title for c in v.model.cols if c.title][:8] == ["Photo", "Code", "Material", "Product Number",
-                                                              "Supplier", "On Hand", "Available", "Bin"]
+                                                              "Supplier", "On Hand", "General stock", "Bin"]
     # Columns menu: the same choices as right-clicking the header
     v._fill_column_menu(v.columns_menu)
     brand = next(a for a in v.columns_menu.actions() if a.text() == "Brand")
@@ -82,7 +82,7 @@ def test_materials_header_columns_button_project_banner_and_assign(ui, sample): 
     assert v.project_figures["remaining"].text() == "Remaining: <b>40</b>"
     # every figure of the Remaining calculation is on screen, in calculation order
     assert [f.split(":")[0] for f in (v.project_figures[k].text() for k in v.project_figures)] == [
-        "Materials", "Required", "Reserved", "Issued", "Returned", "Net Issued", "Remaining", "To Allocate"]
+        "Materials", "Required", "Project stock", "Issued", "Returned", "Net Issued", "Remaining", "Not covered"]
     keys = [c.key for c in v.model.cols]
     assert [k for k in keys if k in ("required", "proj_reserved", "issued", "returned", "net", "remaining")] == [
         "required", "proj_reserved", "issued", "returned", "net", "remaining"]
@@ -232,12 +232,12 @@ def test_project_page_structure_and_contextual_actions(ui, sample):  # noqa: F81
     app.services.materials.set_required(sample.site.id, [(sample.mdf.id, "30")])
     dlg = SiteDialog(app, sample.site.id)
     assert [dlg.tabs.tabText(i) for i in range(dlg.tabs.count())][:5] == \
-        ["Overview", "Materials", "Movements", "Documents", "Reservations"]
+        ["Overview", "Materials", "Movements", "Documents", "Project stock"]
     assert dlg.facts.text().startswith("P-1001   ·   Active")
     assert dlg.cards["remaining"].value_label.text() == "30"
     texts = [b.text() for b in dlg.findChildren(QPushButton)]
     for t in ("+  Add Material", "Import Excel...", "Export Excel", "−  Goods Out to this Project",
-              "Reserve Stock..."):
+              "Return to main..."):
         assert t in texts, t
     assert [a.text() for a in dlg.export_btn.menu().actions()] == \
         ["Export Project Material List...", "Export Current View...", "Export Selected..."]
@@ -373,8 +373,8 @@ def test_scenario_b_project_then_supplier_then_export_current_view(ui, sample, t
     header_row = next(r for r in range(1, 10) if ws.cell(r, 1).value == "Code")
     header = [c.value for c in ws[header_row] if c.value]
     shown = [c.title for c in v.model.cols if c.key not in ("select", "photo")]
-    assert header == ["Code", "Material", "Supplier", "Required", "Project Reserved", "Issued", "Returned",
-                      "Net Issued", "Remaining", "To Allocate", "Available"]
+    assert header == ["Code", "Material", "Supplier", "Required", "Project Stock", "Issued", "Returned",
+                      "Net Issued", "Remaining", "Not Covered", "General Stock"]
     assert len(header) == len(shown)
     data = [r[0].value for r in ws.iter_rows(min_row=header_row + 1) if r[0].value]
     assert data == codes(v) == ["MDF-18"]
@@ -442,9 +442,10 @@ def test_screens_without_a_sidebar_entry_open_in_context(ui, sample):  # noqa: F
                         ("discrepancies", "delivery_notes"), ("movements", "reports")):
         win.go(parent)
         page = win.page(parent)
-        link = next(page.actions.itemAt(i).widget() for i in range(page.actions.count())
-                    if page.actions.itemAt(i).widget() is not None
-                    and page.actions.itemAt(i).widget().text().startswith(win.titles[key].split()[0]))
+        links = [page.actions.itemAt(i).widget() for i in range(page.actions.count())
+                 if page.actions.itemAt(i).widget() is not None]
+        link = next((w for w in links if w.text() == win.titles[key]), None) or \
+            next(w for w in links if w.text().startswith(win.titles[key].split()[0]))
         link.click()
         assert win.stack.currentWidget() is win.page(key), key
         assert win.nav.currentItem().data(Qt.ItemDataRole.UserRole) == parent

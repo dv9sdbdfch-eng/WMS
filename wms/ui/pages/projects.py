@@ -228,7 +228,7 @@ class ProjectsPage(Page):
             self.add_link("Project List", "sites", tooltip="All projects as one table: customers, addresses, "
                                                            "status - for searching, sorting and exporting")
         if app.can(P.STOCK_VIEW):
-            self.add_link("Reservations", "reservations", tooltip="Stock set aside for projects, not yet issued")
+            self.add_link("Project Stock", "reservations", tooltip="Stock delivered for projects, not yet issued")
         if self.can_edit:
             self.add_action(button("+  Project", lambda: self.add_project(None)))
             self.add_action(button("+  Manager", self.add_manager, primary=True, shortcut="Ctrl+N"))
@@ -1582,9 +1582,9 @@ class NodePanel(QStackedWidget):
         # the old Projects screen's tabs, one click from the tree
         lay.addLayout(h(*[button(text, lambda t=tab: self.page.open_project(self.node, t), tooltip=tip)
                           for text, tab, tip in (
-                              ("Materials", "materials", "Required, Reserved, Issued, Returned and Remaining"),
+                              ("Materials", "materials", "Required, Project stock, Issued, Returned and Remaining"),
                               ("Movements", "history", "Every Goods Out and return for this project"),
-                              ("Reservations", "reservations", "Stock set aside for this project"))], None))
+                              ("Project stock", "reservations", "Stock delivered for this project, not yet issued"))], None))
         self.p_info = label("", "Muted", wrap=True)
         lay.addWidget(self.p_info)
         self.p_table = DataTable([Col("Code", lambda r: r.code, width=84),

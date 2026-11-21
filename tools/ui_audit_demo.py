@@ -118,8 +118,12 @@ def build():
     for num, items in req.items():
         svc.materials.set_required(sites[num].id, [(P[c].id, str(q)) for c, q in items.items()])
 
-    for num, c, q in [("P-1042", "H3311", 30), ("P-1042", "BLUM-TBX", 20), ("P-1051", "OAK27", 2), ("P-1060", "U999", 10)]:
-        svc.reservations.reserve({"product_id": P[c].id, "site_id": sites[num].id, "quantity": str(q)})
+    # project stock: deliveries received for a project (v1.35 - nothing is reserved by hand)
+    for n, (num, c, q) in enumerate([("P-1042", "H3311", 30), ("P-1042", "BLUM-TBX", 20), ("P-1051", "OAK27", 2),
+                                     ("P-1060", "U999", 10)]):
+        svc.goods_in.post({"dn_number": f"DN-PRJ-{n + 1}", "supplier_id": P[c].supplier_id, "site_id": sites[num].id,
+                           "delivery_date": T - timedelta(days=2)},
+                          [ReceiptLine(P[c].id, D(str(q)), P[c].default_bin_id)])
 
     for num, lines, ref in [("P-1042", [("H3311", 60), ("EDGE-H3311", 450), ("BLUM-CLIP", 160)], "JOB-1042-01"),
                             ("P-1042", [("BLUM-TBX", 12), ("HAF-HDL128", 90)], "JOB-1042-02"),

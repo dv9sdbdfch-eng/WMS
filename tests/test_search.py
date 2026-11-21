@@ -17,6 +17,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 
 import pytest
+from conftest import hand_reserve
 from sqlalchemy import select
 
 from wms.core.exceptions import ValidationError
@@ -546,7 +547,7 @@ def _reserve_and_set_reorder_levels(svc) -> None:
         qty = (r.available * D(rnd.choice(["0.3", "0.6", "1"]))).to_integral_value()
         if qty <= 0:
             continue
-        res = svc.reservations.reserve({"product_id": r.product.id, "site_id": site_id, "quantity": qty})
+        res = hand_reserve(svc, {"product_id": r.product.id, "site_id": site_id, "quantity": qty})
         if rnd.random() < 0.4:
             half = max(D(1), (qty / 2).to_integral_value())
             if r.product.item_type == "FINISHED":  # finished products leave by Dispatch (v1.22)

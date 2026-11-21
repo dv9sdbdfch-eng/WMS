@@ -1,73 +1,50 @@
-"""Reserve remaining, picking list and "Load from project" for Goods Out.
+"""Picking list and "Load from project" for Goods Out.
 
-Three jobs that start from what a project (or a part of it) still needs:
+Two jobs that start from what a project (or a part of it) still needs:
 
-* **Reserve remaining** - one click sets aside everything a project still has To Allocate
-  (Remaining - Reserved), as far as stock is Available. Each material becomes an ordinary
-  reservation, all created in one transaction: either every line is reserved or none is.
 * **Picking list** - what to take off the shelves for the project, with the bins to pick from in
   walking order (sorted by the bin's full location code: warehouse, zone, rack, shelf, bin).
 * **Load from project** - the same pick lines put straight onto a Goods Out form.
 
+v1.35: stock is no longer reserved by hand. A project's own stock is what was delivered for it
+(Goods In with the project) and not yet issued or returned to main stock.
+
 Areas
 -----
 The work can be limited to a block, a level or a unit of the project ("BLOCK:<id>",
-"LEVEL:<id>", "UNIT:<id>"; empty = the whole project). Reservations and Goods Out are recorded
-per project, not per unit, so for an area the quantity is the area's own requirement (unit
-quantity x quantity per unit), capped by what the whole project still needs. Nothing is ever
-reserved or picked beyond the project's figure.
+"LEVEL:<id>", "UNIT:<id>"; empty = the whole project). Goods Out is recorded per project, not
+per unit, so for an area the quantity is the area's own requirement (unit quantity x quantity
+per unit), capped by what the whole project still needs. Nothing is ever picked beyond the
+project's figure.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date
 from decimal import ROUND_FLOOR, Decimal
 
 from sqlalchemy import select
 
-from wms.core.enums import OPEN_SITE_STATUSES, EntityType
 from wms.core.exceptions import NotFoundError, ValidationError
 from wms.core.numbers import ZERO
 from wms.core.permissions import P
 from wms.db.models import (
     Bin,
-    Product,
     ProjectBlock,
     ProjectLevel,
-    ProjectMaterial,
     ProjectUnit,
     Site,
     StockLevel,
-    StockReservation,
 )
-from wms.services import audit
-from wms.services.base import BaseService, check_client_token
+from wms.services.base import BaseService
 from wms.services.project_demand import DemandScope, demand
 
 #: what a picking list / Goods Out is loaded from
-SOURCES = (("RESERVED", "Reserved for the project"), ("REMAINING", "Remaining (Required - Net Issued)"))
+SOURCES = (("RESERVED", "Project stock (delivered for the project)"), ("REMAINING", "Remaining (Required - Net Issued)"))
 
 
 def _whole(qty: Decimal, allow_decimal: bool) -> Decimal:
     return qty if allow_decimal else qty.to_integral_value(rounding=ROUND_FLOOR)
-
-
-@dataclass
-class ReserveLine:
-    """One material of a "Reserve remaining" preview."""
-
-    product_id: int
-    code: str
-    name: str
-    uom: str
-    need: Decimal  # still to be reserved (To Allocate, capped by the area's requirement)
-    available: Decimal  # free stock: usable on hand - reserved for any project
-    quantity: Decimal  # what will be reserved: the smaller of the two
-
-    @property
-    def short(self) -> Decimal:
-        return max(self.need - self.quantity, ZERO)
 
 
 @dataclass
@@ -173,59 +150,6 @@ class AllocationService(BaseService):
         from wms.services.materials import MaterialsService
         return {r.id: r for r in MaterialsService(self.ctx).rows_for(product_ids, site_id)}
 
-    # -- Reserve remaining ---------------------------------------------------------------------
-    def reserve_plan(self, site_id: int, area: str | None = None) -> list[ReserveLine]:
-        """What "Reserve remaining" would set aside, material by material (nothing is saved)."""
-        self.require(P.RESERVATIONS_EDIT)
-        with self.db.read_session() as s:
-            self._site(s, site_id)
-            _, area_need = self._area(s, site_id, area)
-            ids = list(s.scalars(select(ProjectMaterial.product_id).where(ProjectMaterial.site_id == site_id)))
-        if area_need is not None:
-            ids = [i for i in ids if area_need.get(i, ZERO) > ZERO]
-        out = []
-        for r in self._figures(site_id, ids).values():
-            need = r.to_allocate or ZERO
-            if area_need is not None:
-                need = min(need, area_need.get(r.id, ZERO))
-            if need <= ZERO or not r.product.is_active:
-                continue
-            free = max(r.available, ZERO)
-            qty = _whole(min(need, free), r.product.unit.allow_decimal)
-            out.append(ReserveLine(r.id, r.product.internal_code, r.product.name, r.product.unit.code,
-                                   need, free, qty))
-        return sorted(out, key=lambda x: x.code)
-
-    def reserve_remaining(self, site_id: int, lines: list[tuple[int, Decimal]], required_by: date | None = None,
-                          notes: str | None = None, client_token: str | None = None) -> list[str]:
-        """Create one reservation per line, all in one transaction. Returns the reservation numbers."""
-        self.require(P.RESERVATIONS_EDIT)
-        lines = [(pid, Decimal(q)) for pid, q in lines if q and Decimal(q) > ZERO]
-        if not lines:
-            raise ValidationError("Nothing to reserve: every material is already reserved or out of stock.")
-        token = (client_token or "")[:32]
-        from wms.services.reservations import ReservationService
-        rs = ReservationService(self.ctx)
-        numbers = []
-        with self.db.session() as s:
-            if token:
-                check_client_token(s, StockReservation, f"{token}:1", "number", EntityType.RESERVATION.value,
-                                   "reservation")
-            site = self._site(s, site_id)
-            if site.status not in OPEN_SITE_STATUSES:
-                raise ValidationError(f"Project {site.display} is closed - reopen it to reserve stock for it.")
-            for n, (pid, qty) in enumerate(lines, 1):
-                product = s.get(Product, pid)
-                if product is None or not product.is_active:
-                    raise ValidationError("A material on the list has been archived - refresh and try again.")
-                qty = rs._qty(product, qty)
-                r = rs._create(s, product, site, qty, required_by, notes or "Reserve remaining",
-                               f"{token}:{n}" if token else None)
-                numbers.append(r.number)
-            audit.record(s, self.ctx, "RESERVE_REMAINING", EntityType.SITE.value, site.id, site.project_number,
-                         f"{len(numbers)} reservation(s) created for {site.display}: {', '.join(numbers)}")
-        return numbers
-
     # -- Picking list / Load from project --------------------------------------------------------
     def pick_list(self, site_id: int, area: str | None = None, source: str = "RESERVED") -> PickList:
         """What to pick for the project and from which bins, in walking order.
@@ -301,4 +225,4 @@ class AllocationService(BaseService):
                             + (f", {len(pick.short)} material(s) short" if pick.short else ""))
 
 
-__all__ = ["SOURCES", "AllocationService", "PickList", "PickRow", "PickShort", "ReserveLine"]
+__all__ = ["SOURCES", "AllocationService", "PickList", "PickRow", "PickShort"]

@@ -200,9 +200,9 @@ class DashboardService(BaseService):
                 st.join(select(Product.id)).where(and_(Product.is_active.is_(True), st.reserved > 0,
                                                        st.available < 0)).subquery())) or 0
             if over:
-                out.append(Alert("danger", f"{over} product(s) have more reserved for projects than is in stock - "
-                                           f"check the reservations.", "reservations", "over_reserved", over,
-                                 "Over-Reserved Materials", CRITICAL))
+                out.append(Alert("danger", f"{over} product(s) have more project stock than is physically in stock - "
+                                           f"check the project stock.", "reservations", "over_reserved", over,
+                                 "Project Stock Above On Hand", CRITICAL))
         since = date.today() - timedelta(days=SCAN_DAYS)
         no_scan = s.scalar(select(func.count(DeliveryNote.id)).where(
             DeliveryNote.status == DocumentStatus.POSTED.value, DeliveryNote.delivery_date >= since,

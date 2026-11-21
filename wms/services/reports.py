@@ -186,7 +186,7 @@ class ReportService(BaseService):
             rows = [by_id[i] for i in product_ids if i in by_id]
         cols = [Column("Code"), Column("Name"), Column("Type"), Column("Description"), Column("Product Number"),
                 Column("Supplier"), Column("Barcode"), Column("Brand"), Column("Category"), Column("Unit"),
-                Column("On Hand", QTY), Column("Reserved", QTY), Column("Available", QTY),
+                Column("On Hand", QTY), Column("Project Stock", QTY), Column("General Stock", QTY),
                 Column("Incoming", QTY), Column("Minimum Stock", QTY), Column("Reorder Level", QTY),
                 Column("Reorder Quantity", QTY), Column("Unit Cost", MONEY), Column("Stock Value", MONEY, True),
                 Column("Default Bin"), Column("Stock Status"), Column("Active"), Column("Notes"),
@@ -370,7 +370,7 @@ class ReportService(BaseService):
                                              item_types=[f.item_type] if f.item_type else None)
         rows.sort(key=lambda r: (r.product.supplier.name if r.product.supplier else "~", r.product.internal_code))
         cols = [Column("Supplier"), Column("Supplier Code"), Column("Code"), Column("Name"), Column("Status"),
-                Column("Available", QTY), Column("On Hand", QTY), Column("Reserved", QTY), Column("On Order", QTY),
+                Column("General Stock", QTY), Column("On Hand", QTY), Column("Project Stock", QTY), Column("On Order", QTY),
                 Column("Min Level", QTY), Column("Reorder Level", QTY), Column("Reorder Qty", QTY),
                 Column("Suggested Order", QTY), Column("Unit"), Column("Unit Cost", MONEY),
                 Column("Order Value", MONEY, True), Column("Default Bin")]

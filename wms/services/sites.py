@@ -208,6 +208,9 @@ class SiteService(BaseService):
                 delete_project_structure(s, site.id)
                 s.delete(site)
             else:
+                if site.status in OPEN_SITE_STATUSES:
+                    from wms.services.reservations import release_for_closed_site
+                    release_for_closed_site(s, self.ctx, site, reason)
                 site.status = SiteStatus.ARCHIVED.value
         return plan
 
@@ -228,7 +231,7 @@ class SiteService(BaseService):
                 site.end_date = date.today()
             if status not in OPEN_SITE_STATUSES:
                 from wms.services.reservations import release_for_closed_site
-                release_for_closed_site(s, self.ctx, site)
+                release_for_closed_site(s, self.ctx, site, reason)
             s.flush()
             if status == SiteStatus.ARCHIVED.value:
                 plan = self._plan(s, site)

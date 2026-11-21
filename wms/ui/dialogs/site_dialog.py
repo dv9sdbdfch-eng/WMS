@@ -89,10 +89,6 @@ class SiteDialog(QDialog):
             open_site = s.status in OPEN_SITE_STATUSES
             if open_site and app.can(P.GOODS_OUT_POST) and getattr(app, "main_window", None) is not None:
                 quick.append(button("−  Goods Out to this Project", self.goods_out))
-            if open_site and app.can(P.RESERVATIONS_EDIT):
-                quick.append(button("Reserve Stock...", self.reserve))
-                quick.append(button("Reserve Remaining...", self.reserve_remaining,
-                                    tooltip="Reserve everything this project still has To Allocate, in one go"))
             if open_site:
                 quick.append(button("Picking List...", self.picking_list,
                                     tooltip="What to pick for this project, bin by bin in walking order (PDF)"))
@@ -121,22 +117,22 @@ class SiteDialog(QDialog):
         lay.addLayout(h(*extra, None, button("Close", self.reject), self.btn_save))
 
     def _overview(self) -> QWidget:
-        """Project figures on top (Required / Reserved / Issued / Returned / Net), details below."""
+        """Project figures on top (Required / Project stock / Issued / Returned / Net), details below."""
         details = self._details()
         if not self.site:
             return details
         w = QWidget()
         lay = QVBoxLayout(w)
         self.cards = {k: Card(t) for k, t in (("materials", "Materials"), ("required", "Required"),
-                                              ("reserved", "Reserved"), ("issued", "Issued"),
+                                              ("reserved", "Project stock"), ("issued", "Issued"),
                                               ("returned", "Returned"), ("net", "Net Issued"),
-                                              ("remaining", "Remaining"), ("to_allocate", "To Allocate"),
+                                              ("remaining", "Remaining"), ("to_allocate", "Not covered"),
                                               ("value", "Material value on site"))}
         lay.addLayout(h(*self.cards.values()))
-        lay.addWidget(label("Required = the project's material list (a plan, never stock).  Reserved = held in the "
-                            "warehouse for it.  Issued / Returned = posted Goods Out and returns.  Net Issued = "
+        lay.addWidget(label("Required = the project's material list (a plan, never stock).  Project stock = "
+                            "delivered for it and still in the warehouse.  Issued / Returned = posted Goods Out and returns.  Net Issued = "
                             "Issued - Returned.  Remaining = Required - Net Issued (still needed; a return makes that "
-                            "quantity needed again).  To Allocate = Remaining - Reserved (not set aside yet).", "Muted", wrap=True))
+                            "quantity needed again).  Not covered = Remaining - Project stock (still to buy or to issue from general stock).", "Muted", wrap=True))
         lay.addWidget(details, 1)
         self._fill_cards()
         return w
@@ -234,11 +230,11 @@ class SiteDialog(QDialog):
             exp.setMenu(m)
             self.export_btn = exp
             acts.append(exp)
-        sl.addLayout(h(label("What this project needs (Required) and what it has had (Reserved / Issued / "
+        sl.addLayout(h(label("What this project needs (Required) and what it has had (Project stock / Issued / "
                              "Returned). Tick rows to set quantities or take them off the list.", "Muted"),
                        None, *acts))
         sl.addWidget(self.materials, 1)
-        # spec 26: Overview, Materials, Movements, Documents; then Reservations and Audit
+        # spec 26: Overview, Materials, Movements, Documents; then Project stock and Audit
         self.tabs.addTab(sw, "Materials")
         self.summary_tab = sw
         self._materials_loaded = False
@@ -250,7 +246,7 @@ class SiteDialog(QDialog):
         self.tabs.addTab(self.docs, "Documents")
         from wms.ui.dialogs.reservations import ReservationsPanel
         self.reservations = ReservationsPanel(app, site_id=sid)
-        self.tabs.addTab(self.reservations, "Reservations")
+        self.tabs.addTab(self.reservations, "Project stock")
         if app.can(P.AUDIT_VIEW):
             at = DataTable([Col("When", lambda a: a.occurred_at, DATETIME, 130),
                             Col("User", lambda a: a.username, width=100),
@@ -274,17 +270,6 @@ class SiteDialog(QDialog):
             page.tabs.setCurrentIndex(0)
             page.site.set_value(self.site.id)
 
-    def reserve(self) -> None:
-        self.tabs.setCurrentWidget(self.reservations)
-        self.reservations.new()
-        self._fill_cards()
-
-    def reserve_remaining(self) -> None:
-        from wms.ui.dialogs.allocation import ReserveRemainingDialog
-        if ReserveRemainingDialog(self.app, self.site.id, self).exec():
-            self.reservations.refresh()
-            self._fill_cards()
-
     def picking_list(self) -> None:
         from wms.ui.dialogs.allocation import PickListDialog
         PickListDialog(self.app, self.site.id, self).exec()
@@ -307,7 +292,22 @@ class SiteDialog(QDialog):
             self._fill_cards()
 
     def complete(self):
-        from wms.ui.widgets.common import confirm
+        from wms.core.numbers import fmt_qty
+        from wms.ui.widgets.common import ask_text, confirm
+        left = self.app.services.reservations.project_stock(self.site.id)
+        if left:
+            # v1.35 (Ihor 21.11.2026): the leftover goes back to main stock with a record and a reason
+            shown = "\n".join(f"  {ln.code}  {fmt_qty(ln.total)} {ln.unit}  {ln.name}" for ln in left[:12])
+            more = f"\n  ... and {len(left) - 12} more" if len(left) > 12 else ""
+            reason = ask_text(self, "Complete project",
+                              f"{self.site.display} still has project stock:\n{shown}{more}\n\nCompleting the "
+                              f"project returns it to main stock (a Return to main record is kept in the "
+                              f"project's history). Why is it left over?")
+            if reason and run(self, self.app.services.sites.set_status, self.site.id, SiteStatus.COMPLETED.value,
+                              reason):
+                self.app.changed()
+                self.accept()
+            return
         if confirm(self, "Complete project",
                    f"Mark {self.site.display} as completed?\n\nIt disappears from normal project selection, so "
                    f"no new material can be issued to it by mistake. Its full history stays available "

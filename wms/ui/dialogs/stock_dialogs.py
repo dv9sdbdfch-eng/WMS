@@ -17,6 +17,7 @@ from wms.ui.widgets.common import (
     DateEdit,
     DecimalEdit,
     PickCombo,
+    ask_other_projects,
     button,
     confirm,
     h,
@@ -331,9 +332,14 @@ class ProductionEntryDialog(QDialog):
         header = {"finished_product_id": self.product.value(), "quantity": qty, "output_bin_id": self.bin.value(),
                   "production_date": self.date.value(), "site_id": self.site.value(), "notes": self.notes.text(),
                   "client_token": self._token}
+        go_on, other_reason = ask_other_projects(self, self.app, header["site_id"],
+                                                 [(v.product_id, v.quantity) for v in lines],
+                                                 "this production" if not header["site_id"] else "this project")
+        if not go_on:
+            return
         order = run_with_override(self, self.app.can(P.STOCK_OVERRIDE_NEGATIVE), self.app.services.production.post,
                                   header=header, materials=[MaterialInput(v.product_id, v.quantity, v.bin_id)
-                                                            for v in lines])
+                                                            for v in lines], other_projects_reason=other_reason)
         if order:
             self.app.changed()
             info(self, "Production recorded", f"{order.order_number} has been posted.")

@@ -12,6 +12,7 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 
+from conftest import hand_reserve
 from openpyxl import load_workbook
 
 from wms.config import AppConfig
@@ -80,7 +81,7 @@ def test_required_scenario(svc, tmp_path, monkeypatch):
     assert row.on_hand == D("100") and bin_qty(svc, h3311, b04) == D("100")
 
     # 6. Reserve 30 for Project A.
-    res = svc.reservations.reserve({"product_id": h3311.id, "site_id": project_a.id, "quantity": "30"})
+    res = hand_reserve(svc, {"product_id": h3311.id, "site_id": project_a.id, "quantity": "30"})
     reconciled(svc)
     # 7. Verify Available = 70 (a reservation is not a Goods Out: On Hand is unchanged).
     row = svc.products.row(h3311.id)

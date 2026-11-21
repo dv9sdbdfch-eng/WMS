@@ -22,14 +22,15 @@ query per row.
 Project figures (spec section 6; UI refactor spec 24) are separate things and are never mixed up:
 
 * Required   - the project material list (``project_materials``; Excel / manual entry);
-* Reserved   - active reservations for the project still to be issued (stock stays in its bin);
+* Reserved   - the project's stock (shown as "Project stock"): delivered for it with Goods In
+               (and, before v1.35, reserved by hand), not yet issued; stock stays in its bin;
 * Issued     - posted Goods Out to the project (reversals netted off);
 * Returned   - posted returns from the project (reversals netted off);
 * Net Issued - Issued - Returned (what is physically on the project now);
 * Remaining  - Required - Net Issued, never below 0: what the project still needs from the
                warehouse (v1.21, Ihor 09.11.2026 - before it also took off Reserved).
-* To Allocate - Remaining - Reserved, never below 0: still needed and not set aside yet, i.e.
-               still to be reserved (or bought). Both are blank when the material is not on
+* To Allocate - shown as "Not covered" (v1.35): Remaining - project stock, never below 0: still
+               needed and not in the project's stock (issue it from general stock, or buy it). Both are blank when the material is not on
                the project's list (no Required quantity).
 
 None of them changes stock; only Goods In / Out / Transfer / Return / Adjustment / Stocktake do.
@@ -65,8 +66,6 @@ from wms.db.models import (
     Category,
     DeliveryNote,
     DeliveryNoteLine,
-    GoodsIssue,
-    GoodsIssueLine,
     Location,
     Product,
     ProjectMaterial,
@@ -93,8 +92,8 @@ STOCK_CHOICES = {
     "IN_STOCK": "In Stock",
     "LOW_STOCK": "Low Stock",
     "OUT_OF_STOCK": "Out of Stock",
-    "RESERVED": "Reserved",
-    "AVAILABLE": "Available",
+    "RESERVED": "Has project stock",
+    "AVAILABLE": "Has general stock",
     "INCOMING": "Incoming",
 }
 BIN_STATES = {
@@ -124,7 +123,7 @@ def remaining_qty(required: Decimal | None, net_issued: Decimal) -> Decimal | No
 
 
 def to_allocate_qty(remaining: Decimal | None, reserved: Decimal) -> Decimal | None:
-    """To Allocate = Remaining - Reserved, never below 0."""
+    """Not covered (To Allocate) = Remaining - project stock, never below 0."""
     if remaining is None:
         return None
     left = remaining - reserved
@@ -389,10 +388,8 @@ class _Stock:
 
     def __init__(self):
         totals = product_totals_query().subquery()
-        issued = (select(GoodsIssueLine.reservation_id.label("rid"), func.sum(GoodsIssueLine.quantity).label("q"))
-                  .join(GoodsIssue, GoodsIssue.id == GoodsIssueLine.issue_id)
-                  .where(GoodsIssue.status == DocumentStatus.POSTED.value, GoodsIssueLine.reservation_id.is_not(None))
-                  .group_by(GoodsIssueLine.reservation_id).subquery())
+        from wms.services.reservations import used_query
+        issued = used_query()
         left = StockReservation.quantity - func.coalesce(issued.c.q, 0)
         res = (select(StockReservation.product_id.label("pid"),
                       func.sum(case((left > 0, left), else_=0)).label("reserved"))
@@ -458,10 +455,8 @@ class _Project:
                     .group_by(m.product_id).subquery())
         self.req = (select(ProjectMaterial.product_id.label("pid"), ProjectMaterial.required_qty.label("required"))
                     .where(ProjectMaterial.site_id == site_id).subquery())
-        gi_issued = (select(GoodsIssueLine.reservation_id.label("rid"), func.sum(GoodsIssueLine.quantity).label("q"))
-                     .join(GoodsIssue, GoodsIssue.id == GoodsIssueLine.issue_id)
-                     .where(GoodsIssue.status == DocumentStatus.POSTED.value, GoodsIssueLine.reservation_id.is_not(None))
-                     .group_by(GoodsIssueLine.reservation_id).subquery())
+        from wms.services.reservations import used_query
+        gi_issued = used_query()
         left = StockReservation.quantity - func.coalesce(gi_issued.c.q, 0)
         self.res = (select(StockReservation.product_id.label("pid"),
                            func.sum(case((and_(StockReservation.status == ReservationStatus.ACTIVE.value, left > 0), left),
