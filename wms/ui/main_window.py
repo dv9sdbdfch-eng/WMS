@@ -253,17 +253,23 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+F"), self, self.focus_search)  # kept: people already use it
         QShortcut(QKeySequence("F5"), self, self.refresh_current)
         # Warehouse keys (spec 7 / 48): the three everyday operations without the mouse.
-        hints = []
+        hints, links = [], []
         for key, text, sc in QUICK_ACTIONS:
             if key in self.quick_keys:
                 QShortcut(QKeySequence(sc), self, lambda k=key: self.quick_action(k))
                 hints.append(f"{sc} {text.split(maxsplit=1)[1]}")
+                links.append(f"<a href='{key}' style='color:#175CD3; text-decoration:none'>{hints[-1]}</a>")
         QShortcut(QKeySequence("Ctrl+D"), self, lambda: self.go("dashboard"))
         QShortcut(QKeySequence("Ctrl+B"), self, lambda: self.set_panel("sidebar", not self.sidebar.isVisible()))
         QShortcut(QKeySequence("F11"), self, self.toggle_focus)
         hints += ["Ctrl+K Search / scan", "Ctrl+D Dashboard", "F5 Refresh", "Ctrl+B Menu", "F11 Focus"]
         self.shortcut_hints = hints
-        self.keys_hint = label("   ·   ".join(hints), "Muted")
+        # the F2 / F3 / F4 hints are links too: one click opens the form (Ihor removed the buttons
+        # on 14/11/2026, the keys and these hints stay)
+        self.keys_hint = label("   ·   ".join(links + hints[len(links):]), "Muted")
+        self.keys_hint.setTextFormat(Qt.TextFormat.RichText)
+        self.keys_hint.linkActivated.connect(self.quick_action)
+        self.keys_hint.setToolTip("Click F2 / F3 / F4 to open the form, or press the key")
         self.statusBar().addPermanentWidget(self.keys_hint)
         self.statusBar().showMessage("Ready")
         app.data_changed.connect(self._data_changed)

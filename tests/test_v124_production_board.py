@@ -222,105 +222,215 @@ def _page(win):
     return win.page("production_board")
 
 
-def _cell(page, unit_id, piece, col):
-    t = page.table
-    for i in range(t.proxy.rowCount()):
-        idx = t.proxy.index(i, col)
-        r = page.rows[t.proxy.mapToSource(idx).row()]
-        if r.key == (unit_id, piece):
-            return idx
-    raise AssertionError("row not shown")
-
-
-def test_screen_rows_cards_and_columns(ui, site):  # noqa: F811
-    _app, win, msgs, _ = ui
-    page = _page(win)
-    m = page.table.model_
-    assert [m.headerData(i, __import__("PySide6.QtCore").QtCore.Qt.Orientation.Horizontal)
-            for i in range(m.columnCount())] == ["Project", "Block", "Level", "Unit", "Quantity", "Done",
-                                                 "Dispatched", "On site"]
-    assert page.table.proxy.rowCount() == 8
-    assert set(page.cards) == {None, site.tri.id, site.may.id}
-    assert not _errors(msgs)
-
-
-def test_click_marks_today_and_colours_row(ui, site):  # noqa: F811
-    from PySide6.QtCore import Qt
-    from PySide6.QtGui import QColor
-
-    from wms.ui.pages.production_board import ROW_COLOURS
-    _app, win, msgs, _ = ui
-    page = _page(win)
-    idx = _cell(page, site.k01.id, 1, 6)
-    assert idx.data() == ""                      # Dispatched waits for Done
-    page.table.clicked.emit(idx)
-    assert row(svc_of(win), site.k01.id).status == NOT_STARTED
-    page.table.clicked.emit(_cell(page, site.k01.id, 1, 5))
-    assert _cell(page, site.k01.id, 1, 5).data().startswith("✔")
-    assert row(svc_of(win), site.k01.id).date_of(STAGE_DONE) == TODAY
-    bg = _cell(page, site.k01.id, 1, 0).data(Qt.ItemDataRole.BackgroundRole).color()
-    assert bg == QColor(ROW_COLOURS[STAGE_DONE])
-    card = page.cards[site.tri.id]
-    assert "Done <b>1</b>" in card.nums.text()
-    assert _cell(page, site.k01.id, 1, 6).data() == "○ Mark"
-    assert not _errors(msgs)
+def _item(page, key):
+    """The tree row with this node key (opens the groups above it)."""
+    page.expand_all(True)
+    for it in page.tree.items():
+        n = page.tree.node(it)
+        if n is not None and n.kind == "type":
+            it.setExpanded(True)
+    for it in page.tree.items():
+        n = page.tree.node(it)
+        if n is not None and n.key == key:
+            return it
+    raise AssertionError(f"row {key} not shown")
 
 
 def svc_of(win):
     return win.app.services
 
 
-def test_card_click_and_filters(ui, site):  # noqa: F811
+def test_screen_tree_and_project_cards(ui, site):  # noqa: F811
+    from wms.ui.pages.production_board import COLUMNS
     _app, win, msgs, _ = ui
     page = _page(win)
-    page.pick_project(site.may.id)
-    assert page.table.proxy.rowCount() == 2 and page.cards[site.may.id].active
-    page.pick_project(site.may.id)               # the active card again: all projects
-    assert page.table.proxy.rowCount() == 8
-    assert not hasattr(page, "f_manager")         # no manager filter (Ihor 14/11/2026)
-    page.f_project.setCurrentIndex(page.f_project.findData(site.tri.id))
-    assert page.table.proxy.rowCount() == 6
-    page.f_block.setCurrentIndex(page.f_block.findData("Block A"))
-    page.f_level.setCurrentIndex(page.f_level.findData("Level 1"))
-    assert page.table.proxy.rowCount() == 4      # kitchen K01 + 3 wardrobes
-    svc_of(win).unit_progress.mark(site.wardrobe.id, 2, STAGE_DONE)
-    page.refresh()
-    page.f_stage[STAGE_DONE].setCurrentIndex(page.f_stage[STAGE_DONE].findData(True))
-    assert page.table.proxy.rowCount() == 1
-    page.f_stage[STAGE_DONE].setCurrentIndex(page.f_stage[STAGE_DONE].findData(False))
-    assert page.table.proxy.rowCount() == 3
-    page.clear_filters()
-    page.search.setText("wardrobe")
-    page.search.search.emit("wardrobe")
-    assert page.table.proxy.rowCount() == 3
+    hdr = page.tree.headerItem()
+    assert [hdr.text(i) for i in range(hdr.columnCount())] == list(COLUMNS)
+    tops = [page.tree.node(page.tree.topLevelItem(i)) for i in range(page.tree.topLevelItemCount())]
+    assert [n.kind for n in tops] == ["project", "project"] and [n.qty for n in tops] == [2, 6]
+    assert set(page.cards) == {None, site.tri.id, site.may.id}
+    page.pick_project(site.tri.id)
+    tops = [page.tree.node(page.tree.topLevelItem(i)) for i in range(page.tree.topLevelItemCount())]
+    # one project: its blocks, then the units directly in the project
+    assert [(n.kind, n.text) for n in tops] == [("block", "Block A"), ("piece", "Reception")]
+    ward = page.tree.node(_item(page, f"U{site.wardrobe.id}"))
+    assert ward.kind == "type" and ward.qty == 3       # one row for the unit type, pieces under it
+    assert _item(page, f"P{site.wardrobe.id}:3").text(0) == "#3 of 3"
     assert not _errors(msgs)
 
 
-def test_filters_sit_in_the_table_header(ui, site):  # noqa: F811
-    from PySide6.QtWidgets import QApplication
+def test_click_marks_today_and_colours_row(ui, site):  # noqa: F811
+    from PySide6.QtGui import QColor
+
+    from wms.ui.pages.production_board import ROW_COLOURS
     _app, win, msgs, _ = ui
-    win.resize(1366, 768)
     page = _page(win)
-    QApplication.processEvents()
-    hdr = page.table.filter_header
-    for col, w in hdr.editors.items():
-        assert w.parent() is hdr and w.isVisible()
-        assert abs(w.geometry().left() - hdr.sectionViewportPosition(col)) <= 4   # under its own column
-        assert w.geometry().top() >= hdr.title_height()                            # under the title
-    assert sorted(hdr.editors) == [0, 1, 2, 3, 5, 6, 7]
+    page.pick_project(site.tri.id)
+    key = f"P{site.k01.id}:1"
+    it = _item(page, key)
+    assert it.text(3) == ""                          # Dispatched waits for Done
+    page.tree.itemClicked.emit(it, 3)
+    assert row(svc_of(win), site.k01.id).status == NOT_STARTED
+    page.tree.itemClicked.emit(it, 2)
+    assert row(svc_of(win), site.k01.id).date_of(STAGE_DONE) == TODAY
+    it = _item(page, key)
+    assert it.text(2).startswith("✔") and it.text(3) == "○ Mark"
+    assert it.background(0).color() == QColor(ROW_COLOURS[STAGE_DONE])
+    assert "Done <b>1</b>" in page.cards[site.tri.id].nums.text()
+    level = page.tree.node(_item(page, f"L{site.l1.id}"))
+    assert level.count(STAGE_DONE) == 1 and level.qty == 4   # running total on the level row
+    assert not _errors(msgs)
+
+
+def test_mark_next_units_from_a_group(ui, site, monkeypatch):  # noqa: F811
+    from PySide6.QtWidgets import QDialog
+
+    from wms.ui.pages import production_board as pb
+    _app, win, msgs, _ = ui
+    page = _page(win)
+    page.pick_project(site.tri.id)
+    ward = page.tree.node(_item(page, f"U{site.wardrobe.id}"))
+    page.mark_next(ward, STAGE_DONE, count=2)
+    assert svc_of(win).unit_norms.units_done(site.wardrobe.id) == D(2)
+    assert [r.piece_no for r in rows_of(svc_of(win)) if r.unit_id == site.wardrobe.id
+            and STAGE_DONE in r.marks] == [1, 2]                 # the first pieces
+    # a click on the "2/3" opens the dialog with the units that can still be marked
+    seen = {}
+
+    def accept(dlg):
+        seen["most"] = dlg.count.maximum()
+        return QDialog.DialogCode.Accepted
+    monkeypatch.setattr(pb.MarkDialog, "exec", accept)
+    page.tree.itemClicked.emit(_item(page, f"U{site.wardrobe.id}"), 2)
+    assert seen["most"] == 1 and svc_of(win).unit_norms.units_done(site.wardrobe.id) == D(3)
+    # Dispatched for the whole level: only the made units can go
+    level = page.tree.node(_item(page, f"L{site.l1.id}"))
+    page.mark_next(level, STAGE_DISPATCHED, count=3)
+    rows = [r for r in rows_of(svc_of(win)) if r.level == "Level 1"]
+    assert sum(STAGE_DISPATCHED in r.marks for r in rows) == 3
+    assert not _errors(msgs)
+
+
+def test_show_filter_search_and_project_search(ui, site):  # noqa: F811
+    _app, win, msgs, _ = ui
+    svc_of(win).unit_progress.mark(site.wardrobe.id, 2, STAGE_DONE)
+    page = _page(win)
+    page.refresh()
+    assert len(page.shown_rows()) == 8
+    page.show_combo.setCurrentIndex(page.show_combo.findData("MADE"))
+    assert [r.key for r in page.shown_rows()] == [(site.wardrobe.id, 2)]
+    page.show_combo.setCurrentIndex(page.show_combo.findData("TODO"))
+    assert len(page.shown_rows()) == 7
+    page.show_combo.setCurrentIndex(0)
+    page.search.setText("wardrobe")
+    page.search.search.emit("wardrobe")
+    assert len(page.shown_rows()) == 3
+    assert page.count.text() == "3 of 8 units shown"
+    page.search.setText("")
+    page.search.search.emit("")
+    page.pick_project(site.may.id)
+    assert len(page.shown_rows()) == 2 and page.cards[site.may.id].active
+    page.pick_project(site.may.id)               # the active card again: all projects
+    assert len(page.shown_rows()) == 8 and page.cards[None].active
+    page.find_project.setText("john")            # manager name finds the project card
+    assert [page.plist.item(i).isHidden() for i in range(page.plist.count())] == [False, True, False]
+    assert not _errors(msgs)
 
 
 def test_select_several_and_mark(ui, site):  # noqa: F811
-    from PySide6.QtCore import QItemSelectionModel
     _app, win, msgs, _ = ui
     page = _page(win)
-    sm = page.table.selectionModel()
-    for p in (1, 2, 3):
-        sm.select(_cell(page, site.wardrobe.id, p, 0),
-                  QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows)
-    page.table.clicked.emit(_cell(page, site.wardrobe.id, 2, 5))
+    page.pick_project(site.tri.id)
+    items = [_item(page, f"P{site.wardrobe.id}:{p}") for p in (1, 2, 3)]
+    for it in items:
+        it.setSelected(True)
+    page.tree.itemClicked.emit(items[1], 2)
     assert svc_of(win).unit_norms.units_done(site.wardrobe.id) == D(3)
     assert not _errors(msgs)
+
+
+def test_mark_next_only_marks_units_the_filter_shows(ui, site):  # noqa: F811
+    _app, win, msgs, _ = ui
+    page = _page(win)
+    page.pick_project(site.tri.id)
+    page.search.setText("wardrobe")
+    page.search.search.emit("wardrobe")
+    level = page.tree.node(_item(page, f"L{site.l1.id}"))
+    assert len(level.markable(STAGE_DONE, page.filtering)) == 3      # not the kitchen K01 next to them
+    page.mark_next(level, STAGE_DONE, count=3)
+    rows = rows_of(svc_of(win))
+    assert sum(STAGE_DONE in r.marks for r in rows if r.unit_id == site.wardrobe.id) == 3
+    assert row(svc_of(win), site.k01.id).status == NOT_STARTED
+    assert not _errors(msgs)
+
+
+def test_open_groups_stay_open_after_a_mark(ui, site):  # noqa: F811
+    _app, win, msgs, _ = ui
+    page = _page(win)
+    page.pick_project(site.tri.id)
+    _item(page, f"U{site.wardrobe.id}")             # opens the wardrobe pieces
+    page.mark_rows([r for r in page.rows if r.key == (site.wardrobe.id, 1)], STAGE_DONE)
+    ward = next(it for it in page.tree.items() if page.tree.node(it) and page.tree.node(it).key == f"U{site.wardrobe.id}")
+    assert ward.isExpanded() and ward.child(0).text(2).startswith("✔")
+    assert not _errors(msgs)
+
+
+def test_view_only_user_cannot_mark(ui, site, monkeypatch):  # noqa: F811
+    from wms.core.permissions import P
+    _app, win, msgs, _ = ui
+    page = _page(win)
+    has = win.app.ctx.has
+    monkeypatch.setattr(win.app.ctx, "has", lambda perm: perm != P.SITES_EDIT and has(perm))
+    page.refresh()
+    page.pick_project(site.tri.id)
+    it = _item(page, f"P{site.k01.id}:1")
+    assert it.text(2) == ""                          # no "○ Mark" to click
+    page.tree.itemClicked.emit(it, 2)
+    page.tree.itemClicked.emit(_item(page, f"U{site.wardrobe.id}"), 2)
+    assert all(not r.marks for r in rows_of(svc_of(win)))
+    assert not _errors(msgs)
+
+
+def test_status_bar_keys_are_links(ui):  # noqa: F811
+    from PySide6.QtWidgets import QApplication
+    _app, win, msgs, _ = ui
+    assert "href='goods_in'" in win.keys_hint.text() and "F2 Goods In" in win.keys_hint.text()
+    win.keys_hint.linkActivated.emit("goods_in")     # a click on "F2 Goods In" opens Goods In
+    QApplication.processEvents()
+    assert win.stack.currentWidget() is win.page("goods_in")
+    assert not _errors(msgs)
+
+
+def test_opening_a_big_level_is_quick():
+    import time
+
+    from wms.services.unit_progress import PieceRow
+    from wms.ui.pages.production_board import Node, children
+    rows = [PieceRow(u, p, 50, 1, "TRI", "Tribeca", None, "", 1, "Block A", 1, "Level 1", f"K{u}", "Kitchen")
+            for u in range(1000) for p in range(1, 51)]
+    level = Node("level", "L1", "Level 1", rows, rows)
+    t = time.perf_counter()
+    kids = children(level)
+    assert len(kids) == 1000 and kids[0].qty == 50
+    assert time.perf_counter() - t < 0.5
+
+
+def test_end_date_and_dispatched_warnings():
+    from wms.services.unit_progress import Mark, PieceRow, ProjectCard
+    from wms.ui.pages.production_board import end_warning, stale_dispatched
+    card = ProjectCard(1, "TRI", "Tribeca", "", "ACTIVE", TODAY + timedelta(days=6))
+    assert end_warning(card, 5, 16) == "⚠ ends in 6 day(s), 69% not made"
+    assert end_warning(card, 16, 16) == ""
+    card.end_date = TODAY - timedelta(days=2)
+    assert end_warning(card, 0, 4).startswith("⚠ 2 day(s) overdue")
+    card.end_date = TODAY + timedelta(days=60)
+    assert end_warning(card, 0, 4) == ""
+    r = PieceRow(1, 1, 1, 1, "TRI", "Tribeca", None, "", None, "", None, "", "K01", "Kitchen")
+    r.marks = {STAGE_DONE: Mark(1, STAGE_DONE, TODAY - timedelta(days=9)),
+               STAGE_DISPATCHED: Mark(2, STAGE_DISPATCHED, TODAY - timedelta(days=6))}
+    assert stale_dispatched([r]) == [r]
+    r.marks[STAGE_DISPATCHED] = Mark(2, STAGE_DISPATCHED, TODAY - timedelta(days=2))
+    assert stale_dispatched([r]) == []
 
 
 def test_export(ui, site, tmp_path, monkeypatch):  # noqa: F811
