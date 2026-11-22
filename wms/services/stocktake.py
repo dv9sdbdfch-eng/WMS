@@ -50,6 +50,10 @@ class CountEntry:
     notes: str | None = None
 
 
+#: a stock count made by an Excel import (v1.38): each line's quantity is added, not counted
+IMPORT_ADD = "IMPORT_ADD"
+
+
 class StocktakeService(BaseService):
     # -- reading ------------------------------------------------------------
     def list(self, status: str | None = None, limit: int = 500, with_lines: bool = True) -> list[StockCount]:
@@ -210,6 +214,9 @@ class StocktakeService(BaseService):
         reason = clean_str(reason, "reason", required=True)
         with self.db.session() as s:
             c = self._open_count(s, count_id, (CountStatus.SUBMITTED,))
+            if c.kind == IMPORT_ADD:
+                raise ValidationError("An Excel import cannot be sent back for counting: approve it, or cancel it "
+                                      "and import a corrected file.")
             c.status = CountStatus.OPEN.value
             audit.record(s, self.ctx, "STOCK_COUNT_SENT_BACK", EntityType.STOCK_COUNT.value, c.id, c.count_number,
                          reason)
@@ -221,6 +228,8 @@ class StocktakeService(BaseService):
             c = s.get(StockCount, count_id)
             if c is None:
                 raise NotFoundError("Stock count not found.")
+            if c.kind == IMPORT_ADD:
+                return []
             engine = StockEngine(s, self.ctx)
             return [l for l in c.lines if engine.qty_in_bin(l.product_id, l.bin_id) != l.system_qty]
 
@@ -231,6 +240,8 @@ class StocktakeService(BaseService):
         self.require(P.STOCKTAKE_COUNT)
         with self.db.session() as s:
             c = self._open_count(s, count_id, (CountStatus.OPEN, CountStatus.SUBMITTED))
+            if c.kind == IMPORT_ADD:
+                return 0  # an import adds its quantities to whatever is there: nothing to re-check
             engine = StockEngine(s, self.ctx)
             n = 0
             for l in c.lines:
@@ -311,28 +322,38 @@ class StocktakeService(BaseService):
             def now(l):
                 lvl = levels.get((l.product_id, l.bin_id))
                 return lvl.quantity if lvl else ZERO
-            moved = [l for l in lines if now(l) != l.system_qty]
-            if moved:
-                first = moved[0]
-                raise ValidationError(
-                    f"Stock moved in {len(moved)} counted bin(s) after the count started (first: "
-                    f"{first.product.internal_code} in {first.bin.full_code}). Use 'Re-check moved lines' and "
-                    f"count those again before approving.")
+            adding = c.kind == IMPORT_ADD
+            if not adding:  # a count replaces the system quantity: it must still be the one counted against
+                moved = [l for l in lines if now(l) != l.system_qty]
+                if moved:
+                    first = moved[0]
+                    raise ValidationError(
+                        f"Stock moved in {len(moved)} counted bin(s) after the count started (first: "
+                        f"{first.product.internal_code} in {first.bin.full_code}). Use 'Re-check moved lines' and "
+                        f"count those again before approving.")
+            # an Excel import adds its quantity (counted - system, fixed when imported) to whatever is there now
             todo = [l for l in lines if l.difference]
-            label = require_reason(s, AdjustmentReason.STOCK_COUNT.value, ReasonUse.ADJUSTMENT).label
+            code = AdjustmentReason.OPENING_BALANCE.value if adding else AdjustmentReason.STOCK_COUNT.value
+            mtype = MovementType.OPENING_BALANCE if adding else MovementType.STOCKTAKE_ADJUSTMENT
+            label = require_reason(s, code, ReasonUse.ADJUSTMENT).label
             numbers = next_numbers(s, "ADJUSTMENT", len(todo))
             adjs = []
             for l, number in zip(todo, numbers):
-                reason = (f"{c.count_number}: counted {fmt_qty(l.counted_qty)}, system {fmt_qty(l.system_qty)}"
-                          + (f" - {l.notes}" if l.notes else ""))
+                before = now(l)
+                if adding:
+                    reason = f"{c.count_number}: +{fmt_qty(l.difference)} from Excel" + (
+                        f" ({l.notes})" if l.notes else "")
+                else:
+                    reason = (f"{c.count_number}: counted {fmt_qty(l.counted_qty)}, system {fmt_qty(l.system_qty)}"
+                              + (f" - {l.notes}" if l.notes else ""))
                 adjs.append(StockAdjustment(adjustment_number=number, product_id=l.product_id, bin_id=l.bin_id,
-                                            previous_qty=l.system_qty, new_qty=l.counted_qty,
-                                            difference=l.difference, reason_code=AdjustmentReason.STOCK_COUNT.value,
+                                            previous_qty=before, new_qty=before + l.difference,
+                                            difference=l.difference, reason_code=code,
                                             reason=reason, user_id=self.user.id))
             s.add_all(adjs)
             s.flush()
             moves = engine.post_many([
-                BulkLine(l.product, l.bin, l.difference, MovementType.STOCKTAKE_ADJUSTMENT,
+                BulkLine(l.product, l.bin, l.difference, mtype,
                          doc_type=EntityType.ADJUSTMENT.value, doc_id=a.id, doc_number=a.adjustment_number,
                          notes=f"{label}: {a.reason}") for l, a in zip(todo, adjs)])
             for l, a, mv in zip(todo, adjs, moves):
@@ -340,8 +361,8 @@ class StocktakeService(BaseService):
                 l.adjustment_id = a.id
                 audit.record(s, self.ctx, "STOCK_ADJUSTED", "PRODUCT", l.product_id,
                              f"{l.product.internal_code} @ {l.bin.full_code}", f"{a.adjustment_number}: {label} - "
-                             f"{a.reason}", old={"quantity": l.system_qty},
-                             new={"quantity": l.counted_qty, "difference": l.difference})
+                             f"{a.reason}", old={"quantity": a.previous_qty},
+                             new={"quantity": a.new_qty, "difference": l.difference})
             posted = len(adjs)
             c.status = CountStatus.APPROVED.value
             c.closed_by_id, c.closed_at, c.close_reason = self.user.id, utcnow(), clean_str(note)

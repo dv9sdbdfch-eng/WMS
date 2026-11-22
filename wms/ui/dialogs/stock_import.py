@@ -1,6 +1,6 @@
-"""Stock quantities from Excel (v1.38): choose the file -> see what will change -> create a stock
-count for approval. Nothing in stock changes here: a manager approves the count on the Stocktake
-screen, and the same file imported twice changes nothing the second time."""
+"""Stock from Excel (v1.38): choose the file -> see what will be added -> create an import for
+approval. Nothing in stock changes here: a manager approves it on the Stocktake screen. Each row's
+quantity is ADDED to the bin; the same file is not added twice by mistake."""
 
 from __future__ import annotations
 
@@ -10,11 +10,11 @@ from PySide6.QtWidgets import QComboBox, QDialog, QFileDialog, QLineEdit, QSizeP
 
 from wms.services.stock_import import OK, PROBLEM, SAME, StockImportPlan
 from wms.ui.widgets import tasks
-from wms.ui.widgets.common import INT, QTY, Col, DataTable, button, h, label, show_error
+from wms.ui.widgets.common import INT, QTY, Col, DataTable, button, confirm, h, label, show_error
 
-STATUS_TEXT = {OK: "Will change", SAME: "Matches", PROBLEM: "Left out"}
-FILTERS = (("All rows", None), ("Will change", OK), ("Left out (problems)", PROBLEM), ("To check", "WARN"),
-           ("Already match", SAME))
+STATUS_TEXT = {OK: "Will add", SAME: "Nothing (0)", PROBLEM: "Left out"}
+FILTERS = (("All rows", None), ("Will add", OK), ("Left out (problems)", PROBLEM), ("To check", "WARN"),
+           ("Nothing to add", SAME))
 
 
 class StockImportDialog(QDialog):
@@ -24,14 +24,13 @@ class StockImportDialog(QDialog):
         self.svc = app.services.stock_import
         self.plan: StockImportPlan | None = None
         self.count = None
-        self.setWindowTitle("Import stock quantities from Excel")
+        self.setWindowTitle("Add stock from Excel")
         self.resize(1100, 640)
         lay = QVBoxLayout(self)
         lay.addWidget(label(
-            "The file sets the quantity of each material in each bin. Columns: <b>Code</b>, <b>Bin</b> (blank = the "
-            "material's default bin) and <b>Quantity</b>. Tip: export the <b>Stock by Bin</b> report to Excel, change "
-            "the quantities and import it back. Type <b>0</b> for an empty bin: a deleted row leaves stock unchanged. "
-            "Stock changes only when a manager approves the count.",
+            "Each row's quantity is <b>added</b> to the stock in the bin. Columns: <b>Code</b>, <b>Bin</b> (blank = "
+            "the material's default bin) and <b>Quantity</b> (the amount to add). Stock changes only when a manager "
+            "approves the import. The same file cannot be added twice by mistake.",
             "InfoBanner", wrap=True))
         self.file = QLineEdit()
         self.file.setReadOnly(True)
@@ -56,13 +55,13 @@ class StockImportDialog(QDialog):
             Col("Material", lambda r: r.product_name, width=190),
             Col("Bin", lambda r: r.bin_full or r.bin_code, width=165),
             Col("In WMS", lambda r: None if r.problem else r.current, QTY, 80),
-            Col("In file", lambda r: r.qty, QTY, 80),
-            Col("Difference", lambda r: r.difference, QTY, 85),
+            Col("Add", lambda r: r.qty, QTY, 80),
+            Col("After", lambda r: r.after, QTY, 85),
             Col("Unit", lambda r: r.unit, width=50),
             Col("Note", lambda r: r.problem or r.warning or "")])
         self.table.set_row_style(lambda r: "low" if r.problem else "muted" if r.status == SAME else None)
         lay.addWidget(self.table, 1)
-        self.b_create = button("Create count for approval", self.create, primary=True)
+        self.b_create = button("Create import for approval", self.create, primary=True)
         self.b_create.setEnabled(False)
         lay.addLayout(h(label("Rows with a problem are left out; fix them in the file and import again.", "Muted"),
                         None, button("Cancel", self.reject), self.b_create))
@@ -113,15 +112,22 @@ class StockImportDialog(QDialog):
         self.table.set_items([r for r in plan.rows if want is None or r.status == want
                               or (want == "WARN" and r.warning and not r.problem)])
         self.summary.setText(plan.summary())
-        self.note.setText(plan.export_note)
-        self.b_create.setEnabled(bool(plan.good))
+        self.note.setText(f"<b>This file was already imported as {plan.imported_before}.</b> Importing it again "
+                          "adds the same quantities a second time." if plan.imported_before else "")
+        self.b_create.setEnabled(bool(plan.changes))
 
     def create(self) -> None:
-        if not self.plan or not self.plan.good:
+        if not self.plan or not self.plan.changes:
+            return
+        again = bool(self.plan.imported_before)
+        if again and not confirm(self, "Import again?", f"This file was already imported as "
+                                 f"{self.plan.imported_before}.\n\nAdd the same quantities a second time?",
+                                 yes="Add again", danger=True):
             return
         try:
-            self.count = tasks.with_progress(self, "Stock import", lambda _p: self.svc.create_count(self.plan),
-                                             text="Creating the stock count...")
+            self.count = tasks.with_progress(self, "Stock import",
+                                             lambda _p: self.svc.create_count(self.plan, allow_repeat=again),
+                                             text="Creating the import...")
         except tasks.Cancelled:
             return
         except Exception as exc:  # noqa: BLE001

@@ -1,24 +1,24 @@
-"""Stock quantities from Excel (v1.38): "set the quantity in each bin to what the file says".
+"""Stock quantities from Excel (v1.38): each row's quantity is ADDED to the bin (Ihor, 22.11.2026).
 
-The file is not posted directly. It becomes a stock count that is already counted and submitted:
-system quantity (what WMS has now) -> counted quantity (the file) -> difference. A manager with
-"Stock adjustments" reviews and approves it on the Stocktake screen, and only then are the
-differences posted (in bulk, ``StockEngine.post_many``). So:
+The file is not posted directly. It becomes a stock import document (a stock count of kind
+IMPORT_ADD) waiting for approval: in WMS now -> + quantity from the file -> after. A manager with
+"Stock adjustments" approves it on the Stocktake screen, and only then is each quantity posted as
+an Opening Balance adjustment (in bulk, ``StockEngine.post_many``). So:
 
-* importing the same file twice changes nothing the second time (the differences are zero);
-* stock that moved between the import and the approval is caught by the normal stocktake check;
+* the same file cannot be added twice by mistake (its SHA-256 fingerprint is remembered);
+* a stock list exported from WMS is refused (adding it would double the stock);
 * rows with a problem (unknown code or bin, bad quantity, duplicate) are listed and left out.
 
 Columns: Code (required), Bin (optional - the material's default bin is used when blank) and
-Quantity (required). The "Stock by Bin" report exported to Excel is a ready-made file.
+Quantity (required, the amount to add).
 """
 
 from __future__ import annotations
 
+import hashlib
 import re
 import zipfile
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
@@ -27,9 +27,9 @@ from sqlalchemy.orm import lazyload
 
 from wms.core.enums import CountStatus, EntityType
 from wms.core.exceptions import ValidationError
-from wms.core.numbers import QTY_PLACES, ZERO, fmt_datetime, fmt_qty, utcnow
+from wms.core.numbers import QTY_PLACES, ZERO, fmt_datetime, utcnow
 from wms.core.permissions import P
-from wms.db.models import Bin, Product, StockCount, StockCountLine, StockLevel, StockMovement, Unit
+from wms.db.models import Bin, Product, StockCount, StockCountLine, StockLevel, Unit
 from wms.services import audit
 from wms.services.base import BaseService
 from wms.services.numbering import next_number
@@ -41,19 +41,13 @@ MAX_ROWS = 50_000
 HEADERS = {
     "code": ("code", "internal code", "product code", "material code", "item code", "sku", "код", "артикул"),
     "bin": ("bin", "bin code", "location", "bin location", "комірка", "місце"),
-    "qty": ("quantity", "qty", "on hand", "stock", "counted", "counted qty", "count", "кількість", "залишок"),
+    "qty": ("quantity", "qty", "quantity to add", "add", "on hand", "stock", "counted", "кількість", "залишок"),
 }
+#: titles WMS writes in cell A1 of its stock exports - adding one of those would double the stock
+STOCK_EXPORTS = ("stock by bin", "current stock", "stock by location")
 
 OK, SAME, PROBLEM = "OK", "SAME", "PROBLEM"
-#: the line WMS writes above every exported report: "My Company Ltd - Generated 21/11/2026 08:00"
-GENERATED = re.compile(r"Generated (\d{2}/\d{2}/\d{4} \d{2}:\d{2})")
-
-
-def _local_to_utc(text: str) -> datetime | None:
-    try:
-        return datetime.strptime(text, "%d/%m/%Y %H:%M").astimezone(UTC)
-    except ValueError:
-        return None
+IMPORT_ADD = "IMPORT_ADD"
 
 
 @dataclass
@@ -70,17 +64,17 @@ class StockImportRow:
     qty: Decimal | None = None
     current: Decimal = ZERO
     problem: str | None = None
-    warning: str | None = None  # used, but worth a look (no unit cost, below project stock)
+    warning: str | None = None  # used, but worth a look (no unit cost)
 
     @property
-    def difference(self) -> Decimal | None:
-        return None if self.problem or self.qty is None else self.qty - self.current
+    def after(self) -> Decimal | None:
+        return None if self.problem or self.qty is None else self.current + self.qty
 
     @property
     def status(self) -> str:
         if self.problem:
             return PROBLEM
-        return SAME if self.difference == ZERO else OK
+        return SAME if self.qty == ZERO else OK
 
 
 @dataclass
@@ -90,8 +84,9 @@ class StockImportPlan:
     header_row: int
     columns: dict[str, int]  # "code" / "bin" / "qty" -> 0-based column
     rows: list[StockImportRow] = field(default_factory=list)
-    #: when WMS exported the file ("Generated dd/mm/yyyy hh:mm" above the header), UTC; None = unknown
-    exported_at: datetime | None = None
+    sha256: str = ""
+    #: an earlier import of this very file ("SC-000123 on 21/11/2026 14:05"), or None
+    imported_before: str | None = None
 
     @property
     def good(self) -> list[StockImportRow]:
@@ -103,21 +98,16 @@ class StockImportPlan:
 
     @property
     def changes(self) -> list[StockImportRow]:
+        """Rows that add something."""
         return [r for r in self.rows if r.status == OK]
 
     def summary(self) -> str:
-        n_change, n_prob = len(self.changes), len(self.problems)
+        n_add, n_prob = len(self.changes), len(self.problems)
         n_warn = sum(1 for r in self.good if r.warning)
-        return (f"{len(self.rows):,} row(s): {n_change:,} will change, {len(self.good) - n_change:,} already match"
+        return (f"{len(self.rows):,} row(s): {n_add:,} will be added"
+                + (f", {len(self.good) - n_add:,} with 0 (nothing to add)" if len(self.good) > n_add else "")
                 + (f", {n_prob:,} with a problem (left out)" if n_prob else "")
                 + (f", {n_warn:,} to check" if n_warn else "") + ".")
-
-    @property
-    def export_note(self) -> str:
-        if self.exported_at is None:
-            return ("The file has no export time, so stock that moved since it was made cannot be checked: "
-                    "delete the rows you did not count.")
-        return f"Exported from WMS {fmt_datetime(self.exported_at)}: rows whose stock moved since then are left out."
 
 
 def _norm(text) -> str:
@@ -130,6 +120,14 @@ def _text(value) -> str:
     if isinstance(value, float) and value.is_integer():
         return str(int(value))
     return " ".join(str(value).split())
+
+
+def _sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
 
 
 def find_columns(values: list) -> dict[str, int]:
@@ -180,12 +178,12 @@ class StockImportService(BaseService):
         try:
             ws = wb[sheet] if sheet else wb.worksheets[0]
             rows = ws.iter_rows(values_only=True)
-            header_row, cols, exported = 0, {}, None
+            header_row, cols = 0, {}
             for i, values in enumerate(rows, start=1):
-                for v in values:
-                    m = GENERATED.search(str(v or ""))
-                    if m and exported is None:
-                        exported = _local_to_utc(m.group(1))
+                if i == 1 and _norm(values[0] if values else "") in STOCK_EXPORTS:
+                    raise ValidationError(
+                        f"This is a stock list exported from WMS ('{_text(values[0])}'). Importing adds each "
+                        "quantity to the bin, so it would double the stock. Use a file with the quantities to add.")
                 found = find_columns(list(values))
                 if "code" in found and "qty" in found:
                     header_row, cols = i, found
@@ -195,8 +193,8 @@ class StockImportService(BaseService):
             if not cols:
                 raise ValidationError(
                     f"Sheet '{ws.title}' has no header row with 'Code' and 'Quantity' columns (and optionally "
-                    "'Bin'). Tip: export the 'Stock by Bin' report to Excel - it has the right columns.")
-            plan = StockImportPlan(path, ws.title, header_row, cols, exported_at=exported)
+                    "'Bin').")
+            plan = StockImportPlan(path, ws.title, header_row, cols, sha256=_sha256(path))
             width = max(cols.values()) + 1
             for n, values in enumerate(rows, start=header_row + 1):
                 values = list(values) + [None] * (width - len(values))
@@ -239,15 +237,6 @@ class StockImportService(BaseService):
                         .where(func.upper(Product.internal_code).in_(chunk))):
                     products[p.internal_code.upper()] = (p, unit_code, allow_dec, default_bin)
             bins = {b.full_code.upper(): b for b in s.scalars(select(Bin).options(lazyload("*")))}
-            # bins where each material has stock now (a blank Bin must not double-count other bins)
-            ids = [v[0].id for v in products.values()]
-            holding: dict[int, set[str]] = {}
-            for i in range(0, len(ids), 900):
-                for pid, code in s.execute(select(StockLevel.product_id, Bin.full_code)
-                                           .join(Bin, Bin.id == StockLevel.bin_id)
-                                           .where(StockLevel.product_id.in_(ids[i:i + 900]),
-                                                  StockLevel.quantity != ZERO)):
-                    holding.setdefault(pid, set()).add(code.upper())
             seen: dict[tuple[int, int], int] = {}
             for r in plan.rows:
                 if r.problem:
@@ -263,11 +252,6 @@ class StockImportService(BaseService):
                     continue
                 if not allow_dec and r.qty != r.qty.to_integral_value():
                     r.problem = f"Counted in whole {unit_code}"
-                    continue
-                if not r.bin_code and default_bin and len(holding.get(p.id, ())) > (
-                        1 if default_bin.upper() in holding.get(p.id, ()) else 0):
-                    n = len(holding[p.id])
-                    r.problem = f"No bin given, and the material is in {n} bin(s) - give the bin"
                     continue
                 bin_code = r.bin_code or default_bin or ""
                 if not bin_code:
@@ -287,46 +271,21 @@ class StockImportService(BaseService):
                     continue
                 seen[key] = r.row
             levels = self._levels(s, list(seen))
-            moved = self._moved_since(s, plan.exported_at, list(seen)) if plan.exported_at else set()
             costs = {v[0].id: v[0].unit_cost for v in products.values()}
-            from wms.services.reservations import reserved_by_product
-            pids = sorted({p for p, _ in seen})
-            held = reserved_by_product(s, pids) if pids else {}
-            on_hand = {}
-            for i in range(0, len(pids), 900):
-                on_hand.update(dict(s.execute(select(StockLevel.product_id, func.sum(StockLevel.quantity))
-                                              .where(StockLevel.product_id.in_(pids[i:i + 900]))
-                                              .group_by(StockLevel.product_id)).all()))
-        change: dict[int, Decimal] = {}
+            earlier = None
+            if plan.sha256:
+                earlier = s.execute(select(StockCount.count_number, StockCount.created_at)
+                                    .where(StockCount.source_sha256 == plan.sha256,
+                                           StockCount.status != CountStatus.CANCELLED.value)
+                                    .order_by(StockCount.id.desc()).limit(1)).first()
+        if earlier:
+            plan.imported_before = f"{earlier[0]} on {fmt_datetime(earlier[1])}"
         for r in plan.rows:
             if r.problem:
                 continue
             r.current = levels.get((r.product_id, r.bin_id), ZERO)
-            if (r.product_id, r.bin_id) in moved and r.qty != r.current:
-                r.problem = f"Stock moved since the file was exported ({fmt_datetime(plan.exported_at)})"
-                continue
-            change[r.product_id] = change.get(r.product_id, ZERO) + (r.qty - r.current)
-            if r.qty > r.current and not costs.get(r.product_id):
+            if r.qty > ZERO and not costs.get(r.product_id):
                 r.warning = "No unit cost: the added stock is valued at £0"
-        for r in plan.rows:
-            if r.problem or r.product_id not in held:
-                continue
-            after = (on_hand.get(r.product_id) or ZERO) + change.get(r.product_id, ZERO)
-            if after < held[r.product_id] and r.qty < r.current:
-                r.warning = (f"On hand would be {fmt_qty(after)}, below project stock {fmt_qty(held[r.product_id])}")
-
-    @staticmethod
-    def _moved_since(s, since: datetime, pairs) -> set[tuple[int, int]]:
-        """(material, bin) pairs with any movement recorded after ``since``."""
-        wanted, out = set(pairs), set()
-        pids = sorted({p for p, _ in pairs})
-        for i in range(0, len(pids), 900):
-            for pid, fb, tb in s.execute(select(StockMovement.product_id, StockMovement.from_bin_id,
-                                                StockMovement.to_bin_id)
-                                         .where(StockMovement.recorded_at > since,
-                                                StockMovement.product_id.in_(pids[i:i + 900]))):
-                out.update(k for k in ((pid, fb), (pid, tb)) if k in wanted)
-        return out
 
     @staticmethod
     def _levels(s, pairs) -> dict[tuple[int, int], Decimal]:
@@ -339,30 +298,44 @@ class StockImportService(BaseService):
                 .where(tuple_(StockLevel.product_id, StockLevel.bin_id).in_(chunk)))})
         return out
 
-    def create_count(self, plan: StockImportPlan, description: str | None = None) -> StockCount:
-        """A stock count made of the file's good rows, already counted and submitted for approval.
-        The system quantity is read again now, so the count compares with what is in WMS today."""
+    def create_count(self, plan: StockImportPlan, description: str | None = None,
+                     allow_repeat: bool = False) -> StockCount:
+        """A stock import document of the file's rows that add something, waiting for approval. Each
+        line keeps "in WMS now" and "after" (= now + quantity); approval adds the difference."""
         self.require(P.STOCKTAKE_COUNT)
-        good = plan.good
+        good = plan.changes
         if not good:
-            raise ValidationError("No row of the file can be used - see the problems listed.")
+            raise ValidationError("No row of the file adds anything - see the problems listed.")
         now = utcnow()
         with self.db.session() as s:
+            if plan.sha256 and not allow_repeat:
+                earlier = s.scalar(select(StockCount).where(StockCount.source_sha256 == plan.sha256,
+                                                            StockCount.status != CountStatus.CANCELLED.value)
+                                   .order_by(StockCount.id.desc()).limit(1))
+                if earlier is not None:
+                    raise ValidationError(f"This file was already imported as {earlier.count_number} on "
+                                          f"{fmt_datetime(earlier.created_at)}. Importing it again would add the "
+                                          "same quantities a second time.")
             levels = self._levels(s, [(r.product_id, r.bin_id) for r in good])
             count = StockCount(count_number=next_number(s, "STOCK_COUNT"), status=CountStatus.SUBMITTED.value,
+                               kind=IMPORT_ADD, source_sha256=plan.sha256 or None,
                                description=(description or f"Excel import: {plan.path.name}")[:200],
-                               notes=(f"From {plan.path.name}, sheet '{plan.sheet}': {len(good)} row(s) used, "
-                                      f"{len(plan.problems)} left out."),
+                               notes=(f"Adds stock from {plan.path.name}, sheet '{plan.sheet}': {len(good)} row(s) "
+                                      f"used, {len(plan.problems)} left out."),
                                created_by_id=self.user.id, submitted_by_id=self.user.id, submitted_at=now)
             s.add(count)
             s.flush()
-            s.add_all([StockCountLine(count_id=count.id, line_no=i, product_id=r.product_id, bin_id=r.bin_id,
-                                      system_qty=levels.get((r.product_id, r.bin_id), ZERO), counted_qty=r.qty,
-                                      counted_by_id=self.user.id, counted_at=now, notes=f"Excel row {r.row}")
-                       for i, r in enumerate(good, start=1)])
-            audit.record(s, self.ctx, "STOCK_COUNT_IMPORTED", EntityType.STOCK_COUNT.value, count.id,
-                         count.count_number, f"{len(good)} line(s) from {plan.path.name} (sheet '{plan.sheet}'), "
-                         f"{len(plan.problems)} row(s) left out. Waiting for approval.")
+            lines = []
+            for i, r in enumerate(good, start=1):
+                current = levels.get((r.product_id, r.bin_id), ZERO)
+                lines.append(StockCountLine(count_id=count.id, line_no=i, product_id=r.product_id, bin_id=r.bin_id,
+                                            system_qty=current, counted_qty=current + r.qty,
+                                            counted_by_id=self.user.id, counted_at=now, notes=f"Excel row {r.row}"))
+            s.add_all(lines)
+            audit.record(s, self.ctx, "STOCK_IMPORTED", EntityType.STOCK_COUNT.value, count.id, count.count_number,
+                         f"{len(good)} line(s) to add from {plan.path.name} (sheet '{plan.sheet}'), "
+                         f"{len(plan.problems)} row(s) left out. Waiting for approval."
+                         + (" Imported again on purpose." if allow_repeat and plan.imported_before else ""))
             count_id = count.id
         from wms.services.stocktake import StocktakeService
         return StocktakeService(self.ctx).get(count_id)

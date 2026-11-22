@@ -49,7 +49,7 @@ from wms.ui.widgets.common import (
 def _area(c) -> str:
     if c.location:
         return c.location.path
-    return "Excel import" if (c.description or "").startswith("Excel import") else "Whole warehouse"
+    return "Excel import (adds stock)" if c.kind == "IMPORT_ADD" else "Whole warehouse"
 
 
 class NewCountDialog(QDialog):
@@ -89,9 +89,9 @@ class StocktakePage(Page):
                                     tooltip="Start one count for every bin where material was not found")
             self.add_action(self.b_flagged)
             # v1.38: quantities from an Excel file -> a count waiting for approval
-            self.add_action(button("Import from Excel...", self.import_excel,
-                                   tooltip="Set stock quantities from an Excel file (Code, Bin, Quantity). "
-                                           "A manager approves the differences."))
+            self.add_action(button("Add stock from Excel...", self.import_excel,
+                                   tooltip="Add quantities from an Excel file (Code, Bin, Quantity) to the bins. "
+                                           "A manager approves the import."))
         self.status = QComboBox()
         for text, val in (("Open and awaiting approval", "active"), ("All counts", None), ("Open", "OPEN"),
                           ("Awaiting approval", "SUBMITTED"), ("Approved", "APPROVED"), ("Cancelled", "CANCELLED")):
@@ -179,11 +179,14 @@ class StocktakePage(Page):
         show_system = bool(c) and (self.can_approve or status is not CountStatus.OPEN)
         self.lines.setColumnHidden(4, not show_system)
         self.lines.setColumnHidden(6, not show_system)
+        adding = bool(c) and c.kind == "IMPORT_ADD"
+        self.lines.setHorizontalHeaderLabels(["Bin", "Code", "Product", "Unit"] + (
+            ["When imported", "After", "Add"] if adding else ["System", "Counted", "Difference"]) + ["Notes"])
         self.lines.setRowCount(0)
         for b, ok in ((self.b_save, editable), (self.b_add, editable), (self.b_submit, editable),
                       (self.b_recheck, bool(c) and status in (CountStatus.OPEN, CountStatus.SUBMITTED)
-                       and self.can_count),
-                      (self.b_back, bool(c) and status is CountStatus.SUBMITTED and self.can_approve),
+                       and self.can_count and not adding),
+                      (self.b_back, bool(c) and status is CountStatus.SUBMITTED and self.can_approve and not adding),
                       (self.b_approve, bool(c) and status is CountStatus.SUBMITTED and self.can_approve),
                       (self.b_cancel, bool(c) and status in (CountStatus.OPEN, CountStatus.SUBMITTED)
                        and self.can_count),
@@ -345,10 +348,13 @@ class StocktakePage(Page):
         c = self.current
         diffs = [l for l in c.lines if l.difference]
         value = sum(((l.difference or 0) * (l.product.unit_cost or 0) for l in diffs), 0)
-        if not confirm(self, "Approve count",
-                       f"Post {len(diffs)} stock adjustment(s) from {c.count_number}?\n\nNet value of the differences: "
-                       f"£{value:,.2f}. Each adjustment is recorded with reason 'Stock Count Difference' and your name.",
-                       yes="Approve"):
+        if c.kind == "IMPORT_ADD":
+            text = (f"Add the stock of {c.count_number} ({len(diffs)} line(s)) to the bins?\n\nValue added: "
+                    f"£{value:,.2f}. Each line is recorded as an 'Opening Balance' adjustment with your name.")
+        else:
+            text = (f"Post {len(diffs)} stock adjustment(s) from {c.count_number}?\n\nNet value of the differences: "
+                    f"£{value:,.2f}. Each adjustment is recorded with reason 'Stock Count Difference' and your name.")
+        if not confirm(self, "Approve", text, yes="Approve"):
             return
         done = run(self, self.app.services.stocktake.approve, c.id)
         if done:
@@ -366,9 +372,9 @@ class StocktakePage(Page):
         self.status.setCurrentIndex(0)
         self.refresh()
         self._show(c)
-        info(self, "Stock import", f"{c.count_number} created with {len(c.lines):,} line(s) and is waiting for "
-             f"approval." + ("" if self.can_approve else " Ask a manager to approve it here on the Stocktake "
-                             "screen.") + " Stock changes only when it is approved.")
+        info(self, "Stock import", f"{c.count_number} created with {len(c.lines):,} line(s) to add and is waiting "
+             f"for approval." + ("" if self.can_approve else " Ask a manager to approve it here on the Stocktake "
+                                 "screen.") + " Stock changes only when it is approved.")
 
     def cancel(self):
         reason = ask_text(self, "Cancel count", "Why is this count being cancelled?")

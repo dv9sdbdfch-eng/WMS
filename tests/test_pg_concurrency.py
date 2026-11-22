@@ -164,7 +164,7 @@ def test_two_managers_approve_the_same_count(svc, sample, cfg, tmp_path):
     assert len(results) == 1 and len(errors) == 1
     assert isinstance(next(iter(errors.values())), ValidationError)
     [a] = svc.stock.adjustments()
-    assert (a.previous_qty, a.new_qty) == (D("10"), D("6"))
+    assert (a.previous_qty, a.new_qty) == (D("10"), D("16"))
 
 
 def test_two_pcs_adjust_the_same_bin(svc, sample, cfg):
@@ -185,18 +185,16 @@ def _bin_qty(svc, product_id, bin_id):
         return StockEngine(s, svc.ctx).qty_in_bin(product_id, bin_id)
 
 
-def test_two_counts_put_first_stock_into_the_same_empty_bin(svc, sample, cfg, tmp_path):
+def test_two_counts_put_first_stock_into_the_same_empty_bin(svc, sample, cfg):
     """No balance row to lock yet: one is created first, so the second approval waits and is refused."""
-    from openpyxl import Workbook
-
     from wms.core.exceptions import ValidationError
+    from wms.services.stocktake import CountEntry
     ids = []
-    for name in ("a", "b"):
-        wb = Workbook()
-        wb.active.append(["Code", "Bin", "Quantity"])
-        wb.active.append(["MDF-18", sample.bin2.full_code, 5])
-        wb.save(tmp_path / f"{name}.xlsx")
-        ids.append(svc.stock_import.create_count(svc.stock_import.read(tmp_path / f"{name}.xlsx")).id)
+    for _ in range(2):
+        c = svc.stocktake.create(None, extra_pairs=[(sample.mdf.id, sample.bin2.id)], bin_ids=[sample.bin2.id])
+        svc.stocktake.record_counts(c.id, [CountEntry(c.lines[0].id, "5")])
+        svc.stocktake.submit(c.id)
+        ids.append(c.id)
     results, errors = together(pcs(cfg, 2), lambda pc, i: pc.stocktake.approve(ids[i]))
     assert len(results) == 1 and isinstance(next(iter(errors.values())), ValidationError)
     assert _bin_qty(svc, sample.mdf.id, sample.bin2.id) == D("5")
