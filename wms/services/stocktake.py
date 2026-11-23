@@ -19,18 +19,28 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import selectinload
 
-from wms.core.enums import AdjustmentReason, CountStatus, EntityType
+from wms.core.enums import AdjustmentReason, CountStatus, EntityType, MovementType, ReasonUse
 from wms.core.exceptions import NotFoundError, PermissionDeniedError, ValidationError
 from wms.core.numbers import ZERO, fmt_qty, to_qty, utcnow
 from wms.core.permissions import P
-from wms.db.models import Bin, BinCountRequest, Location, Product, StockCount, StockCountLine, StockLevel
+from wms.db.models import (
+    Bin,
+    BinCountRequest,
+    Location,
+    Product,
+    StockAdjustment,
+    StockCount,
+    StockCountLine,
+    StockLevel,
+)
 from wms.services import audit
 from wms.services.base import BaseService, clean_str, prefix_pattern
-from wms.services.numbering import next_number
-from wms.services.stock_engine import StockEngine
+from wms.services.numbering import next_number, next_numbers
+from wms.services.reasons import require_reason
+from wms.services.stock_engine import BulkLine, StockEngine
 
 
 @dataclass
@@ -40,15 +50,33 @@ class CountEntry:
     notes: str | None = None
 
 
+#: a stock count made by an Excel import (v1.38): each line's quantity is added, not counted
+IMPORT_ADD = "IMPORT_ADD"
+
+
 class StocktakeService(BaseService):
     # -- reading ------------------------------------------------------------
-    def list(self, status: str | None = None, limit: int = 500) -> list[StockCount]:
-        q = (select(StockCount).options(selectinload(StockCount.lines))
-             .order_by(StockCount.created_at.desc(), StockCount.id.desc()).limit(limit))
+    def list(self, status: str | None = None, limit: int = 500, with_lines: bool = True) -> list[StockCount]:
+        """Counts, newest first. ``with_lines=False`` (the Stocktake list) loads only the line totals
+        (``line_stats`` = lines, counted, differences) - an Excel import can have 10 000 lines."""
+        q = select(StockCount).order_by(StockCount.created_at.desc(), StockCount.id.desc()).limit(limit)
+        if with_lines:
+            q = q.options(selectinload(StockCount.lines))
         if status:
             q = q.where(StockCount.status == status)
         with self.db.read_session() as s:
-            return list(s.scalars(q).unique())
+            rows = list(s.scalars(q).unique())
+            if not with_lines and rows:
+                L = StockCountLine
+                stats = {cid: (n, counted or 0, diffs or 0) for cid, n, counted, diffs in s.execute(
+                    select(L.count_id, func.count(),
+                           func.sum(case((L.counted_qty.is_not(None), 1), else_=0)),
+                           func.sum(case((L.counted_qty.is_not(None) & (L.counted_qty != L.system_qty), 1),
+                                         else_=0)))
+                    .where(L.count_id.in_([c.id for c in rows])).group_by(L.count_id))}
+                for c in rows:
+                    c.line_stats = stats.get(c.id, (0, 0, 0))
+            return rows
 
     def get(self, count_id: int) -> StockCount:
         with self.db.read_session() as s:
@@ -186,6 +214,9 @@ class StocktakeService(BaseService):
         reason = clean_str(reason, "reason", required=True)
         with self.db.session() as s:
             c = self._open_count(s, count_id, (CountStatus.SUBMITTED,))
+            if c.kind == IMPORT_ADD:
+                raise ValidationError("An Excel import cannot be sent back for counting: approve it, or cancel it "
+                                      "and import a corrected file.")
             c.status = CountStatus.OPEN.value
             audit.record(s, self.ctx, "STOCK_COUNT_SENT_BACK", EntityType.STOCK_COUNT.value, c.id, c.count_number,
                          reason)
@@ -197,6 +228,8 @@ class StocktakeService(BaseService):
             c = s.get(StockCount, count_id)
             if c is None:
                 raise NotFoundError("Stock count not found.")
+            if c.kind == IMPORT_ADD:
+                return []
             engine = StockEngine(s, self.ctx)
             return [l for l in c.lines if engine.qty_in_bin(l.product_id, l.bin_id) != l.system_qty]
 
@@ -207,6 +240,8 @@ class StocktakeService(BaseService):
         self.require(P.STOCKTAKE_COUNT)
         with self.db.session() as s:
             c = self._open_count(s, count_id, (CountStatus.OPEN, CountStatus.SUBMITTED))
+            if c.kind == IMPORT_ADD:
+                return 0  # an import adds its quantities to whatever is there: nothing to re-check
             engine = StockEngine(s, self.ctx)
             n = 0
             for l in c.lines:
@@ -267,37 +302,73 @@ class StocktakeService(BaseService):
         return self.create(description="Bins to count", bin_ids=bins, extra_pairs=pairs)
 
     def approve(self, count_id: int, note: str | None = None) -> StockCount:
-        """Post every difference as a stock adjustment, all or nothing."""
-        self.require(P.STOCK_ADJUST)
-        from wms.services.stock_ops import StockOpsService
+        """Post every difference as a stock adjustment, all or nothing.
 
-        ops = StockOpsService(self.ctx)
+        The count is locked first (a second manager approving at the same moment waits, then sees it
+        is already approved) and the bin balances are locked and read in bulk, so a count of
+        10 000 lines (an Excel stock import) posts in a few statements."""
+        self.require(P.STOCK_ADJUST)
         with self.db.session() as s:
+            c = s.scalar(select(StockCount).where(StockCount.id == count_id)
+                         .with_for_update(of=StockCount).execution_options(populate_existing=True))
+            if c is None:
+                raise NotFoundError("Stock count not found.")
             c = self._open_count(s, count_id, (CountStatus.SUBMITTED,))
+            lines = list(s.scalars(select(StockCountLine).where(StockCountLine.count_id == c.id)
+                                   .order_by(StockCountLine.line_no)))
             engine = StockEngine(s, self.ctx)
-            moved = [l for l in c.lines if engine.qty_in_bin(l.product_id, l.bin_id) != l.system_qty]
-            if moved:
-                first = moved[0]
-                raise ValidationError(
-                    f"Stock moved in {len(moved)} counted bin(s) after the count started (first: "
-                    f"{first.product.internal_code} in {first.bin.full_code}). Use 'Re-check moved lines' and "
-                    f"count those again before approving.")
-            posted = 0
-            for l in c.lines:
-                if not l.difference:
-                    continue
-                adj = ops.adjust_in_session(
-                    s, l.product_id, l.bin_id, l.counted_qty, AdjustmentReason.STOCK_COUNT.value,
-                    f"{c.count_number}: counted {fmt_qty(l.counted_qty)}, system {fmt_qty(l.system_qty)}"
-                    + (f" - {l.notes}" if l.notes else ""),
-                    expected_previous=l.system_qty, from_stocktake=True)
-                l.adjustment_id = adj.id
-                posted += 1
+            levels = engine.lock_levels(((l.product_id, l.bin_id) for l in lines), create=True)
+
+            def now(l):
+                lvl = levels.get((l.product_id, l.bin_id))
+                return lvl.quantity if lvl else ZERO
+            adding = c.kind == IMPORT_ADD
+            if not adding:  # a count replaces the system quantity: it must still be the one counted against
+                moved = [l for l in lines if now(l) != l.system_qty]
+                if moved:
+                    first = moved[0]
+                    raise ValidationError(
+                        f"Stock moved in {len(moved)} counted bin(s) after the count started (first: "
+                        f"{first.product.internal_code} in {first.bin.full_code}). Use 'Re-check moved lines' and "
+                        f"count those again before approving.")
+            # an Excel import adds its quantity (counted - system, fixed when imported) to whatever is there now
+            todo = [l for l in lines if l.difference]
+            code = AdjustmentReason.OPENING_BALANCE.value if adding else AdjustmentReason.STOCK_COUNT.value
+            mtype = MovementType.OPENING_BALANCE if adding else MovementType.STOCKTAKE_ADJUSTMENT
+            label = require_reason(s, code, ReasonUse.ADJUSTMENT).label
+            numbers = next_numbers(s, "ADJUSTMENT", len(todo))
+            adjs = []
+            for l, number in zip(todo, numbers):
+                before = now(l)
+                if adding:
+                    reason = f"{c.count_number}: +{fmt_qty(l.difference)} from Excel" + (
+                        f" ({l.notes})" if l.notes else "")
+                else:
+                    reason = (f"{c.count_number}: counted {fmt_qty(l.counted_qty)}, system {fmt_qty(l.system_qty)}"
+                              + (f" - {l.notes}" if l.notes else ""))
+                adjs.append(StockAdjustment(adjustment_number=number, product_id=l.product_id, bin_id=l.bin_id,
+                                            previous_qty=before, new_qty=before + l.difference,
+                                            difference=l.difference, reason_code=code,
+                                            reason=reason, user_id=self.user.id))
+            s.add_all(adjs)
+            s.flush()
+            moves = engine.post_many([
+                BulkLine(l.product, l.bin, l.difference, mtype,
+                         doc_type=EntityType.ADJUSTMENT.value, doc_id=a.id, doc_number=a.adjustment_number,
+                         notes=f"{label}: {a.reason}") for l, a in zip(todo, adjs)])
+            for l, a, mv in zip(todo, adjs, moves):
+                a.movement_id = mv.id
+                l.adjustment_id = a.id
+                audit.record(s, self.ctx, "STOCK_ADJUSTED", "PRODUCT", l.product_id,
+                             f"{l.product.internal_code} @ {l.bin.full_code}", f"{a.adjustment_number}: {label} - "
+                             f"{a.reason}", old={"quantity": a.previous_qty},
+                             new={"quantity": a.new_qty, "difference": l.difference})
+            posted = len(adjs)
             c.status = CountStatus.APPROVED.value
             c.closed_by_id, c.closed_at, c.close_reason = self.user.id, utcnow(), clean_str(note)
             # a flag is closed only by a count that started after it was raised and counted that
             # product in that bin (a flag for the whole bin: any line in the bin)
-            counted = {(l.bin_id, l.product_id) for l in c.lines}
+            counted = {(l.bin_id, l.product_id) for l in lines}
             counted_bins = {b for b, _ in counted}
             for req in s.scalars(select(BinCountRequest).where(BinCountRequest.resolved_at.is_(None),
                                                                BinCountRequest.bin_id.in_(counted_bins),
@@ -305,7 +376,7 @@ class StocktakeService(BaseService):
                 if req.product_id is None or (req.bin_id, req.product_id) in counted:
                     req.resolved_at, req.resolved_count_id = c.closed_at, c.id
             audit.record(s, self.ctx, "STOCK_COUNT_APPROVED", EntityType.STOCK_COUNT.value, c.id, c.count_number,
-                         f"{posted} adjustment(s) posted from {len(c.lines)} counted line(s).")
+                         f"{posted} adjustment(s) posted from {len(lines)} counted line(s).")
         return self.get(count_id)
 
     def cancel(self, count_id: int, reason: str) -> StockCount:

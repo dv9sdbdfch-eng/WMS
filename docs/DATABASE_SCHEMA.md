@@ -698,6 +698,8 @@ Protected tables (database triggers, see `wms.db.engine`):
 | Column | Type | Null | Key / reference |
 |---|---|---|---|
 | count_number | String(30) | no | UNIQUE |
+| kind | String(20) | no |  |
+| source_sha256 | String(64) | yes | indexed |
 | status | String(20) | no | indexed |
 | location_id | Integer | yes | FK locations.id, indexed |
 | description | String(200) | yes |  |
@@ -710,6 +712,8 @@ Protected tables (database triggers, see `wms.db.engine`):
 | closed_at | UTCDateTime | yes |  |
 | close_reason | Text | yes |  |
 | id | Integer | no | PK |
+
+* CHECK kind IN ('COUNT', 'IMPORT_ADD')
 
 ## stock_levels
 

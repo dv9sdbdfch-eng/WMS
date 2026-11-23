@@ -14,7 +14,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import Date, Index, Integer, String, Text, UniqueConstraint, text
+from sqlalchemy import CheckConstraint, Date, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from wms.core.numbers import utcnow
@@ -410,8 +410,14 @@ class StockCount(IdMixin, Base):
     """
 
     __tablename__ = "stock_counts"
+    __table_args__ = (CheckConstraint("kind IN ('COUNT', 'IMPORT_ADD')", name="kind_valid"),)
 
     count_number: Mapped[str] = mapped_column(String(30), unique=True, nullable=False)
+    #: COUNT = physical count (counted replaces system); IMPORT_ADD = Excel import (v1.38): each line's
+    #: difference (counted - system, fixed when imported) is ADDED to the bin when approved
+    kind: Mapped[str] = mapped_column(String(20), nullable=False, default="COUNT", server_default="COUNT")
+    #: SHA-256 of the imported file, so the same file is not added twice
+    source_sha256: Mapped[str | None] = mapped_column(String(64), index=True)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="OPEN", index=True)
     location_id: Mapped[int | None] = fk("locations.id")
     description: Mapped[str | None] = mapped_column(String(200))

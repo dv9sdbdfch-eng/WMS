@@ -149,6 +149,65 @@ def test_two_pcs_add_a_new_revision_of_the_same_drawing(svc, cfg, tmp_path):
     assert sorted((a.revision, a.doc_status) for a in rows) == [("B", "SUPERSEDED"), ("C", "APPROVED")]
 
 
+def test_two_managers_approve_the_same_count(svc, sample, cfg, tmp_path):
+    """The count is locked: one approval posts, the other is told it is already approved."""
+    from openpyxl import Workbook
+
+    from wms.core.exceptions import ValidationError
+    sample.receive(sample.mdf, 10)
+    wb = Workbook()
+    wb.active.append(["Code", "Bin", "Quantity"])
+    wb.active.append(["MDF-18", sample.bin1.full_code, 6])
+    wb.save(tmp_path / "s.xlsx")
+    count = svc.stock_import.create_count(svc.stock_import.read(tmp_path / "s.xlsx"))
+    results, errors = together(pcs(cfg, 2), lambda pc, i: pc.stocktake.approve(count.id))
+    assert len(results) == 1 and len(errors) == 1
+    assert isinstance(next(iter(errors.values())), ValidationError)
+    [a] = svc.stock.adjustments()
+    assert (a.previous_qty, a.new_qty) == (D("10"), D("16"))
+
+
+def test_two_pcs_adjust_the_same_bin(svc, sample, cfg):
+    """The balance is locked before it is read: the second PC sees the first one's result."""
+    from wms.core.exceptions import ValidationError
+    sample.receive(sample.mdf, 10)
+    results, errors = together(pcs(cfg, 2), lambda pc, i: pc.stock.adjust(
+        sample.mdf.id, sample.bin1.id, 4 + i, "STOCK_COUNT", "recount", expected_previous=D("10")))
+    assert len(results) == 1 and len(errors) == 1
+    assert isinstance(next(iter(errors.values())), ValidationError)
+    [a] = svc.stock.adjustments()
+    assert a.previous_qty == D("10")
+
+
+def _bin_qty(svc, product_id, bin_id):
+    from wms.services.stock_engine import StockEngine
+    with svc.ctx.db.read_session() as s:
+        return StockEngine(s, svc.ctx).qty_in_bin(product_id, bin_id)
+
+
+def test_two_counts_put_first_stock_into_the_same_empty_bin(svc, sample, cfg):
+    """No balance row to lock yet: one is created first, so the second approval waits and is refused."""
+    from wms.core.exceptions import ValidationError
+    from wms.services.stocktake import CountEntry
+    ids = []
+    for _ in range(2):
+        c = svc.stocktake.create(None, extra_pairs=[(sample.mdf.id, sample.bin2.id)], bin_ids=[sample.bin2.id])
+        svc.stocktake.record_counts(c.id, [CountEntry(c.lines[0].id, "5")])
+        svc.stocktake.submit(c.id)
+        ids.append(c.id)
+    results, errors = together(pcs(cfg, 2), lambda pc, i: pc.stocktake.approve(ids[i]))
+    assert len(results) == 1 and isinstance(next(iter(errors.values())), ValidationError)
+    assert _bin_qty(svc, sample.mdf.id, sample.bin2.id) == D("5")
+
+
+def test_two_pcs_adjust_the_same_empty_bin(svc, sample, cfg):
+    from wms.core.exceptions import ValidationError
+    results, errors = together(pcs(cfg, 2), lambda pc, i: pc.stock.adjust(
+        sample.mdf.id, sample.bin2.id, 5, "STOCK_COUNT", "recount", expected_previous=D("0")))
+    assert len(results) == 1 and isinstance(next(iter(errors.values())), ValidationError)
+    assert _bin_qty(svc, sample.mdf.id, sample.bin2.id) == D("5")
+
+
 def test_server_guards_match_sqlite(svc, sample):
     """The protective triggers work on PostgreSQL as on SQLite: a posted line or a reversed
     document cannot be changed, stock records cannot be deleted, the ledger is append-only."""
