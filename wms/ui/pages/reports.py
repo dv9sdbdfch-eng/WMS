@@ -72,6 +72,9 @@ class ReportsPage(Page):
         self.date_to.set_value(date.today())
         self.dates_row = QWidget()
         self.dates_row.setLayout(h(self.date_from, label("to", "Muted"), self.date_to, None))
+        self.as_at = OptionalDateEdit()  # v1.39: valuation at a date (end of that day)
+        self.as_at.set_value(date.today())
+        self.as_at.setToolTip("The stock and its value at the end of this day")
         self.product = PickCombo("All products")
         self.supplier = PickCombo("All suppliers")
         self.site = PickCombo("All sites")
@@ -83,10 +86,10 @@ class ReportsPage(Page):
         self.text = QLineEdit()
         self.text.setPlaceholderText("Optional search text")
         self.text.returnPressed.connect(self.run_report)
-        self.filter_widgets = {"dates": self.dates_row, "product": self.product, "supplier": self.supplier,
+        self.filter_widgets = {"as_at": self.as_at, "dates": self.dates_row, "product": self.product, "supplier": self.supplier,
                                "site": self.site, "location": self.location, "item_type": self.item_type,
                                "text": self.text}
-        for key, text in (("dates", "Dates"), ("product", "Product"), ("supplier", "Supplier"), ("site", "Site"),
+        for key, text in (("as_at", "As at"), ("dates", "Dates"), ("product", "Product"), ("supplier", "Supplier"), ("site", "Site"),
                           ("location", "Location"), ("item_type", "Type"), ("text", "Search")):
             self.form.addRow(text, self.filter_widgets[key])
         rl.addLayout(self.form)
@@ -142,6 +145,8 @@ class ReportsPage(Page):
     def _filters(self) -> ReportFilters:
         d = self._current()
         f = ReportFilters()
+        if "as_at" in d.filters:
+            f.as_at = self.as_at.value()
         if "dates" in d.filters:
             f.date_from, f.date_to = self.date_from.value(), self.date_to.value()
         if "product" in d.filters:
