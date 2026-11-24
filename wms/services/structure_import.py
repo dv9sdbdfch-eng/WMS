@@ -187,12 +187,27 @@ class ProjectPlan:
 
 
 @dataclass
+class MissingUnit:
+    """A unit in the WMS, in a project the workbook imports into, that no row of the workbook names
+    (v1.39). Shown so the person can see what the file leaves out; the import never touches it."""
+
+    project_no: str
+    block: str
+    level: str
+    unit_code: str
+    unit_name: str
+    quantity: Decimal
+
+
+@dataclass
 class StructurePlan:
     source: Path
     units: list[Row]
     materials: list[Row]
     projects: dict[str, ProjectPlan]
     problems: list[str] = field(default_factory=list)  # workbook-level (missing sheet / columns)
+    #: units in the WMS (in the workbook's projects) that the workbook does not name (v1.39)
+    missing: list[MissingUnit] = field(default_factory=list)
 
     @property
     def rows(self) -> list[Row]:
@@ -227,6 +242,8 @@ class StructurePlan:
                  f"new blocks: {blocks}, new levels: {levels}",
                  f"Units: {self.count(self.units, NEW)} new, {self.count(self.units, UPDATE)} to update, "
                  f"{self.count(self.units, SAME)} unchanged"]
+        if self.missing:
+            parts.append(f"In the WMS but not in the workbook: {len(self.missing)} unit(s), left as they are")
         if self.materials:
             parts.append(f"Unit materials: {self.count(self.materials, NEW)} new, "
                          f"{self.count(self.materials, UPDATE)} to update, {self.count(self.materials, SAME)} unchanged")
@@ -263,6 +280,7 @@ class _Known:
     by_name: dict[tuple, list[ProjectUnit]] = field(default_factory=dict)     # (place, name key) -> units
     lines: dict[tuple[int, int], UnitMaterial] = field(default_factory=dict)  # (unit id, product id) -> line
     names: dict[str, Site] = field(default_factory=dict)                      # name key -> site (any project)
+    units: list[tuple[ProjectUnit, tuple[str, str, str]]] = field(default_factory=list)  # unit, (number, block, level)
 
 
 def _number_key(number: str) -> str:
@@ -300,6 +318,7 @@ class StructureImportService(BaseService):
                 known = self._known(s, plan)
                 self._check_units(s, plan, known)
                 self._check_materials(s, plan, known)
+                plan.missing = _missing_units(plan, known)
         return plan
 
     # -- reading the database ----------------------------------------------------------------------
@@ -318,11 +337,14 @@ class StructureImportService(BaseService):
         if not site_ids:
             return k
         block_key: dict[int, tuple[str, str]] = {}
+        names: dict[int, tuple[str, str]] = {}  # level id -> (block name, level name), for "not in the workbook"
+        block_name: dict[int, str] = {}
         for b in s.scalars(select(ProjectBlock).where(ProjectBlock.site_id.in_(list(site_ids)))
                            .order_by(ProjectBlock.sort_order, ProjectBlock.id)):
             key = (site_ids[b.site_id], _key(b.name))
             k.blocks.setdefault(key, b.id)
             block_key[b.id] = key
+            block_name[b.id] = b.name
         level_place: dict[int, tuple[str, str, str]] = {}
         if block_key:
             for lv in s.scalars(select(ProjectLevel).where(ProjectLevel.block_id.in_(list(block_key)))
@@ -331,6 +353,7 @@ class StructureImportService(BaseService):
                 key = (bk[0], bk[1], _key(lv.name))
                 k.levels.setdefault(key, lv.id)
                 level_place[lv.id] = key
+                names[lv.id] = (block_name[lv.block_id], lv.name)
         unit_ids = []
         for u in s.scalars(select(ProjectUnit).where(ProjectUnit.site_id.in_(list(site_ids)))
                            .order_by(ProjectUnit.sort_order, ProjectUnit.id)):
@@ -341,6 +364,8 @@ class StructureImportService(BaseService):
                 k.by_code.setdefault((place, code_key(u.unit_code)), u)
             k.by_name.setdefault((place, _key(u.name)), []).append(u)
             unit_ids.append(u.id)
+            block, level = names.get(u.level_id, ("", "")) if u.level_id else ("", "")
+            k.units.append((u, (k.sites[site_ids[u.site_id]].project_number, block, level)))
         for i in range(0, len(unit_ids), 900):
             for line in s.scalars(select(UnitMaterial).where(UnitMaterial.unit_id.in_(unit_ids[i:i + 900]))):
                 k.lines.setdefault((line.unit_id, line.product_id), line)
@@ -751,6 +776,25 @@ class _Writer:
 
 
 # ---- helpers ------------------------------------------------------------------------------------
+def _missing_units(plan: StructurePlan, k: _Known) -> list[MissingUnit]:
+    """Units of the workbook's projects (already in the WMS) that no Structure row names. A row with an
+    error still counts as naming its unit, so a typo in the quantity does not list the unit as missing."""
+    named: set[int] = set()
+    for r in plan.units:
+        if r.existing_id is not None:
+            named.add(r.existing_id)
+        elif r.place[0] and r.get("unit_name"):
+            u = _find_unit(k, r.place, r.get("unit_code"), r.get("unit_name"))
+            if u is not None:
+                named.add(u.id)
+    projects = set(plan.projects)
+    out = [MissingUnit(number, block, level, u.unit_code or "", u.name, u.quantity)
+           for u, (number, block, level) in k.units
+           if u.id not in named and _number_key(number) in projects]
+    out.sort(key=lambda m: (m.project_no, _key(m.block), _key(m.level), m.unit_code, m.unit_name))
+    return out
+
+
 def _unit_key(place: tuple, code: str, name: str) -> tuple:
     return (place, "C", code_key(code)) if code else (place, "N", _key(name))
 
@@ -964,9 +1008,21 @@ def export_problems(plan: StructurePlan, dest: str | Path) -> Path:
                        r.get("material_code"), r.problems])
     for col, w in zip("ABCDEFG", (12, 10, 10, 26, 24, 18, 90), strict=True):
         ws.column_dimensions[col].width = w
+    if plan.missing:
+        ws2 = wb.create_sheet("Not in workbook")
+        ws2.append(["Units in the WMS that the workbook does not name (the import leaves them as they are)"])
+        ws2["A1"].font = Font(bold=True, size=13)
+        ws2.append(["Project No", "Block", "Level", "Unit Code", "Unit Name", "Quantity"])
+        for c in ws2[2]:
+            c.font = Font(bold=True)
+        for m in plan.missing:
+            ws2.append([m.project_no, m.block, m.level, m.unit_code, m.unit_name, m.quantity])
+        for col, w in zip("ABCDEF", (14, 18, 18, 14, 32, 10), strict=True):
+            ws2.column_dimensions[col].width = w
     wb.save(dest)
     return dest
 
 
-__all__ = ["ERROR", "NEW", "SAME", "UPDATE", "Row", "StructureImportService", "StructurePlan", "StructureResult",
+__all__ = ["ERROR", "NEW", "SAME", "UPDATE", "MissingUnit", "Row", "StructureImportService", "StructurePlan",
+           "StructureResult",
            "export_problems", "write_template"]

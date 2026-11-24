@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from wms.core.exceptions import ValidationError
+from wms.core.numbers import fmt_qty
 from wms.services.structure_import import (
     ERROR,
     NEW,
@@ -39,6 +40,7 @@ STATUS_BG = {NEW: QBrush(QColor("#ECFDF3")), UPDATE: QBrush(QColor("#EFF8FF")), 
 WARN_BG = QBrush(QColor("#FFF4D6"))
 UNIT_COLS = ["Row", "Status", "Project No", "Block", "Level", "Unit Code", "Unit Name", "Quantity", "Changes",
              "Errors / notes"]
+MISSING_COLS = ["Project No", "Block", "Level", "Unit Code", "Unit Name", "Quantity", "What happens"]
 MAT_COLS = ["Row", "Status", "Project No", "Block", "Level", "Unit", "Material Code", "Qty per Unit", "VPK Code",
             "Changes", "Errors / notes"]
 #: filter on the preview: (label, statuses or None for "with errors / notes")
@@ -77,13 +79,18 @@ class StructureImportDialog(QDialog):
             self.filter.addItem(text)
         self.filter.currentIndexChanged.connect(lambda _i: self._fill())
         self.export_btn = button("Export problems...", self.export_problems,
-                                 tooltip="Save the rows with errors and notes to Excel, to fix the workbook")
+                                 tooltip="Save the rows with errors and notes (and the units not in the workbook) "
+                                         "to Excel, to fix the workbook")
         lay.addLayout(h(label("Show"), self.filter, None, self.export_btn))
         self.tabs = QTabWidget()
         self.units_table = self._table(UNIT_COLS)
         self.mats_table = self._table(MAT_COLS)
         self.tabs.addTab(self.units_table, "Structure")
         self.tabs.addTab(self.mats_table, "Materials")
+        self.missing_table = self._table(MISSING_COLS)
+        self.missing_table.setToolTip("Units already in the WMS, in the workbook's projects, that no row of the "
+                                      "workbook names. The import leaves them exactly as they are.")
+        self.tabs.addTab(self.missing_table, "Not in workbook")
         lay.addWidget(self.tabs, 1)
         self.import_btn = button("Import", self.do_import, primary=True)
         self.close_btn = button("Close", self.reject)
@@ -161,11 +168,25 @@ class StructureImportDialog(QDialog):
             str(r.row), r.status, r.get("project_no"), r.get("block"), r.get("level"),
             r.get("unit_code") or r.get("unit_name"), r.get("material_code"), r.get("qty_per_unit"),
             r.get("vpk_code"), "; ".join(r.changes), r.problems])
+        self._fill_missing(plan)
         self.tabs.setTabText(0, f"Structure ({len(plan.units)})")
         self.tabs.setTabText(1, f"Materials ({len(plan.materials)})")
+        self.tabs.setTabText(2, f"Not in workbook ({len(plan.missing)})")
         if not plan.units and plan.materials:
             self.tabs.setCurrentIndex(1)
         self._update_buttons()
+
+    def _fill_missing(self, plan: StructurePlan) -> None:
+        """Units in the WMS that the workbook leaves out (always all of them, whatever the filter)."""
+        t = self.missing_table
+        t.setRowCount(len(plan.missing))
+        for n, m in enumerate(plan.missing):
+            for c, text in enumerate((m.project_no, m.block, m.level, m.unit_code, m.unit_name, fmt_qty(m.quantity),
+                                      "Stays in the WMS unchanged")):
+                t.setItem(n, c, QTableWidgetItem(text))
+        for c in range(t.columnCount() - 1):
+            t.resizeColumnToContents(c)
+            t.setColumnWidth(c, min(t.columnWidth(c), 260))
 
     @staticmethod
     def _rows(table: QTableWidget, rows, cells) -> None:
@@ -190,7 +211,7 @@ class StructureImportDialog(QDialog):
     def _update_buttons(self) -> None:
         plan = self.plan
         self.import_btn.setEnabled(bool(plan and plan.can_import))
-        self.export_btn.setEnabled(bool(plan and (plan.errors or any(r.warnings for r in plan.rows))))
+        self.export_btn.setEnabled(bool(plan and (plan.errors or plan.missing or any(r.warnings for r in plan.rows))))
 
     def export_problems(self, path: str | None = None):
         if self.plan is None:

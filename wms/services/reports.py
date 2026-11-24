@@ -5,10 +5,10 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
 from wms.core.enums import (
@@ -63,6 +63,7 @@ class ReportFilters:
     location_id: int | None = None
     item_type: str | None = None
     text: str | None = None
+    as_at: date | None = None  # v1.39: "Stock Valuation at a Date" (None = today)
 
 
 @dataclass
@@ -140,6 +141,8 @@ class ReportService(BaseService):
     def _describe(self, f: ReportFilters, allowed: set[str]) -> str:
         from wms.core.numbers import fmt_date
         parts = []
+        if "as_at" in allowed:
+            parts.append(f"As at: {fmt_date(f.as_at or date.today())}")
         if "dates" in allowed and (f.date_from or f.date_to):
             parts.append(f"Dates: {fmt_date(f.date_from) or 'start'} to {fmt_date(f.date_to) or 'today'}")
         with self.db.read_session() as s:
@@ -451,6 +454,106 @@ class ReportService(BaseService):
                                  r.reason or "", r.status.title()])
         return ReportResult("Returns", cols, data)
 
+    @staticmethod
+    def _product_rows(s, item_type: str | None, wanted) -> dict[int, tuple]:
+        """(id, code, name, type, unit, unit cost) of the ``wanted`` products. Reads every product and
+        keeps the wanted ones, instead of an IN list: SQLite allows ~32,000 values in one query and a
+        report over 50,000 materials would go past that."""
+        q = (select(Product.id, Product.internal_code, Product.name, Product.item_type, Unit.code, Product.unit_cost)
+             .join(Unit, Unit.id == Product.unit_id))
+        if item_type:
+            q = q.where(Product.item_type == item_type)
+        return {r[0]: tuple(r) for r in s.execute(q) if r[0] in wanted}
+
+    def valuation_at(self, f: ReportFilters) -> ReportResult:
+        """v1.39: stock and its value at the end of a past day (Ihor 23.11.2026).
+
+        Quantity = every movement up to the end of that day, per bin (so it is what the ledger says
+        was on the shelves then, whatever happened later). Price = the unit cost of the LAST Goods In
+        of the material on or before that day (posted delivery notes only, so a reversed delivery does
+        not count); a material never bought by then is valued at its unit cost on the product card,
+        and the Price From column says which one was used."""
+        from wms.core.numbers import fmt_date
+        as_at = f.as_at or date.today()
+        end = datetime.combine(as_at, datetime.max.time()).astimezone()
+        m = StockMovement
+        qty: dict[tuple[int, int], Decimal] = {}
+        with self.db.read_session() as s:
+            for bin_col, sign in ((m.to_bin_id, 1), (m.from_bin_id, -1)):
+                q = (select(m.product_id, bin_col, func.sum(m.quantity))
+                     .where(bin_col.is_not(None), m.occurred_at <= end).group_by(m.product_id, bin_col))
+                if f.product_id:
+                    q = q.where(m.product_id == f.product_id)
+                for pid, bid, total in s.execute(q):
+                    qty[(pid, bid)] = qty.get((pid, bid), ZERO) + sign * Decimal(total)
+            if f.location_id:
+                from wms.db.models import Location
+                loc = s.get(Location, f.location_id)
+                in_place = set() if loc is None else set(s.scalars(  # a removed location: nothing
+                    select(Bin.id).where(Bin.full_code.like(prefix_pattern(loc.path), escape="\\"))))
+                qty = {k: v for k, v in qty.items() if k[1] in in_place}
+            per_product: dict[int, Decimal] = {}
+            for (pid, _bid), q in qty.items():
+                per_product[pid] = per_product.get(pid, ZERO) + q
+            per_product = {pid: q for pid, q in per_product.items() if q != ZERO}
+            products = self._product_rows(s, f.item_type, per_product) if per_product else {}
+            rn = func.row_number().over(
+                partition_by=DeliveryNoteLine.product_id,
+                order_by=(DeliveryNote.delivery_date.desc(), DeliveryNote.id.desc(), DeliveryNoteLine.id.desc()))
+            last = (select(DeliveryNoteLine.product_id.label("pid"), DeliveryNoteLine.unit_cost.label("cost"),
+                           DeliveryNote.delivery_date.label("day"), rn.label("rn"))
+                    .join(DeliveryNote, DeliveryNote.id == DeliveryNoteLine.delivery_note_id)
+                    .where(DeliveryNote.status == DocumentStatus.POSTED.value,
+                           DeliveryNoteLine.unit_cost.is_not(None), DeliveryNote.delivery_date <= as_at)
+                    ).subquery()
+            prices = {pid: (Decimal(cost), day) for pid, cost, day in
+                      s.execute(select(last.c.pid, last.c.cost, last.c.day).where(last.c.rn == 1))
+                      if pid in products}
+        data = []
+        for pid, (_id, code, name, item_type, unit, card_cost) in sorted(products.items(), key=lambda x: x[1][1]):
+            q = per_product[pid]
+            if pid in prices:
+                cost, day = prices[pid]
+                source = f"Goods In {fmt_date(day)}"
+            else:
+                cost, source = card_cost, "Product card" if card_cost is not None else "No price"
+            data.append([code, name, ItemType(item_type).label, q, unit, cost, source,
+                         (q * (cost or ZERO)).quantize(Decimal("0.01"))])
+        cols = [Column("Code"), Column("Name"), Column("Type"), Column("Quantity", QTY), Column("Unit"),
+                Column("Unit Price", MONEY), Column("Price From"), Column("Value", MONEY, True)]
+        # The date is in the filters line (As at ...): a title also names the Excel sheet and the file,
+        # where "/" is not allowed.
+        return ReportResult("Stock Valuation", cols, data)
+
+    def stock_by_project(self, f: ReportFilters) -> ReportResult:
+        """v1.39: what each project holds right now - delivered for it (Goods In with the project) and
+        not yet issued or used - with its value at the current unit cost. Same figures as the
+        project's own Project Stock list, for every project at once."""
+        from wms.core.enums import SiteStatus
+        from wms.services.reservations import active_reservations, issued_by_reservation
+        agg: dict[tuple[int, int], Decimal] = {}
+        with self.db.read_session() as s:
+            rows = active_reservations(s, [f.product_id] if f.product_id else None, site_id=f.site_id)
+            issued = issued_by_reservation(s)  # every row at once: no IN list of thousands of ids
+            for r in rows:
+                left = r.quantity - issued.get(r.id, ZERO)
+                if left > ZERO:
+                    agg[(r.site_id, r.product_id)] = agg.get((r.site_id, r.product_id), ZERO) + left
+            used_sites = {k[0] for k in agg}
+            sites = {x.id: x for x in s.scalars(select(Site)) if x.id in used_sites}
+            prods = self._product_rows(s, f.item_type, {k[1] for k in agg}) if agg else {}
+            data = []
+            for (sid, pid), q in agg.items():
+                if pid not in prods:
+                    continue
+                site, (_id, code, name, _t, unit, cost) = sites[sid], prods[pid]
+                data.append([site.display, SiteStatus(site.status).label, code, name, q, unit, cost,
+                             (q * (cost or ZERO)).quantize(Decimal("0.01"))])
+        data.sort(key=lambda r: (r[0], r[2]))
+        cols = [Column("Project"), Column("Status"), Column("Code"), Column("Material"), Column("Project Stock", QTY),
+                Column("Unit"), Column("Unit Cost", MONEY), Column("Value", MONEY, True)]
+        return ReportResult("Stock by Project", cols, data)
+
     def adjustments(self, f: ReportFilters) -> ReportResult:
         rows = StockOpsService(self.ctx).adjustments(text=f.text, date_from=f.date_from, date_to=f.date_to,
                                                      limit=None)
@@ -479,6 +582,13 @@ REPORTS: list[ReportDef] = [
     ReportDef("project_history", "Project Material History",
               "Every issue and return for a site / project, with document, reference and user.",
               {"dates", "site", "product"}, ReportService.project_history),
+    ReportDef("valuation_at", "Stock Valuation at a Date",
+              "Stock on hand at the end of a past day, valued at the price of the last Goods In on or before that "
+              "day (the product card price when there was none).",
+              {"as_at", "product", "item_type", "location"}, ReportService.valuation_at),
+    ReportDef("stock_by_project", "Stock by Project",
+              "Material each project holds now (delivered for it and not yet issued), with its value.",
+              {"site", "product", "item_type"}, ReportService.stock_by_project),
     ReportDef("stock_by_location", "Stock by Location", "Current stock grouped by warehouse location.",
               {"location", "product", "item_type"}, ReportService.stock_by_location),
     ReportDef("stock_by_bin", "Stock by Bin", "Current stock in every bin.",
